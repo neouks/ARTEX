@@ -235,16 +235,17 @@ func truncOutput(s string, n int) string {
 }
 
 // renderGraphOverview folds the pre-computed graph_overview snapshot into the
-// wake-up prompt so the planner starts each round with the full situation in
-// hand — saving the round-trip it would otherwise spend calling the tool. It is
-// the exact same JSON graph_overview would return; deeper detail is still one
+// wake-up prompt so the planner starts each round with a bounded situation in
+// hand, saving the round-trip it would otherwise spend fetching an overview. The
+// lightweight tagged projection is bounded; full persisted detail remains one
 // tool call away (node_detail / list_facts / …).
 func renderGraphOverview(data map[string]any) string {
-	b, err := json.Marshal(data)
-	if err != nil {
-		return "" // fall back to the model calling graph_overview itself
-	}
-	return "\n\n【本轮态势（graph_overview 预取，等同你调用该工具的返回；需要细节再按需调 node_detail/list_facts 等）】：\n" + string(b)
+	const plannerOverviewMaxRunes = 24_000
+	return "\n\n【本轮态势（graph_overview 的轻量预取；需要细节再按需调 node_detail/list_facts 等）】：\n" +
+		renderLightTaggedOrdered("graph_overview", data, []string{
+			"task", "frontier_open", "findings", "facts", "running_intents", "goals", "hints",
+			"open_intents", "recent_done_intents", "recent_facts", "coverage", "related_tasks",
+		}, plannerOverviewMaxRunes)
 }
 
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
@@ -260,10 +261,10 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 反过来：若确有【未被任何意图覆盖、且不依赖在跑 work】的新方向，或【目标尚未达成且范围内仍有未测面】，就【不要】因为"0 意图常见"而收手——该派就派。别把 0 意图当成偷懒的默认。
 
 决策流程（每次唤醒）：
-1. **完整态势已直接附在本提示下方（就是 graph_overview 的返回，无需再调它）**：task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}，含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图）。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。需要更深的细节时才按需调：list_facts 分页列事实（最新在前，默认 20 条，可传 q 关键词过滤、before 翻页，返回带 total/has_more）、list_findings 列全部漏洞、**node_detail(id)** 取某条的完整证据/详情（列表/recent_facts 只给摘要）。
-   - open_intents / running_intents / recent_done_intents——"哪些方向已经有意图在覆盖/已尝试"。每个意图还带 **parents（上游：它派生自哪些事实/意图）和 yields（下游：它产生了哪些事实/发现）**——这就是探索图的**血缘关系**，据此理解"哪些事实来自哪个方向、能否综合成新方向"。recent_facts 里每个事实带 **from_intent**（由哪个意图产生）。
+1. **轻量态势快照已直接附在本提示下方，无需先调工具获取总览**：它包含 task（**原始任务标题+目标**，即根节点）、资产计数、goals 及其状态、open/running/recent_done 意图、sites_without_endpoints、findings（**确认漏洞**数）、facts（**探索事实/结论**数，与漏洞是两类）、recent_facts（最近事实的 {id, summary, confidence?}）。快照有长度上限，若出现 truncated=true，或确实需要完整细节，再按需调用 list_facts、list_findings、node_detail、list_assets。recent_facts 含"端口关闭/不可注入"等**否定结论**——据此别再为已探明的死路生成意图；但 confidence=inferred 的否定结论只是【推断】、证据弱，别当铁案，若该方向对目标很关键值得派一条复核意图。**这里的探索节点（goals/意图/facts/findings）都只含本任务的**（绝不会有别的任务的目标）；**资产图则全局共享**（多任务同一份，资产计数是全局在范围内的数据，非本任务独有）。list_facts 最新在前、默认 20 条，可传 q 关键词过滤和 before 翻页；node_detail(id) 用于读取某条探索节点的完整证据/详情。
+   - open_intents / running_intents / recent_done_intents——"哪些方向已经有意图在覆盖/已尝试"。每个意图还带 **parents（上游：它派生自哪些事实/发现）和 yields（下游：它产生了哪些事实/发现）**——这就是探索图的**血缘关系**，据此理解"哪些事实来自哪个方向、能否综合成新方向"。recent_facts 里每个事实带 **from_intent**（由哪个意图产生）。
    - sites_without_endpoints / findings——"哪些方向【可能】需要探索"。
-   - 只有需要某一片的细节时，才**按需**调 list_assets（pull 模式：可用 q 关键字搜索，可叠加 type/company_id/task_id 过滤，分页 limit/offset；或用 id/ids 直接取）、asset_neighbors、list_findings。资产图全局共享，别默认拉全量。资产中可能包含非本次任务涉及到的资产，所以需要主要出现非本次任务相关的资产时忽略这些资产。
+   - 只有需要某一片的细节时，才**按需**调 list_assets（pull 模式：用 dsl 表达式搜索，可叠加 type 过滤并分页；或用 id/ids 直接取）、list_findings。资产图全局共享，别默认拉全量。资产中可能包含非本次任务涉及到的资产，所以需要主要出现非本次任务相关的资产时忽略这些资产。
 2. 判目标（核心职责）：graph_overview 的 goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id,evidence_id,reason) 标记 met。**当你用 prove_goal 标记的这一个恰好是最后一个未完成目标时，系统会自动判定整个任务完成**——收官完全由逐个 prove_goal 驱动，你无需、也没有别的“一键完成”手段。
    ⚠️ **量化验收核对（严禁提前盖章）**：若某目标含【可量化的验收条件】（如"资产测试覆盖度达到 X%"、"拿到 N 个 flag"、"获得某权限"），prove_goal **前【必须】核对本提示上方 graph_overview 里的实测值**（coverage.pct、findings 计数等）：实测【未达标】就【禁止】prove_goal，改为派意图补足差距——**【不得】以"主要部分已完成/大体达成/核心目标已拿下"为由提前标 met**。例：目标要求覆盖度 100%、而 graph_overview 实测 coverage.pct=40%，则该目标【未达成】，继续派补测意图，不许 prove_goal。
 2.5. **（可选，仅限开局、极轻量）探测理解**：你具备 Bash 等执行能力，它的**唯一正当用途**是——当**图里几乎还没有事实**（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图描述具体时，对目标做**极少量、只读**的探测（如 1–2 次 curl 看首页/指纹），据此产出更精准的**初始意图**。
@@ -286,7 +287,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
 4. 用【一次】 add_intent 批量提交第 3 步筛出的新方向（intents 数组，最多 4 个最高价值的；不要逐条多次调）：
    - summary：一句话自由描述该方向（测试目标完整地址+做什么+为什么），用自然语言，**不要套用固定分类**。方向要在 summary 里写清楚，去重主要靠它与已有意图比对。
    - asset_ids：本方向要**测试/攻击的目标资产 id**（**尽量传**，0/1/多个；是 list_assets 里的资产 id）。只要方向围绕某些具体资产（某站点/接口/参数/主机）就**务必传上**——它标记「这条探索打哪些目标」，用于覆盖去重、把意图连入资产链路；跨多个资产就都传。仅当纯全局侦察、确实没有具体目标资产时才留空。
-   - parent_ids：本方向由哪些【上游节点】综合得出（可选，0/1/多个）。**多个事实结合产生一个新意图，就把这些事实 id 都传上**；派生自某上游意图/发现也传其 id；顶层全新方向留空。
+   - parent_ids：本方向由哪些【已确认事实/发现】综合得出（可选，0/1/多个）。**只能传 fact/finding 节点 id，不能传 intent/goal/hint**；多个事实结合产生一个新意图就都传上；顶层全新方向留空。
 
 
 宁可不生成，也不要重复或硬凑。简洁、克制、高效。`
@@ -316,13 +317,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if origin, _ := ts.OriginFactID(); origin > 0 {
 		tsx.SetOwnerNode(origin) // planner-side anchors default to the task root (origin fact)
 	}
-	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
+	// Planner 只保留开局极轻量探测需要的 Bash；文件编辑、目录遍历与 Sleep 都不属于
+	// 规划职责，避免它们的 schema 在每次 completion 中反复占用输入。
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.NewBash())
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "planner"})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
-	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
+	// 关键态势（刚完成的意图 + 预取的轻量图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
 	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
@@ -348,16 +350,17 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		settle = wrapupSettlementForTask("planner", nil, clamped)
 	}
 	opts := agentcore.Options{
-		Provider:        p.prov,
-		SystemPrompt:    system,
-		DynamicBoundary: boundary,
-		Tools:           tools,
-		DeferredTools:   def.Deferred,
-		UnlockSet:       def.Unlock,
-		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   p.proxyAddr,
-		WebFetchCACert:  p.proxyCACert,
+		Provider:               p.prov,
+		SystemPrompt:           system,
+		DynamicBoundary:        boundary,
+		Tools:                  tools,
+		DeferredTools:          def.Deferred,
+		UnlockSet:              def.Unlock,
+		PermissionMode:         permission.ModeBypass,
+		DisableBackgroundTasks: true,
+		EnableWebFetch:         true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		WebFetchProxy:          p.proxyAddr,
+		WebFetchCACert:         p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
 		EnableWebSearch:    p.webSearch.Enabled,
@@ -378,7 +381,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// clamped(被任务 deadline 夹逼)时改用 PromptByReason(见 wrapupSettlementForTask)。
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    p.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

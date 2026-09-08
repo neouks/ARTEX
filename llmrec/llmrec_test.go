@@ -37,6 +37,27 @@ func TestTaskIDContextUsesExplicitRegistryID(t *testing.T) {
 	}
 }
 
+func TestRunInfoMergesEngineAndAgentAttribution(t *testing.T) {
+	ctx := WithRunInfo(context.Background(), RunInfo{Trigger: "heartbeat", RetryOrdinal: 2})
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: 42, ExplorationID: 7, IntentID: 9, AgentKey: "worker"})
+	got := RunInfoFrom(ctx)
+	if got.TaskID != 42 || got.ExplorationID != 7 || got.IntentID != 9 || got.AgentKey != "worker" || got.Trigger != "heartbeat" || got.RetryOrdinal != 2 {
+		t.Fatalf("merged run info = %+v", got)
+	}
+}
+
+func TestRequestDimensions(t *testing.T) {
+	req := llm.CompletionRequest{
+		System:   []string{"system"},
+		Messages: []llm.Message{llm.UserText("hello")},
+		Tools:    []llm.ToolSchema{{Name: "read", Description: "read a file", InputSchema: map[string]any{"type": "object"}}},
+	}
+	dims := requestDimensionsFor(req)
+	if dims.system <= 0 || dims.messages <= 0 || dims.tools <= 0 || dims.total != dims.system+dims.messages+dims.tools {
+		t.Fatalf("bad request dimensions: %+v", dims)
+	}
+}
+
 func TestParseSessionFallbackIsExplorationScoped(t *testing.T) {
 	taskID, worker := parseSession("exp12-worker-i99")
 	if taskID != "12" || worker != "worker" {

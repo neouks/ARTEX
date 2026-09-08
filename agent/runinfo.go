@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
 )
 
 // RunInfo identifies WHICH run a tool call belongs to. Tool assembly only receives
@@ -15,12 +16,7 @@ import (
 // through the tool layer. Same pattern as TaskClock (see taskclock.go).
 //
 // Zero value = attribution unknown; every consumer must treat it as optional.
-type RunInfo struct {
-	TaskID        int64  // task registry id; 0 for non-task runs (chat sessions)
-	ExplorationID int64  // exploration id; 0 when unknown
-	IntentID      int64  // worker's intent node; 0 for planner/mainagent/chat
-	SessionID     string // chat conversation id; empty for task runs
-}
+type RunInfo = llmrec.RunInfo
 
 // explorationID reads a store's exploration id, tolerating a nil store (planner and
 // worker runs can be driven without one in tests).
@@ -31,17 +27,12 @@ func explorationID(ts *db.ExplorationStore) int64 {
 	return ts.ID()
 }
 
-type runInfoKey struct{}
-
 // WithRunInfo attaches run attribution to ctx.
 func WithRunInfo(ctx context.Context, ri RunInfo) context.Context {
-	return context.WithValue(ctx, runInfoKey{}, ri)
+	return llmrec.WithRunInfo(ctx, ri)
 }
 
 // RunInfoFrom reads the RunInfo (zero value if none attached).
 func RunInfoFrom(ctx context.Context) RunInfo {
-	if v, ok := ctx.Value(runInfoKey{}).(RunInfo); ok {
-		return v
-	}
-	return RunInfo{}
+	return llmrec.RunInfoFrom(ctx)
 }

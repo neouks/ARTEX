@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // TestActivityPageSessions covers the reverse-paginated, per-session history added
 // for the SSE remediation: Main/Plan/Worker filtering, before-cursor paging without
@@ -141,8 +144,8 @@ func TestListByKindPage(t *testing.T) {
 	es := d.Exploration(expID)
 
 	const total = 25
-	for range total {
-		if _, err := es.AddIntent(map[string]any{"summary": "i"}, 1, nil, "planner"); err != nil {
+	for i := range total {
+		if _, err := es.AddIntent(map[string]any{"summary": fmt.Sprintf("intent-%d", i)}, 1, nil, "planner"); err != nil {
 			t.Fatal(err)
 		}
 	}

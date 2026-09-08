@@ -1,6 +1,7 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -177,10 +178,135 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 
 // AddIntent is a convenience: an open intent.
 func (s *ExplorationStore) AddIntent(payload map[string]any, priority int, anchors []int64, origin string) (int64, error) {
+	id, _, err := s.AddIntentDeduplicated(payload, priority, anchors, origin)
+	return id, err
+}
+
+// IntentFingerprint is a deterministic, inexpensive first-line duplicate key.
+// It intentionally uses only the normalized summary and sorted asset ids. A
+// semantic-vector comparison can be layered on top later without changing the
+// admission API or the persisted payload field.
+func IntentFingerprint(summary string, anchors []int64) string {
+	normalized := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(summary))), " ")
+	if normalized == "" {
+		return ""
+	}
+	ids := append([]int64(nil), anchors...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	unique := ids[:0]
+	for _, id := range ids {
+		if id <= 0 || len(unique) > 0 && unique[len(unique)-1] == id {
+			continue
+		}
+		unique = append(unique, id)
+	}
+	key := normalized + "\x00" + fmt.Sprint(unique)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+}
+
+// AddIntentDeduplicated admits one intent and reports whether it created a new
+// frontier node. An exploration-scoped advisory lock makes the read/check/insert
+// sequence race-free across concurrent planner and human submissions. Only live
+// frontier states are deduplicated; a terminal direction may be retried when new
+// evidence justifies it.
+func (s *ExplorationStore) AddIntentDeduplicated(payload map[string]any, priority int, anchors []int64, origin string) (id int64, created bool, err error) {
 	if origin == "" {
 		origin = "planner"
 	}
-	return s.AddNode("intent", payload, priority, "open", origin, anchors)
+	summary, _ := payload["summary"].(string)
+	fingerprint := IntentFingerprint(summary, anchors)
+	if fingerprint == "" {
+		id, err := s.AddNode("intent", payload, priority, "open", origin, anchors)
+		return id, err == nil, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	// Negative keys reserve a separate namespace from the positive schema,
+	// company-scope, and test-suite advisory locks used elsewhere in this DB.
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, -s.expID); err != nil {
+		return 0, false, err
+	}
+	rows, err := tx.Query(`
+SELECT n.id, n.payload,
+       COALESCE((SELECT json_agg(a.asset_id ORDER BY a.asset_id) FROM exploration_anchors a WHERE a.node_id=n.id), '[]'::json)::text
+FROM exploration_nodes n
+WHERE n.exploration_id=$1 AND n.kind='intent' AND n.state IN ('open','running','paused')
+ORDER BY n.id`, s.expID)
+	if err != nil {
+		return 0, false, err
+	}
+	for rows.Next() {
+		var existingID int64
+		var raw []byte
+		var anchorJSON string
+		if err := rows.Scan(&existingID, &raw, &anchorJSON); err != nil {
+			rows.Close()
+			return 0, false, err
+		}
+		var existing map[string]any
+		var existingAnchors []int64
+		_ = json.Unmarshal(raw, &existing)
+		_ = json.Unmarshal([]byte(anchorJSON), &existingAnchors)
+		existingFingerprint, _ := existing["fingerprint"].(string)
+		if existingFingerprint == "" {
+			existingSummary, _ := existing["summary"].(string)
+			existingFingerprint = IntentFingerprint(existingSummary, existingAnchors)
+		}
+		if existingFingerprint == fingerprint {
+			if err := rows.Close(); err != nil {
+				return 0, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return 0, false, err
+			}
+			return existingID, false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, false, err
+	}
+
+	stored := make(map[string]any, len(payload)+2)
+	for key, value := range payload {
+		stored[key] = value
+	}
+	stored["fingerprint"] = fingerprint
+	cleanAnchors := make([]int64, 0, len(anchors))
+	seenAnchor := map[int64]bool{}
+	for _, assetID := range anchors {
+		if assetID > 0 && !seenAnchor[assetID] {
+			seenAnchor[assetID] = true
+			cleanAnchors = append(cleanAnchors, assetID)
+		}
+	}
+	sort.Slice(cleanAnchors, func(i, j int) bool { return cleanAnchors[i] < cleanAnchors[j] })
+	if len(cleanAnchors) > 0 {
+		stored["asset_ids"] = cleanAnchors
+	}
+	raw, _ := json.Marshal(stored)
+	if err := tx.QueryRow(`
+INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
+VALUES ($1, 'intent', $2, $3, 'open', $4) RETURNING id`,
+		s.expID, string(raw), priority, origin).Scan(&id); err != nil {
+		return 0, false, err
+	}
+	for _, assetID := range cleanAnchors {
+		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, assetID); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
 }
 
 // AddGoal writes a goal node (state open).
@@ -756,6 +882,49 @@ func (s *ExplorationStore) Edges(limit int) ([]Edge, error) {
 	return out, rows.Err()
 }
 
+// EdgesForNode returns only the direct lineage edges touching nodeID. Worker
+// launch context uses this instead of loading the full exploration DAG.
+func (s *ExplorationStore) EdgesForNode(nodeID int64) ([]Edge, error) {
+	rows, err := s.db.Query(`SELECT src_id, rel, dst_id FROM exploration_edges
+WHERE exploration_id=$1 AND (src_id=$2 OR dst_id=$2)
+ORDER BY created_at, src_id, dst_id`, s.expID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Edge
+	for rows.Next() {
+		var edge Edge
+		if err := rows.Scan(&edge.From, &edge.Rel, &edge.To); err != nil {
+			return nil, err
+		}
+		out = append(out, edge)
+	}
+	return out, rows.Err()
+}
+
+// EvidenceSharingAnchors returns recent local facts/findings attached to at least
+// one of the same assets as nodeID. It is a focused Worker context query, not a
+// visibility rule; inherited/full history remains available through read tools.
+func (s *ExplorationStore) EvidenceSharingAnchors(nodeID int64, limit int) ([]*Node, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	rows, err := s.db.Query(`
+SELECT DISTINCT n.id, n.kind, n.payload, n.priority, n.state,
+       COALESCE(n.origin,''), COALESCE(n.owner,''), COALESCE(n.blocked_reason,''), n.created_at
+FROM exploration_nodes n
+JOIN exploration_anchors candidate ON candidate.node_id=n.id
+JOIN exploration_anchors target ON target.asset_id=candidate.asset_id AND target.node_id=$2
+WHERE n.exploration_id=$1 AND n.kind IN ('fact','finding') AND n.id<>$2
+ORDER BY n.id DESC LIMIT $3`, s.expID, nodeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
 // FindingLineage returns the sub-DAG that leads FROM the exploration root TO the
 // given node: the node itself plus all its ancestors (nodes reverse-reachable by
 // following edges backward), and every edge whose both endpoints are in that set.
@@ -889,6 +1058,113 @@ func (s *ExplorationStore) HasActiveIntent() (bool, error) {
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
 WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, s.expID).Scan(&exists)
 	return exists, err
+}
+
+// HasRunningIntent reports whether a Worker is currently in flight. An unchanged
+// heartbeat must still reach the Planner while work is running so it can supervise
+// and steer/kill a stalled direction.
+func (s *ExplorationStore) HasRunningIntent() (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='running')`, s.expID).Scan(&exists)
+	return exists, err
+}
+
+// BlackboardRevision returns a deterministic hash of the blackboard visible to
+// this exploration (local plus direct source tasks). Activity transcripts remain
+// excluded, but task-visible assets and scope are included because asynchronous
+// enrichment and manual asset edits do not necessarily emit planner signals.
+func (s *ExplorationStore) BlackboardRevision() (string, error) {
+	var revision string
+	err := s.db.QueryRow(`
+WITH context_tasks(task_id, exploration_id) AS (
+    SELECT task_current.id, task_current.exploration_id
+    FROM tasks task_current
+    WHERE task_current.exploration_id=$1 AND task_current.deleted_at IS NULL
+    UNION
+    SELECT source.id, source.exploration_id
+    FROM tasks task_current
+    JOIN task_relations relation ON relation.task_id=task_current.id
+    JOIN tasks source ON source.id=relation.source_task_id AND source.deleted_at IS NULL
+    WHERE task_current.exploration_id=$1 AND task_current.deleted_at IS NULL
+),
+visible_exp(id) AS (
+    SELECT $1::bigint
+    UNION
+    SELECT exploration_id FROM context_tasks
+),
+context_assets(id) AS (
+    SELECT asset.id
+    FROM assets asset
+    WHERE asset.task_ids && ARRAY(SELECT task_id FROM context_tasks)
+    UNION
+    SELECT link.asset_id
+    FROM task_asset_links link
+    JOIN context_tasks context ON context.task_id=link.task_id
+    UNION
+    SELECT anchor.asset_id
+    FROM exploration_anchors anchor
+    JOIN exploration_nodes node ON node.id=anchor.node_id
+    WHERE node.exploration_id IN (SELECT id FROM visible_exp)
+    UNION
+    SELECT asset.id
+    FROM assets asset
+    JOIN task_scope scope ON (
+         (scope.kind='company'     AND asset.company_id=scope.company_id)
+      OR (scope.kind='root_domain' AND asset.root_domain=scope.domain)
+      OR (scope.kind='subdomain'   AND asset.domain=scope.domain)
+      OR (scope.kind IN ('ip','cidr') AND scope.net >>= try_inet(asset.ip))
+      OR (scope.kind='icp' AND (
+           lower(regexp_replace(COALESCE(asset.icp,''), '[[:space:]]+', '', 'g'))=scope.value
+           OR lower(regexp_replace(COALESCE(asset.app_icp,''), '[[:space:]]+', '', 'g'))=scope.value
+         ))
+    )
+    JOIN context_tasks context ON context.task_id=scope.task_id
+),
+context_companies(id) AS (
+    SELECT DISTINCT scope.company_id
+    FROM task_scope scope
+    JOIN context_tasks context ON context.task_id=scope.task_id
+    WHERE scope.kind='company' AND scope.company_id IS NOT NULL
+)
+SELECT md5(
+    COALESCE((SELECT string_agg(concat_ws(':', id, status, md5(COALESCE(description,'') || chr(31) || goal)), '|' ORDER BY id)
+              FROM explorations WHERE id IN (SELECT id FROM visible_exp)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', id, exploration_id, kind, state, priority,
+                                          md5(payload::text), COALESCE(origin,''), COALESCE(owner,''), COALESCE(blocked_reason,'')),
+                                     '|' ORDER BY exploration_id, id)
+              FROM exploration_nodes WHERE exploration_id IN (SELECT id FROM visible_exp)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', exploration_id, src_id, rel, dst_id),
+                                     '|' ORDER BY exploration_id, src_id, rel, dst_id)
+              FROM exploration_edges WHERE exploration_id IN (SELECT id FROM visible_exp)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', anchor.node_id, anchor.asset_id),
+                                     '|' ORDER BY anchor.node_id, anchor.asset_id)
+              FROM exploration_anchors anchor
+              JOIN exploration_nodes node ON node.id=anchor.node_id
+              WHERE node.exploration_id IN (SELECT id FROM visible_exp)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', id, exploration_id, kind, md5(text), COALESCE(origin,'')),
+                                     '|' ORDER BY exploration_id, id)
+              FROM task_constraints WHERE exploration_id IN (SELECT id FROM visible_exp)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', id, task_id, kind, COALESCE(company_id,0),
+                                          COALESCE(domain,''), COALESCE(net::text,''), COALESCE(value,''),
+                                          source, COALESCE(reason,'')),
+                                     '|' ORDER BY task_id, id)
+              FROM task_scope WHERE task_id IN (SELECT task_id FROM context_tasks)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', task_id, asset_id, source, md5(source_summary),
+                                          COALESCE(source_node_id,0), updated_at),
+                                     '|' ORDER BY task_id, asset_id)
+              FROM task_asset_links WHERE task_id IN (SELECT task_id FROM context_tasks)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', asset.id, asset.updated_at), '|' ORDER BY asset.id)
+              FROM assets asset WHERE asset.id IN (SELECT id FROM context_assets)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', company.id, company.updated_at), '|' ORDER BY company.id)
+              FROM companies company WHERE company.id IN (SELECT id FROM context_companies)), '') || '#' ||
+    COALESCE((SELECT string_agg(concat_ws(':', scope.id, scope.company_id, scope.kind,
+                                          COALESCE(scope.domain,''), COALESCE(scope.net::text,''),
+                                          COALESCE(scope.value,''), scope.raw, COALESCE(scope.reason,'')),
+                                     '|' ORDER BY scope.company_id, scope.id)
+              FROM company_scope scope WHERE scope.company_id IN (SELECT id FROM context_companies)), '')
+)`, s.expID).Scan(&revision)
+	return revision, err
 }
 
 // HasOpenGoal reports whether this exploration still has any goal in state 'open'.

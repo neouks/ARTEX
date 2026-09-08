@@ -1797,3 +1797,9 @@ func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.pendingTriggers = nil
 	return ev
 }
+
+func (t *Task) hasPendingTriggers() bool {
+	t.trigMu.Lock()
+	defer t.trigMu.Unlock()
+	return len(t.pendingTriggers) > 0
+}

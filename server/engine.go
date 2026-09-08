@@ -138,6 +138,9 @@ type Engine struct {
 	steerBox map[int64][]string
 
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
+	// Last successfully planned blackboard hash. Pure heartbeats with the same hash
+	// and no running Worker can skip the Planner LLM call.
+	plannerRevision sync.Map // taskID -> string
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
 	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
@@ -280,6 +283,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.plannerRound.Delete(taskID)
+	e.plannerRevision.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
 	e.stamped.Delete(taskID)
@@ -763,13 +767,18 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
+		edgeSignal := src == "edge"
 	drain:
 		for {
 			select {
 			case <-t.notify:
+				edgeSignal = true
 			case <-timer.C:
 				break drain
 			}
+		}
+		if edgeSignal {
+			src = "edge"
 		}
 		planner, _ := e.snapshotFor(t)
 		if planner == nil {
@@ -810,6 +819,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			}
 			return // goalless 分支永不进入 planner.Plan
 		}
+		if src == "heartbeat" && !t.hasPendingTriggers() {
+			running, runningErr := t.Store.HasRunningIntent()
+			revision, revisionErr := t.Store.BlackboardRevision()
+			previous, hasPrevious := e.plannerRevision.Load(t.ID)
+			if runningErr == nil && revisionErr == nil && !running && hasPrevious && previous.(string) == revision {
+				log.Printf("[planner] task %s 心跳跳过：黑板无变化且无运行中的 work", t.ID)
+				return
+			}
+		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
@@ -830,9 +848,17 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		// Store only the revision observed before this call. Recording the post-call
+		// revision could swallow an async asset mutation that happened while the
+		// Planner was running even though that request never saw the mutation.
+		observedRevision, observedRevisionErr := t.Store.BlackboardRevision()
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		planCtx := agent.WithRunInfo(ectx, agent.RunInfo{Trigger: src})
+		met, reason, err := planner.Plan(planCtx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
+		if err == nil && observedRevisionErr == nil {
+			e.plannerRevision.Store(t.ID, observedRevision)
+		}
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
@@ -963,10 +989,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
+	initialTrigger := "claim"
 	if hasChatMessage {
-		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+		initialTrigger = "human_message"
+	}
+	initialCtx := agent.WithRunInfo(workCtx, agent.RunInfo{Trigger: initialTrigger})
+	if hasChatMessage {
+		reason, wrote, err = worker.ExecuteWithMessage(initialCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 	} else {
-		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+		reason, wrote, err = worker.Execute(initialCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
 	e.EndLLMCall(t.ID)
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
@@ -981,10 +1012,11 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
 		e.BeginLLMCall(t.ID)
+		retryCtx := agent.WithRunInfo(workCtx, agent.RunInfo{Trigger: initialTrigger, RetryOrdinal: attempt})
 		if hasChatMessage {
-			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+			reason, wrote, err = worker.ExecuteWithMessage(retryCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 		} else {
-			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+			reason, wrote, err = worker.Execute(retryCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
 		e.EndLLMCall(t.ID)
 	}

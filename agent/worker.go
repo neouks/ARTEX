@@ -207,14 +207,14 @@ const workerDefaultTmpl = `你是一个授权渗透测试系统的"执行者"(wo
 3. **穷尽后再返回，别在第一个障碍前放弃**。判"意图达成"的标准是【你已把这条方向真正探透】：初次尝试被拦（一个 payload 被过滤、一个端点 404、一个注入点没回显）不等于此路不通——先换编码/换方法/换参数/换路径把这条意图的合理手段走完，再下结论。**但边界不变**：穷尽的只是【这一条意图内部】的手段，绝不是顺手去做别的意图（枚举别的端点、测别的漏洞）；那些仍是规划者派别的 worker 的事。真正探透了、或确认此路不通了，就立即写回并返回，别因为"任务总目标还没达成"就继续，也别为凑步数在已探尽的方向空转。
 4. **边发现边写回，并且写对地方**。每得出一个结果就立刻写回（别攒到最后，否则步数耗尽全丢）。结果只算写进图里的，活在你脑子/文字里的不算。**两张图分清楚**：
    - **发现新资产/资源** → insert_assets 写【资产图】（登记资产本身：endpoint / parameter / tech 指纹 / service / 凭据 / 子域 等）。资产的结构化属性写在它自己身上：站点/接口的状态码/标题/body 长度/content_type 放 props.http，技术栈登记为 type=tech 节点。多个资产用 insert_assets 的 assets 数组一次批量登记。
-   - **得出探索结论/事实**（含指纹/枚举等正向结论，和"端口关闭"、"该参数不可注入"、"未发现登录入口"等否定结论）→ record_fact 写【探索图】（传 intent_id）。**一次探索的多个观察汇总成【一条】事实**：summary 写总结性一句话，detail 写相关细节（技术栈、状态码、响应特征等都塞进这一条的 detail）——**不要一个属性一条事实**，一条意图通常只产出一条事实，拆太碎会让图谱无限膨胀。真有多条【彼此不同】的结论才用 facts 数组一次写。【新增】**只写增量**：写回前先扫一眼上方【全局探索态势】里的 recent_facts——只写你这次【新得到】的结论，别把图里已有的事实换个措辞再记一遍（重复事实会让图谱膨胀、误导规划者以为有新进展）。若你的观察只是印证了已有 fact 而无新增，就不必再记一条。
+   - **得出探索结论/事实**（含指纹/枚举等正向结论，和"端口关闭"、"该参数不可注入"、"未发现登录入口"等否定结论）→ record_fact 写【探索图】（传 intent_id）。**一次探索的多个观察汇总成【一条】事实**：summary 写总结性一句话，detail 写相关细节（技术栈、状态码、响应特征等都塞进这一条的 detail）——**不要一个属性一条事实**，一条意图通常只产出一条事实，拆太碎会让图谱无限膨胀。真有多条【彼此不同】的结论才用 facts 数组一次写。【新增】**只写增量**：写回前先扫一眼启动消息里的【本意图相关上下文】——只写你这次【新得到】的结论，别把图里已有的事实换个措辞再记一遍（重复事实会让图谱膨胀、误导规划者以为有新进展）。若你的观察只是印证了已有 fact 而无新增，就不必再记一条。
    - **确认漏洞** → report_finding 写【探索图】（含 PoC，传 intent_id）。
 
 可用工具：
 - insert_assets：登记新资产（资产图）。**你只传原始信息，key 与父子关联由代码算**：新接口→传完整 url+method（代码自动建 domain→site→endpoint、自动抽 URL 里的 query 参数，body/header 参数放 params）；指纹→type=tech,name=技术名,on_url=站点地址,props填{version,category}。多个资产放 assets 数组一次批量登记。属性写在资产自己的 props 上，探索结论不要写这里。
 - record_fact：把探索【事实/结论】写入探索图并连到意图（传 intent_id）。正向/否定结论、观察、判断用它；**一次探索的多个观察汇总成一条事实**（summary 总结一句话 + detail 放细节），不要一个属性一条。真有多条不同结论才用 facts 数组。**只写你真实看到的**：给 evidence（一行关键证据：命令+关键输出，简洁，别粘大段——细节在 detail）、标 confidence（observed 直接看到 / inferred 推断）；**否定结论的证据门槛**（不可注入/端口关闭/无登录入口等【可能让规划者放弃一整条方向】的结论）：下结论前先确认你已【穷尽这条意图内的合理手段】（换编码/换参数/换路径/换方法）；手段没走完、或证据只是"看起来像/大概率如此"，一律标 confidence=inferred。**宁可标 inferred 让规划者复核，也别用一个轻率的 observed 否定把一整条路线焊死**——尤其任务早期，一个错误的 observed 否定会把整个任务带偏、且后续很难自己扳回来。
 - report_finding：确认漏洞 → 记录(含 PoC，传 intent_id=你领到的意图id)。**只有你在本次运行里真实触发过该漏洞、拿到了可复现的证据（请求/响应或命令输出）才用它。** 严禁把下列当作已确认漏洞上报：仅凭版本号/指纹匹配到某 CVE、仅凭"参数看起来可注入"、仅凭外部漏洞库/更新日志/代码 diff 推断。**不要用查 CVE 库或"对比补丁版本"替代实际触发。** 触发不了但确有嫌疑，就用 record_fact 记一条 confidence=inferred 的事实（描述嫌疑点+为何未能触发），交给规划者派后续意图，别硬记成 finding。
-- list_assets（查询资产，非探索节点） / asset_neighbors / list_facts(探索事实，分页最新在前；默认 20 条，可传 q 关键词过滤、before 翻页) / list_findings(漏洞) / node_detail(探索节点 id，非资产 id)：按需查上下文。
+- list_assets（查询资产，非探索节点） / list_facts(探索事实，分页最新在前；默认 20 条，可传 q 关键词过滤、before 翻页) / list_findings(漏洞) / node_detail(探索节点 id，非资产 id)：按需查上下文。
 
 只在授权范围内操作；若系统提示顶部附有【操作约束】，那是最高优先级红线——任何命令/探测在执行前先自检是否违反，违反即不做（哪怕它落在你领到的意图里）。完成本意图后用一句话总结你做了什么、写回了哪些事实。务实、克制、聚焦这一条意图。`
 
@@ -289,27 +289,156 @@ func intentAssetIDs(intent *db.Node) []int64 {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
+	var payload map[string]any
+	_ = json.Unmarshal(intent.Payload, &payload)
+	summary, _ := payload["summary"].(string)
+	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n<intent id=%d priority=%d>\n%s\n</intent>\n写回 record_fact / report_finding 时传 intent_id=%d", intent.ID, intent.Priority, lightText(summary), intent.ID)
 }
 
-// renderWorkerGraphOverview folds the global situational snapshot into the worker's
-// launch USER message for AWARENESS ONLY. The framing is deliberately strong: the overview
-// must NOT widen the worker's job — it still does only its assigned intent. Its sole
-// purpose is letting the worker read context (existing facts/assets/hints)
-// so it avoids redundant work and doesn't re-derive what others already found.
-func renderWorkerGraphOverview(data map[string]any) string {
-	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
-	// 那条意图、别追未覆盖的点」的职责边界相悖 → 从 worker 视图里剔除。data 是本次 worker
-	// 专属的新 map，删键不影响 planner。
-	delete(data, "coverage")
-	b, err := json.Marshal(data)
-	if err != nil {
-		return "" // fall back silently: the worker just won't have the global context
+func workerNodeContext(n *db.Node) map[string]any {
+	var payload map[string]any
+	_ = json.Unmarshal(n.Payload, &payload)
+	out := map[string]any{"id": n.ID, "kind": n.Kind, "state": n.State}
+	for _, key := range []string{"summary", "confidence", "evidence", "detail", "vulnclass", "severity"} {
+		if value, ok := payload[key]; ok && value != nil && value != "" {
+			out[key] = value
+		}
 	}
-	return "\n\n【全局探索态势（仅供你了解大局，不是你的任务清单）】：\n" +
-		"下面是整个任务当前的探索概况。给你的**唯一目的**是让你了解全局动态。\n" +
-		"**它绝不扩大你的职责边界**：你仍然只做上面领到的那一条意图。看到这里有别的 open 意图 / 未覆盖的点 / 其它可打方向，也**绝不要自己去动手**——那些是别的 worker 的事，由规划者调度。你若发现相关新线索，最多写进 fact 让规划者知道，不要自己追。\n" +
-		string(b)
+	if n.Inherited {
+		out["source_task_id"] = n.SourceTaskID
+	}
+	return out
+}
+
+// workerContextData is intentionally intent-scoped. It includes direct lineage,
+// evidence on the same assets, a very small recent-fact window for write dedup,
+// active hints, and a few concurrent intents so the worker avoids overlapping
+// work. It never embeds goals, coverage, related-task overviews, or the full DAG.
+func workerContextData(ts *db.ExplorationStore, intent *db.Node) map[string]any {
+	out := map[string]any{}
+	if ts == nil || intent == nil {
+		return out
+	}
+	if _, goal, err := ts.Root(); err == nil && strings.TrimSpace(goal) != "" {
+		out["task_goal"] = goal
+	}
+	seenEvidence := map[int64]bool{}
+	if edges, err := ts.EdgesForNode(intent.ID); err == nil {
+		var parents, yielded []map[string]any
+		for _, edge := range edges {
+			var nodeID int64
+			var target *[]map[string]any
+			switch {
+			case edge.To == intent.ID && (edge.Rel == db.RelDerivedFrom || edge.Rel == db.RelSpawns):
+				nodeID, target = edge.From, &parents
+			case edge.From == intent.ID && edge.Rel == db.RelYields:
+				nodeID, target = edge.To, &yielded
+			default:
+				continue
+			}
+			if node, _ := ts.GetNodeWithSources(nodeID); node != nil {
+				*target = append(*target, workerNodeContext(node))
+				seenEvidence[node.ID] = true
+			}
+		}
+		if len(parents) > 0 {
+			out["parents"] = parents
+		}
+		if len(yielded) > 0 {
+			out["previous_yields"] = yielded
+		}
+	}
+	if related, err := ts.EvidenceSharingAnchors(intent.ID, 8); err == nil {
+		items := make([]map[string]any, 0, len(related))
+		for _, node := range related {
+			if !seenEvidence[node.ID] {
+				items = append(items, workerNodeContext(node))
+				seenEvidence[node.ID] = true
+			}
+		}
+		if len(items) > 0 {
+			out["same_asset_evidence"] = items
+		}
+	}
+	if facts, err := ts.ListByKindWithSources(db.KindFact, 6); err == nil {
+		items := make([]map[string]any, 0, len(facts))
+		for _, node := range facts {
+			if !seenEvidence[node.ID] {
+				items = append(items, compactFact(node))
+			}
+		}
+		if len(items) > 0 {
+			out["recent_facts_for_dedup"] = items
+		}
+	}
+	if hints, err := ts.ListByKind(db.KindHint, 8); err == nil {
+		items := make([]map[string]any, 0, len(hints))
+		for _, node := range hints {
+			if node.State == "active" {
+				items = append(items, workerNodeContext(node))
+			}
+		}
+		if len(items) > 0 {
+			out["active_hints"] = items
+		}
+	}
+	if intents, err := ts.ListByKind(db.KindIntent, 100); err == nil {
+		items := make([]map[string]any, 0, 8)
+		for _, node := range intents {
+			if node.ID == intent.ID || node.State != "open" && node.State != "running" {
+				continue
+			}
+			items = append(items, workerNodeContext(node))
+			if len(items) == 8 {
+				break
+			}
+		}
+		if len(items) > 0 {
+			out["other_active_intents_do_not_execute"] = items
+		}
+	}
+	return out
+}
+
+func renderWorkerContext(ts *db.ExplorationStore, intent *db.Node) string {
+	const workerContextMaxRunes = 6_500
+	return "\n\n【本意图相关上下文（仅用于避免重复，不扩大任务边界）】：\n" +
+		renderLightTaggedOrdered("intent_context", workerContextData(ts, intent), []string{
+			"task_goal", "parents", "previous_yields", "same_asset_evidence",
+			"recent_facts_for_dedup", "active_hints", "other_active_intents_do_not_execute",
+		}, workerContextMaxRunes)
+}
+
+func compactWorkerAssets(assets []*db.Asset) []map[string]any {
+	out := make([]map[string]any, 0, len(assets))
+	for _, asset := range assets {
+		item := map[string]any{"id": asset.ID, "type": asset.Type}
+		for key, value := range map[string]string{
+			"url": asset.URL, "domain": asset.Domain, "root_domain": asset.RootDomain,
+			"ip": asset.IP, "method": asset.Method, "title": asset.PageTitle,
+		} {
+			if value != "" {
+				item[key] = value
+			}
+		}
+		if asset.Port != nil {
+			item["port"] = *asset.Port
+		}
+		if asset.StatusCode != nil {
+			item["status"] = *asset.StatusCode
+		}
+		if len(asset.Technologies) > 0 {
+			item["technologies"] = asset.Technologies
+		}
+		if len(asset.Params) > 0 {
+			item["params"] = asset.Params
+		}
+		if len(asset.Auth) > 0 {
+			item["auth"] = asset.Auth
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // Execute runs one intent. hooks (the per-task Guard) gates every tool call; may
@@ -348,8 +477,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
-	base = append(base, actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
+	// 不把它的 schema 重复发送给每一次 completion。
+	base = append(base, workerLocalTools()...)
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, AgentKey: "worker"})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
@@ -359,7 +490,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// system 每 session 稳定、更利于缓存；代价是长 run 里这条 user 消息可能被 compaction
 	// 压缩。本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
-	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
+	overview := renderWorkerContext(ts, intent)
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
@@ -373,13 +504,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
 	}
 	opts := agentcore.Options{
-		Provider:        w.prov,
-		SystemPrompt:    system,
-		DynamicBoundary: boundary,
-		Tools:           tools,
-		DeferredTools:   def.Deferred,
-		UnlockSet:       def.Unlock,
-		PermissionMode:  permission.ModeBypass,
+		Provider:               w.prov,
+		SystemPrompt:           system,
+		DynamicBoundary:        boundary,
+		Tools:                  tools,
+		DeferredTools:          def.Deferred,
+		UnlockSet:              def.Unlock,
+		PermissionMode:         permission.ModeBypass,
+		DisableBackgroundTasks: true,
 		// WebFetch 走记录代理，其 HTTP 与 curl 一样被留痕；载入代理 CA 让经 MITM
 		// 重签的 HTTPS 证书能【正常校验通过】（而非关掉校验）。proxy 空则直连。
 		EnableWebFetch: true,
@@ -428,17 +560,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	// 意图 + 全局态势 + 启动指令 + 意图锚定资产的原始数据都放这条启动 user 消息里。
-	// 意图放最前、最醒目；overview 仅供了解大局。资产原始 JSON 直接附上，不做提取/格式化，
+	// 意图 + 定向上下文 + 启动指令 + 意图锚定资产的紧凑投影放在启动 user 消息。
 	// 省去开场再查一次 list_assets。注意：这些运行期数据现在活在 user 消息里，长 run 中
 	// 有被 compaction 压缩的风险（意图是 worker 全部职责，若被压掉需另行 pin，待评估）。
 	input := renderIntentTask(intent) + overview + "\n\n开始执行上面这条意图：只做它、只产生事实、做完即停。"
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
 			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
-				if b, err := json.Marshal(assets); err == nil {
-					input += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
-				}
+				input += "\n\n本意图 asset_ids 对应的目标资产：\n" +
+					renderLightTagged("target_assets", compactWorkerAssets(assets), 3_500)
 				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
 				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
 				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
