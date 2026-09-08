@@ -41,6 +41,18 @@ const THINKING_TYPES: { value: string; label: string }[] = [
   { value: "disabled", label: "关闭" },
   { value: "enabled", label: "开启" },
 ];
+// 输出上限用哪个请求字段名（仅 openai 格式有意义）。NONE ↔ "" 走同一套哨兵转换。
+const MAX_TOKENS_FIELDS: { value: string; label: string }[] = [
+  { value: NONE, label: "max_tokens（默认）" },
+  { value: "max_completion_tokens", label: "max_completion_tokens" },
+];
+// 另外两种格式各自定死了字段名，选项对它们无意义，说明文案里直接讲清楚。
+const MAX_TOKENS_FIELD_HINTS: Record<string, string> = {
+  openai:
+    "上限发哪个键。max_tokens 是默认，绝大多数兼容网关只认它；OpenAI 官方推理模型（o 系列 / GPT-5）反过来只认 max_completion_tokens，收到 max_tokens 会直接报 unsupported_parameter。",
+  anthropic: "仅 openai 格式可选。Anthropic 的字段名固定为 max_tokens。",
+  "openai-responses": "仅 openai 格式可选。Responses API 的字段名固定为 max_output_tokens。",
+};
 const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: NONE, label: "不发送（默认）" },
   { value: "low", label: "low" },
@@ -310,6 +322,9 @@ function ProfileSheet({
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
   const [poolExclude, setPoolExclude] = React.useState(false);
   const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
+  const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
+  const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
+  const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -335,6 +350,9 @@ function ProfileSheet({
     setPriority(String(profile?.priority ?? 0));
     setPoolExclude(profile?.pool_exclude ?? false);
     setStreaming(profile?.streaming ?? true);
+    setMaxTokens(String(profile?.max_tokens ?? 0));
+    setMaxTokensField(fromStore(profile?.max_tokens_field));
+    setSessionHeaderKey(profile?.session_header_key ?? "");
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -417,6 +435,11 @@ function ProfileSheet({
         priority: Number(priority) || 0,
         pool_exclude: poolExclude,
         streaming,
+        max_tokens: Math.max(0, Number(maxTokens) || 0),
+        // 字段名开关只对 openai(Chat Completions) 有意义，其它格式一律回落到默认；
+        // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
+        max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
+        session_header_key: sessionHeaderKey.trim(),
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -551,6 +574,22 @@ function ProfileSheet({
           </div>
 
           <div className="grid gap-2">
+            <Label htmlFor="p-session-header">自定义会话头（可选）</Label>
+            <Input
+              id="p-session-header"
+              className="font-mono"
+              placeholder="如 x-session-id（留空=不发送）"
+              value={sessionHeaderKey}
+              onChange={(e) => setSessionHeaderKey(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              填写头名后，每次请求都会带上这个 HTTP 头，头值自动填为{" "}
+              <b>当前会话的 session id</b>（chat 会话如 conv-12、worker 如 exp3-worker-i87）。用于按 session-id
+              头做提示缓存 / 粘性路由的网关；同一会话多轮稳定、不同会话互不相同。留空则不发送。
+            </p>
+          </div>
+
+          <div className="grid gap-2">
             <Label htmlFor="p-api-key">API Key</Label>
             <Input
               id="p-api-key"
@@ -626,6 +665,52 @@ function ProfileSheet({
                 </p>
               </div>
               <Switch checked={streaming} onCheckedChange={setStreaming} aria-label="流式输出" />
+            </div>
+          </div>
+
+          <div className="grid gap-3 rounded-lg border p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="grid gap-0.5">
+                <Label htmlFor="p-max-tokens" className="text-sm">
+                  输出上限 · max tokens
+                </Label>
+                <p className="text-muted-foreground text-xs">
+                  单次回复最多生成多少 token，随每次请求发出。0（默认）= 不发送该字段，由服务端默认值决定。
+                  这与上面的「上下文窗口」是两回事：那是模型总容量，只在本地用来算压缩阈值。
+                  设太小会让推理模型在思考阶段就被截断，一个字答案都出不来。
+                </p>
+              </div>
+              <Input
+                id="p-max-tokens"
+                type="number"
+                min={0}
+                className="w-28 shrink-0"
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">上限字段名</Label>
+                <p className="text-muted-foreground text-xs">{MAX_TOKENS_FIELD_HINTS[format]}</p>
+              </div>
+              <Select
+                value={format === "openai" ? maxTokensField : NONE}
+                onValueChange={setMaxTokensField}
+                disabled={format !== "openai"}
+              >
+                <SelectTrigger className="w-56 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MAX_TOKENS_FIELDS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 

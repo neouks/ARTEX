@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // Config describes the LLM backend resolved from the environment.
@@ -57,6 +59,21 @@ type Config struct {
 	// 某些网关糟糕的 SSE 实现(空帧、思考字段丢帧),代价是失去运行中的实时进度/实时
 	// token 计数。映射为 agentcore.Options.NonStreaming = !Stream。
 	Stream bool
+	// MaxTokens 是单次回复的输出上限(token)。0 = 不发送该字段,由服务端默认值决定
+	// (历史行为)。与 ContextWindowK 不同:后者是模型总容量,只在本地用来算压缩阈值,
+	// 不出现在请求里;本值随每次请求发出。映射为 agentcore.Options.MaxTokens。
+	MaxTokens int
+	// MaxTokensField 选择 MaxTokens 用哪个请求字段名,仅对 format=openai 生效:
+	//   "" = max_tokens(默认); "max_completion_tokens" = 新字段。
+	// OpenAI 推理模型(o 系列/GPT-5)只认后者,收到 max_tokens 会直接报
+	// unsupported_parameter;而多数兼容网关只认前者,故不做自动推断,交由用户按端点选。
+	MaxTokensField string
+	// SessionHeaderKey,非空时,让每次 LLM 请求带上一个自定义 HTTP 头,头名为该值、
+	// 头值为【当前会话的 session id】(chat 会话=conv-<id>,worker=exp<x>-worker-i<intent>
+	// 等,见 WorkerSessionID)。用于某些按 session-id 头做提示缓存/粘性路由的网关。
+	// 空 = 不发送。值由 transcript.WithSessionID 挂在请求 context 上,由 RoundTripper
+	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
+	SessionHeaderKey string
 }
 
 // compaction window resolution bounds (in K tokens). Below the floor the
@@ -214,7 +231,7 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
-	client, err := quotaAwareHTTPClient(c.Proxy)
+	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +246,9 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	// 可只发 thinking.type、只发 effort、都发、或都不发。
 	lc.ThinkingType = c.ThinkingType
 	lc.ReasoningEffort = c.ReasoningEffort
+	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
+	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。
+	lc.MaxTokensField = c.MaxTokensField
 	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
@@ -279,9 +299,24 @@ func IsQuotaExhaustedMessage(message string) bool {
 // retry loop treats every 429 as transient; normalizing only that response to
 // 402 lets a task router fail over immediately while retaining the original
 // response body for provider-specific classification and audit logs.
-type quotaAwareTransport struct{ base http.RoundTripper }
+type quotaAwareTransport struct {
+	base http.RoundTripper
+	// sessionHeaderKey, when non-empty, is the HTTP header name each request
+	// carries; its value is the session id read from the request context. Empty
+	// disables it. See Config.SessionHeaderKey.
+	sessionHeaderKey string
+}
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Custom session-id header: name is user-configured, value is THIS run's
+	// session id (norma stashes it on the context via transcript.WithSessionID).
+	// Stable across a session's turns and distinct across sessions — exactly what
+	// a session-keyed prompt cache wants. Skipped when no session id is present.
+	if t.sessionHeaderKey != "" {
+		if sid := transcript.SessionIDFrom(req.Context()); sid != "" {
+			req.Header.Set(t.sessionHeaderKey, sid)
+		}
+	}
 	// When LLM recording is on, the Recorder puts a Capture on the context so the
 	// raw wire bodies can be persisted. This is the only layer that still sees
 	// them: norma builds the request body internally and decodes the SSE response
@@ -334,7 +369,7 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
-func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
+func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	proxy = strings.TrimSpace(proxy)
 	if proxy == "" {
@@ -353,7 +388,39 @@ func quotaAwareHTTPClient(proxy string) (*http.Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: quotaAwareTransport{base: transport}}, nil
+	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
+}
+
+// logTestConnection prints the raw HTTP status code(s) and response body of a
+// connection test to the server log, so "点击测试" leaves a diagnosable trail of
+// exactly what the gateway returned — 401 bodies, quota text, empty frames — not
+// just the collapsed ok/err the UI shows. Bodies are clipped to keep a chatty
+// SSE stream from flooding the log.
+func logTestConnection(c Config, capt *llmrec.Capture) {
+	attempts := capt.Attempts()
+	if len(attempts) == 0 {
+		log.Printf("[llm-test] %s / %s @ %s — 未发出任何 HTTP 请求(配置解析或建连即失败)",
+			c.Provider(), c.Model, c.BaseURL)
+		return
+	}
+	for i, a := range attempts {
+		log.Printf("[llm-test] %s / %s @ %s — 尝试 %d/%d HTTP %d\n响应体: %s",
+			c.Provider(), c.Model, c.BaseURL, i+1, len(attempts), a.Status, clipBody(a.Body))
+	}
+}
+
+// clipBody trims a wire body for logging. 4K is plenty to show an error JSON or
+// the head of an SSE stream while bounding a runaway response.
+func clipBody(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(空)"
+	}
+	const max = 4096
+	if len(s) > max {
+		return s[:max] + fmt.Sprintf("…(截断,共 %d 字节)", len(s))
+	}
+	return s
 }
 
 // TestConnection makes a minimal real completion to verify the provider/model/
@@ -366,6 +433,11 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	// 抓取原始 wire 报文:连接测试最需要看到的就是网关到底回了什么(状态码+响应体),
+	// 而 norma 把响应解码成 StreamEvent 后这些就没了。quotaAwareTransport 会在
+	// context 里找到这个 Capture 并填入每次 HTTP 尝试的状态码与 body。
+	ctx, capt := llmrec.NewCapture(ctx)
+	defer logTestConnection(c, capt)
 	start := time.Now()
 	// MaxTokens 要给足：推理模型(如 deepseek-v4-pro)在给出答案前会先产出一大段
 	// 思考(实测对一句 "ping" 也能烧 ~2900 token)。若只给 32,模型会一直卡在"思考阶段"

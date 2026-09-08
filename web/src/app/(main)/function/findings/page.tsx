@@ -10,34 +10,17 @@ import {
   ChevronRightIcon,
   ClockIcon,
   DownloadIcon,
-  FileTextIcon,
-  FlaskConicalIcon,
   InfoIcon,
   SearchIcon,
   ShieldAlertIcon,
-  Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { CopyButton } from "@/components/copy-button";
-import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -47,37 +30,61 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
-import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { statusMeta } from "@/lib/status";
-import type { Finding, FindingGroup, FindingStats, FindingStatus, Severity } from "@/lib/types";
+import type { Finding, FindingAssetNode, FindingGroup, FindingStats, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
+import { AssetTree, assetPathOf } from "./_components/asset-tree";
+import {
+  FINDING_STATUSES,
+  type FindingEdit,
+  type FindingReport,
+  FindingsTable,
+  findingRowKey,
+  fmtTime,
+  isSameFinding,
+  SEVERITIES,
+  UNASSIGNED_TASK,
+} from "./_components/findings-table";
 
-const FINDING_STATUSES: FindingStatus[] = [
-  "pending",
-  "in_progress",
-  "confirmed",
-  "resolved",
-  "false_positive",
-  "ignored",
-  "duplicate",
-  "risk_accepted",
-];
-
-const UNASSIGNED_TASK = "__unassigned__";
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
 
+// 列表视图:flat = 跨任务平铺大表(默认);grouped = 按任务分组折叠;
+// asset = 左侧资产树 + 右侧该子树下的发现。
+type FindingView = "flat" | "grouped" | "asset";
+
+const FINDING_VIEWS: FindingView[] = ["flat", "grouped", "asset"];
+
+// 资产树的一次性快照。与另外两个视图不同,资产视图不轮询:进入视图、改筛选、
+// 或本页改动了发现之后才重新查询。
+interface AssetTreeState {
+  nodes: FindingAssetNode[];
+  findingTotal: number;
+  truncated: boolean;
+  droppedKinds: string[];
+  loaded: boolean;
+  loading: boolean;
+}
+
+const EMPTY_ASSET_TREE: AssetTreeState = {
+  nodes: [],
+  findingTotal: 0,
+  truncated: false,
+  droppedKinds: [],
+  loaded: false,
+  loading: false,
+};
+
+// 分组视图里每个已展开任务组自带一份分页状态,彼此独立。
 interface GroupFindingsState {
   items: Finding[];
   total: number;
@@ -87,20 +94,18 @@ interface GroupFindingsState {
   loading: boolean;
 }
 
+// 平铺视图的页码单独放 state(而非塞进快照),筛选一变就能连带重置并触发重新加载。
+interface FlatFindingsState {
+  items: Finding[];
+  total: number;
+  loaded: boolean;
+  loading: boolean;
+}
+
+const EMPTY_FLAT_STATE: FlatFindingsState = { items: [], total: 0, loaded: false, loading: false };
+
 function findingGroupKey(group: FindingGroup) {
   return group.task_id === null ? UNASSIGNED_TASK : String(group.task_id);
-}
-
-// Exploration node ids are only unique inside a task. Prefer the persisted
-// finding id and otherwise namespace the node id by task so editing one group
-// cannot update a similarly-named node in another expanded group.
-function findingRowKey(finding: Finding): string {
-  if (finding.finding_id) return `finding:${finding.finding_id}`;
-  return `node:${finding.task_id ?? UNASSIGNED_TASK}:${finding.id}`;
-}
-
-function isSameFinding(left: Finding, right: Finding): boolean {
-  return findingRowKey(left) === findingRowKey(right);
 }
 
 const EMPTY_STATS: FindingStats = {
@@ -114,16 +119,8 @@ const EMPTY_STATS: FindingStats = {
   tasks: [],
 };
 
-function fmtTime(ts: string) {
-  return new Date(ts).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export default function FindingsPage() {
+  const [view, setView] = React.useState<FindingView>("flat");
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
   const [vulnclass, setVulnclass] = React.useState<string>("all");
@@ -132,6 +129,11 @@ export default function FindingsPage() {
   const [search, setSearch] = React.useState("");
   const [query, setQuery] = React.useState("");
   const [expanded, setExpanded] = React.useState<string | null>(null);
+  const [flat, setFlat] = React.useState<FlatFindingsState>(EMPTY_FLAT_STATE);
+  const [flatPage, setFlatPage] = React.useState(1);
+  const [flatPageSize, setFlatPageSize] = React.useState(20);
+  const [assetTree, setAssetTree] = React.useState<AssetTreeState>(EMPTY_ASSET_TREE);
+  const [assetScope, setAssetScope] = React.useState<string | null>(null);
   const [groups, setGroups] = React.useState<FindingGroup[]>([]);
   const [groupTotal, setGroupTotal] = React.useState(0);
   const [expandedGroups, setExpandedGroups] = React.useState<Set<string>>(() => new Set());
@@ -154,12 +156,14 @@ export default function FindingsPage() {
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as {
+          view?: unknown;
           severity?: unknown;
           status?: unknown;
           vulnclass?: unknown;
           task?: unknown;
           sort?: unknown;
         };
+        if (FINDING_VIEWS.includes(parsed.view as FindingView)) setView(parsed.view as FindingView);
         if (parsed.severity === "all" || SEVERITIES.includes(parsed.severity as Severity)) {
           setSeverity(parsed.severity as "all" | Severity);
         }
@@ -178,15 +182,20 @@ export default function FindingsPage() {
 
   React.useEffect(() => {
     if (!preferencesHydrated) return;
-    setLocalStorageValue(FINDING_LIST_PREFERENCE_KEY, JSON.stringify({ severity, status, vulnclass, task, sort }));
-  }, [preferencesHydrated, severity, sort, status, task, vulnclass]);
+    setLocalStorageValue(
+      FINDING_LIST_PREFERENCE_KEY,
+      JSON.stringify({ view, severity, status, vulnclass, task, sort }),
+    );
+  }, [preferencesHydrated, severity, sort, status, task, view, vulnclass]);
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 300);
     return () => window.clearTimeout(timer);
   }, [search]);
 
+  // setFindings 同时改写两个视图缓存里的同一条发现,切换视图不会看到过期状态。
   const setFindings = React.useCallback((update: (current: Finding[]) => Finding[]) => {
+    setFlat((current) => ({ ...current, items: update(current.items) }));
     setGroupFindings((current) => {
       const next: Record<string, GroupFindingsState> = {};
       for (const [key, state] of Object.entries(current)) {
@@ -248,14 +257,73 @@ export default function FindingsPage() {
     }
   }
 
+  const flatRequest = React.useRef(0);
+  const assetTreeRequest = React.useRef(0);
   const groupRequests = React.useRef<Record<string, number>>({});
   const groupsRequest = React.useRef(0);
+  const flatStateRef = React.useRef(flat);
   const expandedGroupsRef = React.useRef(expandedGroups);
   const groupFindingsRef = React.useRef(groupFindings);
   const visibleGroupKeysRef = React.useRef<Set<string>>(new Set());
+  flatStateRef.current = flat;
   expandedGroupsRef.current = expandedGroups;
   groupFindingsRef.current = groupFindings;
   visibleGroupKeysRef.current = new Set(groups.map(findingGroupKey));
+
+  // 资产视图右侧列表 = 平铺列表 + 选中子树的筛选,所以两个视图共用一份列表状态。
+  const activeAssetScope = view === "asset" ? assetScope : null;
+
+  // loadFlat 拉取平铺视图的当前页;task 筛选交给后端,与分组视图共用同一批筛选条件。
+  const loadFlat = React.useCallback(async () => {
+    const requestFilter = filterFingerprint;
+    if (activeFilterFingerprint.current !== requestFilter) return;
+    const request = ++flatRequest.current;
+    setFlat((current) => ({ ...current, loading: true }));
+    try {
+      const result = await api.findingsPage({
+        page: flatPage,
+        pageSize: flatPageSize,
+        severity,
+        status,
+        vulnclass,
+        task,
+        query,
+        sort,
+        assetScope: activeAssetScope ?? undefined,
+      });
+      if (request !== flatRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      setFlat({ items: result.items, total: result.total, loaded: true, loading: false });
+    } catch {
+      if (request !== flatRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      // Polling keeps the last successful snapshot visible.
+      setFlat((current) => ({ ...current, loading: false }));
+    }
+  }, [activeAssetScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclass, task, query, sort]);
+
+  // loadAssetTree 取整棵资产树。树不随选中节点变化(否则选一下就塌成一条链),
+  // 所以这里不带 assetScope。
+  const loadAssetTree = React.useCallback(async () => {
+    const requestFilter = filterFingerprint;
+    if (activeFilterFingerprint.current !== requestFilter) return;
+    const request = ++assetTreeRequest.current;
+    setAssetTree((current) => ({ ...current, loading: true }));
+    try {
+      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort });
+      if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      setAssetTree({
+        nodes: result.nodes ?? [],
+        findingTotal: result.finding_total ?? 0,
+        truncated: Boolean(result.truncated),
+        droppedKinds: result.dropped_kinds ?? [],
+        loaded: true,
+        loading: false,
+      });
+    } catch (e) {
+      if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      setAssetTree((current) => ({ ...current, loading: false }));
+      toast.error(`资产树加载失败：${(e as Error).message}`);
+    }
+  }, [filterFingerprint, severity, status, vulnclass, task, query, sort]);
 
   const refreshGroups = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
@@ -364,31 +432,69 @@ export default function FindingsPage() {
     [expandedGroups, groupFindings, loadGroup],
   );
 
-  const reloadGroupForFinding = React.useCallback(
+  // 行内改动后刷新当前视图:平铺视图重拉当前页,分组视图刷组头 + 该发现所在的组。
+  const refreshAfterMutation = React.useCallback(
     (finding: Finding, removed = false) => {
+      if (view === "asset") {
+        // 资产视图不轮询,所以改完要顺带把树的计数也重新算一次。
+        void loadFlat();
+        void loadAssetTree();
+        return;
+      }
+      if (view === "flat") {
+        // 删空最后一页时,页码由越界修正 effect 回退并连带重新加载。
+        void loadFlat();
+        return;
+      }
+      void refreshGroups();
       const key = finding.task_id ?? UNASSIGNED_TASK;
-      const state = groupFindings[key];
+      const state = groupFindingsRef.current[key];
       if (state?.loaded) {
         const nextTotal = Math.max(0, state.total - (removed ? 1 : 0));
         const lastPage = Math.max(1, Math.ceil(nextTotal / state.pageSize));
         void loadGroup(key, Math.min(state.page, lastPage), state.pageSize);
       }
     },
-    [groupFindings, loadGroup],
+    [loadAssetTree, loadFlat, loadGroup, refreshGroups, view],
   );
 
-  // Reset both pagination levels when a shared finding filter changes.
+  // Reset every view's pagination and expansion when a shared finding filter changes.
   React.useEffect(() => {
     void filterFingerprint;
     setPage(1);
     setExpanded(null);
     setExpandedGroups(new Set());
     setGroupFindings({});
+    setFlatPage(1);
+    setFlat(EMPTY_FLAT_STATE);
+    // 筛选变了树也会变,原先选中的节点可能已经不在树里,退回「全部资产」。
+    setAssetScope(null);
+    setAssetTree(EMPTY_ASSET_TREE);
   }, [filterFingerprint]);
 
-  // Task-group paging is independent from every expanded group's finding page.
+  // 换资产节点等于换了一份结果集,回到第一页。
   React.useEffect(() => {
+    void assetScope;
+    setFlatPage(1);
+  }, [assetScope]);
+
+  // 资产树只在进入视图 / 筛选变化时查一次(以及本页改动发现后由
+  // refreshAfterMutation 主动重拉),不做轮询。
+  React.useEffect(() => {
+    if (!preferencesHydrated || view !== "asset") return;
+    void loadAssetTree();
+  }, [loadAssetTree, preferencesHydrated, view]);
+
+  // 只轮询当前视图:平铺视图刷当前页,分组视图刷组头与每个已展开的组(其分页彼此独立)。
+  // 资产视图只查一次(见下面的 return),它的左树是导航结构,没必要每 5 秒重算。
+  // 等偏好水合后再发首个请求,否则会先按默认视图/筛选白拉一次。
+  React.useEffect(() => {
+    if (!preferencesHydrated) return;
     const refresh = () => {
+      if (view === "flat" || view === "asset") {
+        if (!flatStateRef.current.loading) void loadFlat();
+        return;
+      }
       void refreshGroups();
       for (const key of expandedGroupsRef.current) {
         if (!visibleGroupKeysRef.current.has(key)) continue;
@@ -397,14 +503,21 @@ export default function FindingsPage() {
       }
     };
     refresh();
+    if (view === "asset") return;
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
-  }, [loadGroup, refreshGroups]);
+  }, [loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
 
   React.useEffect(() => {
     const lastPage = Math.max(1, Math.ceil(groupTotal / pageSize));
     if (page > lastPage) setPage(lastPage);
   }, [groupTotal, page, pageSize]);
+
+  React.useEffect(() => {
+    if (!flat.loaded) return;
+    const lastPage = Math.max(1, Math.ceil(flat.total / flatPageSize));
+    if (flatPage > lastPage) setFlatPage(lastPage);
+  }, [flat.loaded, flat.total, flatPage, flatPageSize]);
 
   // Whole-table aggregates (stat cards + vuln-class options) — independent of the
   // current page, so they stay exact.
@@ -462,26 +575,24 @@ export default function FindingsPage() {
         if (status !== "all" && next !== status) {
           setFindings((cur) => cur.filter((x) => !isSameFinding(x, f)));
           setTotal((t) => Math.max(0, t - 1));
+          setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - 1) }));
         }
-        void refreshGroups();
-        reloadGroupForFinding(f);
+        refreshAfterMutation(f);
       } catch (e) {
         setFindings((cur) => cur.map((x) => (isSameFinding(x, f) ? { ...x, status: prev } : x)));
         toast.error(`更新失败：${(e as Error).message}`);
       }
     },
-    [reloadGroupForFinding, refreshGroups, setFindings, status],
+    [refreshAfterMutation, setFindings, status],
   );
 
   // 行内展开的详细报告缓存按全局稳定行键存。report 是大段 Markdown,列表查询不带它,
   // 故展开时才按 finding_id 单独拉取一次;done 且文本为空 = 该漏洞暂无报告。
-  const [reports, setReports] = React.useState<Record<string, { status: "loading" | "done" | "error"; text: string }>>(
-    {},
-  );
+  const [reports, setReports] = React.useState<Record<string, FindingReport>>({});
 
   // 行内可编辑缓冲:当前展开行的名称/类别/严重等级,展开时用该行数据初始化,收起清空。
   // 单行展开,故一份缓冲即可。
-  const [edit, setEdit] = React.useState<{ name: string; vulnclass: string; severity: Severity } | null>(null);
+  const [edit, setEdit] = React.useState<FindingEdit | null>(null);
   const [saving, setSaving] = React.useState(false);
 
   // toggle 展开/收起一行;新展开时初始化编辑缓冲,并(尚未取过时)按 finding_id 拉一次报告缓存。
@@ -531,15 +642,14 @@ export default function FindingsPage() {
           .catch(() => {
             // The edit remains valid even if the aggregate refresh fails.
           });
-        void refreshGroups();
-        reloadGroupForFinding(f);
+        refreshAfterMutation(f);
       } catch (e) {
         toast.error(`保存失败：${(e as Error).message}`);
       } finally {
         setSaving(false);
       }
     },
-    [edit, reloadGroupForFinding, refreshGroups, setFindings],
+    [edit, refreshAfterMutation, setFindings],
   );
 
   // deleteFinding 删除一个漏洞(需二次确认):删成功后从列表移除、收起行、刷新统计。
@@ -555,6 +665,7 @@ export default function FindingsPage() {
           return next;
         });
         setTotal((t) => Math.max(0, t - 1));
+        setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - 1) }));
         const rowKey = findingRowKey(f);
         setExpanded((cur) => (cur === rowKey ? null : cur));
         toast.success("已删除漏洞");
@@ -564,14 +675,18 @@ export default function FindingsPage() {
           .catch(() => {
             // The deletion remains valid even if the aggregate refresh fails.
           });
-        void refreshGroups();
-        reloadGroupForFinding(f, true);
+        refreshAfterMutation(f, true);
       } catch (e) {
         toast.error(`删除失败：${(e as Error).message}`);
       }
     },
-    [reloadGroupForFinding, refreshGroups, setFindings],
+    [refreshAfterMutation, setFindings],
   );
+
+  const openDeepen = React.useCallback((f: Finding) => {
+    setDeepenFinding(f);
+    setDeepenDescription("");
+  }, []);
 
   async function submitDeepen() {
     if (!deepenFinding?.finding_id || !deepenDescription.trim() || deepening) return;
@@ -583,10 +698,9 @@ export default function FindingsPage() {
           ? `深入意图 #${result.intent_id} 已进入任务队列`
           : `已创建高优先级 Worker 意图 #${result.intent_id}`,
       );
+      refreshAfterMutation(deepenFinding);
       setDeepenFinding(null);
       setDeepenDescription("");
-      reloadGroupForFinding(deepenFinding);
-      void refreshGroups();
     } catch (error) {
       toast.error(`提交失败：${(error as Error).message}`);
     } finally {
@@ -603,11 +717,72 @@ export default function FindingsPage() {
     { label: "低危", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
   ];
 
+  // 导出弹窗里「当前筛选」的条数:两个视图的筛选一致,只是统计口径来源不同。
+  // 平铺与资产视图共用 flat 列表状态,分组视图的口径来自组接口的 finding_total。
+  const filteredTotal = view === "grouped" ? total : flat.total;
+  const assetPath = React.useMemo(
+    () => (view === "asset" ? assetPathOf(assetTree.nodes, assetScope) : []),
+    [assetScope, assetTree.nodes, view],
+  );
+
+  const rowProps = {
+    selectedIds,
+    onToggleSelected: toggleSelected,
+    onToggleSelectedPage: toggleSelectedPage,
+    expandedKey: expanded,
+    onToggleRow: toggleRow,
+    reports,
+    edit,
+    onEditChange: setEdit,
+    saving,
+    onSave: saveEdit,
+    onStatusChange: updateStatus,
+    onDeepen: openDeepen,
+    onDelete: deleteFinding,
+  };
+
+  // 平铺视图与资产视图右侧是同一张表 + 同一份分页,只是筛选条件不同。
+  const flatListCard = (
+    <Card className="gap-0 py-0">
+      <CardContent className="px-0">
+        {flat.loading && !flat.loaded ? (
+          <div className="flex min-h-36 items-center justify-center">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <FindingsTable items={flat.items} selectAllLabel="选择当前页全部" {...rowProps} />
+            <TablePagination
+              page={flatPage}
+              pageSize={flatPageSize}
+              total={flat.total}
+              onPageChange={setFlatPage}
+              onPageSizeChange={(nextSize) => {
+                setFlatPageSize(nextSize);
+                setFlatPage(1);
+              }}
+              pageSizeOptions={[10, 20, 50, 100]}
+            />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">发现</h1>
-        <p className="text-muted-foreground text-sm">跨任务漏洞汇总</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">发现</h1>
+          <p className="text-muted-foreground text-sm">跨任务漏洞汇总</p>
+        </div>
+        <Tabs value={view} onValueChange={(v) => setView(v as FindingView)}>
+          <TabsList>
+            <TabsTrigger value="flat">全部发现</TabsTrigger>
+            <TabsTrigger value="grouped">按任务分组</TabsTrigger>
+            <TabsTrigger value="asset">按资产</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
@@ -739,465 +914,173 @@ export default function FindingsPage() {
           </div>
         </div>
 
-        <div className="flex flex-col gap-3">
-          {groups.map((group) => {
-            const key = findingGroupKey(group);
-            const groupOpen = expandedGroups.has(key);
-            const state = groupFindings[key] ?? {
-              items: [],
-              total: group.count,
-              page: 1,
-              pageSize: 10,
-              loaded: false,
-              loading: false,
-            };
-            const selectableIds = state.items
-              .map((finding) => finding.finding_id)
-              .filter((id): id is string => Boolean(id));
-            const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
-            let groupChecked: boolean | "indeterminate" = false;
-            if (selectableIds.length > 0 && selectedCount === selectableIds.length) {
-              groupChecked = true;
-            } else if (selectedCount > 0) {
-              groupChecked = "indeterminate";
-            }
-            return (
-              <Card key={key} className="gap-0 py-0">
-                <CardHeader className="px-4 py-3">
-                  <div className="flex min-w-0 flex-wrap items-center gap-3">
+        {view === "flat" && flatListCard}
+
+        {view === "asset" && (
+          <div className="grid min-h-0 items-start gap-4 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[24rem_minmax(0,1fr)]">
+            <Card className="gap-0 py-3 lg:sticky lg:top-4">
+              <CardContent className="flex max-h-[24rem] flex-col px-3 lg:max-h-[calc(100vh-14rem)]">
+                {assetTree.loading && !assetTree.loaded ? (
+                  <div className="flex min-h-36 items-center justify-center">
+                    <Spinner />
+                  </div>
+                ) : (
+                  <AssetTree
+                    nodes={assetTree.nodes}
+                    selected={assetScope}
+                    onSelect={setAssetScope}
+                    loading={assetTree.loading}
+                    truncated={assetTree.truncated}
+                    droppedKinds={assetTree.droppedKinds}
+                    findingTotal={assetTree.findingTotal}
+                    onRefresh={() => void loadAssetTree()}
+                  />
+                )}
+              </CardContent>
+            </Card>
+            <div className="flex min-w-0 flex-col gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-muted-foreground">
+                <button
+                  type="button"
+                  className={cn("hover:text-foreground", assetScope === null && "font-medium text-foreground")}
+                  onClick={() => setAssetScope(null)}
+                >
+                  全部资产
+                </button>
+                {assetPath.map((node) => (
+                  <React.Fragment key={node.key}>
+                    <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                     <button
                       type="button"
-                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                      aria-expanded={groupOpen}
-                      onClick={() => toggleGroup(key)}
-                    >
-                      <ChevronRightIcon
-                        className={cn(
-                          "size-4 shrink-0 text-muted-foreground transition-transform",
-                          groupOpen && "rotate-90",
-                        )}
-                      />
-                      <div className="flex min-w-0 flex-col gap-1">
-                        <CardTitle className="truncate text-sm">
-                          {group.task_id === null
-                            ? "未关联 / 任务已删除"
-                            : group.task_name
-                              ? `${group.task_name}（任务 #${group.task_id}）`
-                              : `任务 #${group.task_id}`}
-                        </CardTitle>
-                        <CardDescription className="truncate" title={group.task_description}>
-                          {group.task_description || "来源任务不可用"}
-                        </CardDescription>
-                      </div>
-                    </button>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {group.task_status && <StatusBadge domain="task" value={group.task_status} dot />}
-                      {SEVERITIES.map((level) => {
-                        const count = group[level];
-                        if (count === 0) return null;
-                        return (
-                          <span key={level} className="inline-flex items-center gap-1">
-                            <StatusBadge domain="severity" value={level} dot />
-                            <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
-                          </span>
-                        );
-                      })}
-                      <span className="text-xs tabular-nums text-muted-foreground">{fmtTime(group.last_found_at)}</span>
-                      {group.task_id !== null && (
-                        <Button size="icon-sm" variant="ghost" asChild>
-                          <Link
-                            href={`/function/tasks/detail?id=${group.task_id}`}
-                            aria-label={`查看任务 #${group.task_id}`}
-                          >
-                            <ArrowUpRightIcon />
-                          </Link>
-                        </Button>
+                      className={cn(
+                        "max-w-[16rem] truncate hover:text-foreground",
+                        node.key === assetScope && "font-medium text-foreground",
                       )}
-                    </div>
-                  </div>
-                </CardHeader>
-                {groupOpen && (
-                  <CardContent className="px-0">
-                    {state.loading && !state.loaded ? (
-                      <div className="flex min-h-36 items-center justify-center">
-                        <Spinner />
-                      </div>
-                    ) : (
-                      <>
-                        {/* table-fixed:列宽由表头锁定,展开行那个 colSpan 单元格再宽也只能在固定宽度内
-                换行/内部滚动,不会把整张表撑出横向滚动条。 */}
-                        <Table className="table-fixed">
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="w-8">
-                                <Checkbox
-                                  checked={groupChecked}
-                                  onCheckedChange={(checked) => toggleSelectedPage(selectableIds, checked === true)}
-                                  aria-label="选择本组当前页全部"
-                                />
-                              </TableHead>
-                              <TableHead className="w-8" />
-                              <TableHead className="w-20">严重度</TableHead>
-                              <TableHead>漏洞名称</TableHead>
-                              <TableHead className="w-52">资产</TableHead>
-                              <TableHead className="w-28">状态</TableHead>
-                              <TableHead className="w-36 max-w-[9rem]">所属任务</TableHead>
-                              <TableHead className="w-32">时间</TableHead>
-                              <TableHead className="w-32 text-right">操作</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {state.items.map((f) => {
-                              const rowKey = findingRowKey(f);
-                              const open = expanded === rowKey;
-                              return (
-                                <React.Fragment key={rowKey}>
-                                  <TableRow
-                                    className="cursor-pointer"
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-expanded={open}
-                                    onClick={() => toggleRow(f)}
-                                    onKeyDown={(event) => {
-                                      if (
-                                        event.target !== event.currentTarget ||
-                                        (event.key !== "Enter" && event.key !== " ")
-                                      )
-                                        return;
-                                      event.preventDefault();
-                                      toggleRow(f);
-                                    }}
-                                  >
-                                    <TableCell onClick={(e) => e.stopPropagation()}>
-                                      {f.finding_id && (
-                                        <Checkbox
-                                          checked={selectedIds.has(f.finding_id)}
-                                          onCheckedChange={(c) => toggleSelected(f.finding_id as string, c === true)}
-                                          aria-label="选择该漏洞"
-                                        />
-                                      )}
-                                    </TableCell>
-                                    <TableCell>
-                                      <ChevronRightIcon
-                                        className={cn(
-                                          "size-4 text-muted-foreground transition-transform",
-                                          open && "rotate-90",
-                                        )}
-                                      />
-                                    </TableCell>
-                                    <TableCell>
-                                      <StatusBadge domain="severity" value={f.severity} dot />
-                                    </TableCell>
-                                    <TableCell className="max-w-md">
-                                      <div className="flex min-w-0 flex-col gap-0.5">
-                                        {f.finding_id ? (
-                                          <Link
-                                            href={`/function/findings/detail?id=${f.finding_id}`}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="truncate font-medium hover:text-primary hover:underline"
-                                            title="查看发现详情"
-                                          >
-                                            {f.name || f.vulnclass || "未分类"}
-                                          </Link>
-                                        ) : (
-                                          <span className="truncate font-medium">
-                                            {f.name || f.vulnclass || "未分类"}
-                                          </span>
-                                        )}
-                                        <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
-                                      </div>
-                                    </TableCell>
-                                    <TableCell className="w-52">
-                                      {f.assets && f.assets.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1">
-                                          {f.assets.slice(0, 3).map((a) => (
-                                            <code
-                                              key={a.id}
-                                              className="max-w-[12rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
-                                              title={`${a.type} · ${a.label}`}
-                                            >
-                                              {a.label}
-                                            </code>
-                                          ))}
-                                          {f.assets.length > 3 && (
-                                            <span className="text-xs text-muted-foreground">
-                                              +{f.assets.length - 3}
-                                            </span>
-                                          )}
-                                        </div>
-                                      ) : (
-                                        <span className="text-muted-foreground">—</span>
-                                      )}
-                                    </TableCell>
-                                    <TableCell onClick={(e) => e.stopPropagation()}>
-                                      {f.finding_id ? (
-                                        <Select
-                                          value={f.status}
-                                          onValueChange={(v) => updateStatus(f, v as FindingStatus)}
-                                        >
-                                          <SelectTrigger
-                                            size="sm"
-                                            className="h-7 w-full border-none px-1 shadow-none focus-visible:ring-0"
-                                          >
-                                            <StatusBadge domain="finding" value={f.status} dot />
-                                          </SelectTrigger>
-                                          <SelectContent position="popper" align="end">
-                                            {FINDING_STATUSES.map((st) => (
-                                              <SelectItem key={st} value={st}>
-                                                {statusMeta("finding", st).label}
-                                              </SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
-                                      ) : (
-                                        <StatusBadge domain="finding" value={f.status} dot />
-                                      )}
-                                    </TableCell>
-                                    <TableCell className="w-36 max-w-[9rem]">
-                                      {f.task_id ? (
-                                        <Link
-                                          href={`/function/tasks/detail?id=${f.task_id}`}
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
-                                          title={f.task_description}
-                                        >
-                                          <span className="truncate">{f.task_description}</span>
-                                          <ArrowUpRightIcon className="size-3 shrink-0" />
-                                        </Link>
-                                      ) : (
-                                        <span className="text-muted-foreground">—</span>
-                                      )}
-                                    </TableCell>
-                                    <TableCell className="text-xs text-muted-foreground tabular-nums">
-                                      {fmtTime(f.ts)}
-                                    </TableCell>
-                                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                                      <div className="flex items-center justify-end gap-1">
-                                        {f.finding_id && f.task_id && (
-                                          <Button
-                                            size="sm"
-                                            variant="ghost"
-                                            onClick={() => {
-                                              setDeepenFinding(f);
-                                              setDeepenDescription("");
-                                            }}
-                                          >
-                                            <FlaskConicalIcon data-icon="inline-start" />
-                                            深入
-                                          </Button>
-                                        )}
-                                        {f.finding_id && (
-                                          <AlertDialog>
-                                            <AlertDialogTrigger asChild>
-                                              <Button
-                                                size="icon"
-                                                variant="ghost"
-                                                className="size-7 text-muted-foreground hover:text-destructive"
-                                                aria-label="删除漏洞"
-                                              >
-                                                <Trash2Icon className="size-4" />
-                                              </Button>
-                                            </AlertDialogTrigger>
-                                            <AlertDialogContent>
-                                              <AlertDialogHeader>
-                                                <AlertDialogTitle>确认删除该漏洞？</AlertDialogTitle>
-                                                <AlertDialogDescription className="break-words">
-                                                  「
-                                                  <span className="break-all">
-                                                    {f.name || f.vulnclass || f.summary || `#${f.finding_id}`}
-                                                  </span>
-                                                  」将被永久删除， 同时从发现列表、任务发现 Tab
-                                                  与探索图中移除，此操作不可撤销。
-                                                </AlertDialogDescription>
-                                              </AlertDialogHeader>
-                                              <AlertDialogFooter>
-                                                <AlertDialogCancel>取消</AlertDialogCancel>
-                                                <AlertDialogAction onClick={() => deleteFinding(f)}>
-                                                  删除
-                                                </AlertDialogAction>
-                                              </AlertDialogFooter>
-                                            </AlertDialogContent>
-                                          </AlertDialog>
-                                        )}
-                                      </div>
-                                    </TableCell>
-                                  </TableRow>
-                                  {open && (
-                                    <TableRow className="hover:bg-transparent">
-                                      {/* whitespace-normal 覆盖 TableCell 默认的 nowrap,否则展开区文字
-                              被强制单行、直接溢出单元格。 */}
-                                      <TableCell colSpan={9} className="bg-muted/30 whitespace-normal">
-                                        <div className="flex flex-col gap-2 px-2 py-1">
-                                          {/* 行内编辑:名称/类别/严重等级,可改并保存(仅独立 finding 行)。 */}
-                                          {f.finding_id && edit && (
-                                            <div className="flex flex-wrap items-end gap-3 rounded-md border bg-background px-3 py-2.5">
-                                              <div className="flex min-w-[12rem] flex-1 flex-col gap-1">
-                                                <Label className="text-xs text-muted-foreground">漏洞名称</Label>
-                                                <Input
-                                                  value={edit.name}
-                                                  onChange={(e) =>
-                                                    setEdit((s) => (s ? { ...s, name: e.target.value } : s))
-                                                  }
-                                                  placeholder="可读标题，留空回退类别"
-                                                />
-                                              </div>
-                                              <div className="flex min-w-[10rem] flex-col gap-1">
-                                                <Label className="text-xs text-muted-foreground">类别</Label>
-                                                <Input
-                                                  value={edit.vulnclass}
-                                                  onChange={(e) =>
-                                                    setEdit((s) => (s ? { ...s, vulnclass: e.target.value } : s))
-                                                  }
-                                                  placeholder="如 SQL Injection"
-                                                />
-                                              </div>
-                                              <div className="flex flex-col gap-1">
-                                                <Label className="text-xs text-muted-foreground">严重等级</Label>
-                                                <Select
-                                                  value={edit.severity}
-                                                  onValueChange={(v) =>
-                                                    setEdit((s) => (s ? { ...s, severity: v as Severity } : s))
-                                                  }
-                                                >
-                                                  <SelectTrigger size="sm" className="w-28">
-                                                    <SelectValue />
-                                                  </SelectTrigger>
-                                                  <SelectContent>
-                                                    {SEVERITIES.map((sv) => (
-                                                      <SelectItem key={sv} value={sv}>
-                                                        {statusMeta("severity", sv).label}
-                                                      </SelectItem>
-                                                    ))}
-                                                  </SelectContent>
-                                                </Select>
-                                              </div>
-                                              <Button size="sm" disabled={saving} onClick={() => saveEdit(f)}>
-                                                {saving ? "保存中…" : "保存"}
-                                              </Button>
-                                            </div>
-                                          )}
-                                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                                            <ShieldAlertIcon className="size-3.5" />
-                                            证据
-                                            {f.vulnclass && (
-                                              <span>
-                                                · 类型：
-                                                <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
-                                                  {f.vulnclass}
-                                                </code>
-                                              </span>
-                                            )}
-                                            {f.param_id && (
-                                              <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
-                                                {f.param_id}
-                                              </code>
-                                            )}
-                                            {f.assets && f.assets.length > 0 && (
-                                              <span className="flex flex-wrap items-center gap-1">
-                                                · 资产：
-                                                {f.assets.map((a) => (
-                                                  <code
-                                                    key={a.id}
-                                                    className="rounded bg-muted px-1.5 py-0.5 font-mono"
-                                                    title={a.type}
-                                                  >
-                                                    {a.label}
-                                                  </code>
-                                                ))}
-                                              </span>
-                                            )}
-                                          </div>
-                                          <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-                                            {f.evidence}
-                                          </pre>
+                      title={node.label}
+                      onClick={() => setAssetScope(node.key)}
+                    >
+                      {node.display}
+                    </button>
+                  </React.Fragment>
+                ))}
+                <span className="ml-auto shrink-0 text-xs tabular-nums">共 {flat.total} 条</span>
+              </div>
+              {flatListCard}
+            </div>
+          </div>
+        )}
 
-                                          {/* 详细报告(Markdown):展开时按 finding_id 懒加载,免进详情页即可查看。 */}
-                                          {f.finding_id && (
-                                            <div className="flex flex-col gap-1.5">
-                                              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                                                <span className="flex items-center gap-2">
-                                                  <FileTextIcon className="size-3.5" />
-                                                  详细报告
-                                                </span>
-                                                {reports[rowKey]?.status === "done" && reports[rowKey]?.text.trim() && (
-                                                  <CopyButton
-                                                    text={reports[rowKey]?.text}
-                                                    successMessage="已复制详细报告"
-                                                    variant="ghost"
-                                                    className="h-6 px-2 text-xs"
-                                                  />
-                                                )}
-                                              </div>
-                                              {(() => {
-                                                const rep = reports[rowKey];
-                                                if (!rep || rep.status === "loading")
-                                                  return <p className="text-xs text-muted-foreground">加载中…</p>;
-                                                if (rep.status === "error")
-                                                  return (
-                                                    <p className="text-xs text-muted-foreground">报告加载失败。</p>
-                                                  );
-                                                if (!rep.text.trim())
-                                                  return (
-                                                    <p className="text-xs text-muted-foreground">暂无详细报告。</p>
-                                                  );
-                                                return (
-                                                  // break-words 会继承到段落/列表,pre 另加
-                                                  // whitespace-pre-wrap 让代码块也换行——否则长代码行/长 URL
-                                                  // 会撑宽 colSpan 单元格,把整张表挤出横向滚动条。
-                                                  <div className="min-w-0 break-words rounded-md border bg-background px-3 py-2 [&_pre]:whitespace-pre-wrap">
-                                                    <Markdown text={rep.text} />
-                                                  </div>
-                                                );
-                                              })()}
-                                            </div>
-                                          )}
-                                        </div>
-                                      </TableCell>
-                                    </TableRow>
-                                  )}
-                                </React.Fragment>
-                              );
-                            })}
-                            {state.items.length === 0 && (
-                              <TableRow>
-                                <TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
-                                  没有匹配的发现。
-                                </TableCell>
-                              </TableRow>
-                            )}
-                          </TableBody>
-                        </Table>
-                        <TablePagination
-                          page={state.page}
-                          pageSize={state.pageSize}
-                          total={state.total}
-                          onPageChange={(nextPage) => void loadGroup(key, nextPage, state.pageSize)}
-                          onPageSizeChange={(nextSize) => void loadGroup(key, 1, nextSize)}
+        {view === "grouped" && (
+          <div className="flex flex-col gap-3">
+            {groups.map((group) => {
+              const key = findingGroupKey(group);
+              const groupOpen = expandedGroups.has(key);
+              const state = groupFindings[key] ?? {
+                items: [],
+                total: group.count,
+                page: 1,
+                pageSize: 10,
+                loaded: false,
+                loading: false,
+              };
+              return (
+                <Card key={key} className="gap-0 py-0">
+                  <CardHeader className="px-4 py-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                        aria-expanded={groupOpen}
+                        onClick={() => toggleGroup(key)}
+                      >
+                        <ChevronRightIcon
+                          className={cn(
+                            "size-4 shrink-0 text-muted-foreground transition-transform",
+                            groupOpen && "rotate-90",
+                          )}
                         />
-                      </>
-                    )}
-                  </CardContent>
-                )}
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <CardTitle className="truncate text-sm">
+                            {group.task_id === null
+                              ? "未关联 / 任务已删除"
+                              : group.task_name
+                                ? `${group.task_name}（任务 #${group.task_id}）`
+                                : `任务 #${group.task_id}`}
+                          </CardTitle>
+                          <CardDescription className="truncate" title={group.task_description}>
+                            {group.task_description || "来源任务不可用"}
+                          </CardDescription>
+                        </div>
+                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {group.task_status && <StatusBadge domain="task" value={group.task_status} dot />}
+                        {SEVERITIES.map((level) => {
+                          const count = group[level];
+                          if (count === 0) return null;
+                          return (
+                            <span key={level} className="inline-flex items-center gap-1">
+                              <StatusBadge domain="severity" value={level} dot />
+                              <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+                            </span>
+                          );
+                        })}
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {fmtTime(group.last_found_at)}
+                        </span>
+                        {group.task_id !== null && (
+                          <Button size="icon-sm" variant="ghost" asChild>
+                            <Link
+                              href={`/function/tasks/detail?id=${group.task_id}`}
+                              aria-label={`查看任务 #${group.task_id}`}
+                            >
+                              <ArrowUpRightIcon />
+                            </Link>
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </CardHeader>
+                  {groupOpen && (
+                    <CardContent className="px-0">
+                      {state.loading && !state.loaded ? (
+                        <div className="flex min-h-36 items-center justify-center">
+                          <Spinner />
+                        </div>
+                      ) : (
+                        <>
+                          <FindingsTable items={state.items} selectAllLabel="选择本组当前页全部" {...rowProps} />
+                          <TablePagination
+                            page={state.page}
+                            pageSize={state.pageSize}
+                            total={state.total}
+                            onPageChange={(nextPage) => void loadGroup(key, nextPage, state.pageSize)}
+                            onPageSizeChange={(nextSize) => void loadGroup(key, 1, nextSize)}
+                          />
+                        </>
+                      )}
+                    </CardContent>
+                  )}
+                </Card>
+              );
+            })}
+            {groups.length === 0 && (
+              <Card>
+                <CardContent className="py-12 text-center text-sm text-muted-foreground">没有匹配的发现。</CardContent>
               </Card>
-            );
-          })}
-          {groups.length === 0 && (
-            <Card>
-              <CardContent className="py-12 text-center text-sm text-muted-foreground">没有匹配的发现。</CardContent>
-            </Card>
-          )}
-          <TablePagination
-            page={page}
-            pageSize={pageSize}
-            total={groupTotal}
-            onPageChange={setPage}
-            onPageSizeChange={(nextPageSize) => {
-              setPageSize(nextPageSize);
-              setPage(1);
-            }}
-            pageSizeOptions={[5, 10, 20]}
-          />
-        </div>
+            )}
+            <TablePagination
+              page={page}
+              pageSize={pageSize}
+              total={groupTotal}
+              onPageChange={setPage}
+              onPageSizeChange={(nextPageSize) => {
+                setPageSize(nextPageSize);
+                setPage(1);
+              }}
+              pageSizeOptions={[5, 10, 20]}
+            />
+          </div>
+        )}
       </div>
 
       <Dialog
@@ -1264,7 +1147,8 @@ export default function FindingsPage() {
               <span className="text-xs text-muted-foreground">导出范围</span>
               <RadioGroup value={exportScope} onValueChange={(v) => setExportScope(v as typeof exportScope)}>
                 <label htmlFor="export-scope-filtered" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-scope-filtered" value="filtered" /> 导出当前筛选结果（共 {total} 条）
+                  <RadioGroupItem id="export-scope-filtered" value="filtered" /> 导出当前筛选结果（共 {filteredTotal}{" "}
+                  条）
                 </label>
                 <label htmlFor="export-scope-all" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-scope-all" value="all" /> 导出全部

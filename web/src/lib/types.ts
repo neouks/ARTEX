@@ -548,7 +548,40 @@ export interface FindingQuery {
   task?: string; // 任务 id;"all"/空 = 不按任务筛选
   query?: string;
   sort?: "severity" | "time";
+  // 资产树节点 key;选中一个节点 = 选中它的整棵子树。空 = 不按资产筛选。
+  assetScope?: string;
 }
+
+// ---- Findings by asset (资产视图) ----
+export type FindingAssetKind = "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint" | "none";
+
+// FindingAssetNode 是资产树的一个节点。key 形如 a:<id>(资产)、c:<id>(企业)、
+// r:<domain>(库里没有资产行的根域名)、__none__(未关联资产)。
+export interface FindingAssetNode {
+  key: string;
+  parent?: string;
+  kind: FindingAssetKind;
+  label: string;
+  asset_id?: number;
+  company_id?: number;
+  self: number; // 直接挂在该资产上的发现数
+  total: number; // 含子孙、按发现去重
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  last_found_at: string;
+}
+
+export interface FindingAssetTree {
+  nodes: FindingAssetNode[];
+  finding_total: number;
+  truncated: boolean;
+  dropped_kinds?: string[];
+}
+
+// FINDING_UNASSIGNED_ASSET 与后端 db.FindingUnassignedAsset 对应。
+export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =
@@ -833,6 +866,9 @@ export interface Settings {
   tavily_search_api_key?: string;
   // 独立出口代理(http/https/socks5)，用于访问搜索端点；与记录流量的 MITM 代理无关。空=直连。
   web_search_proxy?: string;
+  // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
+  // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
+  global_proxy?: string;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
@@ -871,6 +907,15 @@ export interface LLMProfile {
   pool_exclude?: boolean;
   // true（默认）= 流式(SSE) | false = 真·非流式(stream:false，一次性返回)。
   streaming?: boolean;
+  // 单次回复的输出上限(token)。0 = 不发送该字段，由服务端默认值决定。
+  // 注意与 context_window_k 区分：后者是模型总容量，只在本地用于压缩阈值。
+  max_tokens?: number;
+  // 上限用哪个请求字段名，仅 format="openai" 有意义：
+  // ""=max_tokens(默认) | "max_completion_tokens"(OpenAI 推理模型只认它)
+  max_tokens_field?: string;
+  // 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
+  // ""=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
+  session_header_key?: string;
 }
 
 // ---- LLM 轮询（故障转移）----

@@ -312,6 +312,8 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
+	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
+	cfg.SessionHeaderKey = p.SessionHeaderKey
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -327,16 +329,21 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
 	var id int64
-	// agent.Config carries no failover fields, so carry the stored ones forward —
-	// otherwise this legacy endpoint would silently reset the profile's priority,
-	// pool_exclude, and streaming to zero values on every save.
+	// 这个 legacy 端点的请求体不含轮询/收发/输出上限参数,故把库里已存的值原样带回 —
+	// 否则每次保存都会把 profile 的 priority、pool_exclude、streaming 以及输出上限
+	// (max_tokens / max_tokens_field)悄悄重置成零值。
 	var priority int
 	var poolExclude bool
 	streaming := true // 旧库/新建默认流式
+	var maxTokens int
+	var maxTokensField string
+	var sessionHeaderKey string
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
 			if p.Name == "default" {
 				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
+				maxTokens, maxTokensField = p.MaxTokens, p.MaxTokensField
+				sessionHeaderKey = p.SessionHeaderKey
 				break
 			}
 		}
@@ -346,6 +353,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
+		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
 	})
 	if err != nil {
 		return err
@@ -396,6 +404,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
 	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
+	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
@@ -404,6 +413,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
 	pl.SetNonStreaming(nonStreamingResolver(pCfg))    // 该 profile 选非流式时走 Provider.Complete
+	pl.SetMaxTokens(maxTokensResolver(pCfg))          // 单次回复输出上限(0 = 不发)
 	return pl, wk
 }
 
@@ -413,6 +423,12 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 func nonStreamingResolver(cfg agent.Config) func() bool {
 	nonStreaming := !cfg.Stream
 	return func() bool { return nonStreaming }
+}
+
+// maxTokensResolver mirrors nonStreamingResolver for the per-reply output cap.
+func maxTokensResolver(cfg agent.Config) func() int {
+	maxTokens := cfg.MaxTokens
+	return func() int { return maxTokens }
 }
 
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
@@ -459,6 +475,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
 	s.mainAgent.SetNonStreaming(nonStreamingResolver(mCfg))
+	s.mainAgent.SetMaxTokens(maxTokensResolver(mCfg))
 	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
 	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
 	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
@@ -466,6 +483,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
+	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -492,6 +510,8 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.ThinkingType = p.ThinkingType
 	cfg.ReasoningEffort = p.ReasoningEffort
 	cfg.Stream = p.Streaming
+	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
+	cfg.SessionHeaderKey = p.SessionHeaderKey
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -644,6 +664,7 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
+	ca.SetMaxTokens(maxTokensResolver(cfg))
 	s.profMu.Lock()
 	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
 		ca = ex
@@ -775,6 +796,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
+	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
@@ -1511,10 +1533,8 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	if isTerminalStatus(t.lifecycleSnapshot().Status) {
-		writeErr(w, 409, "已结束的任务不能修改 LLM 配置")
-		return
-	}
+	// 任何生命周期状态(含终态)都可以改链:任务结束后主 Agent 对话仍走这条链,
+	// 模型不可用时不换链就等于把已完成任务的交互一起锁死。
 	before := t.llmStateSnapshot()
 	var req struct {
 		LLMProfileIDs      []int64 `json:"llm_profile_ids"`
@@ -1534,11 +1554,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active)
 	if err != nil {
-		if strings.Contains(err.Error(), "terminal") {
-			writeErr(w, 409, err.Error())
-		} else {
-			writeErr(w, 400, err.Error())
-		}
+		writeErr(w, 400, err.Error())
 		return
 	}
 	// Profile edits affect only subsequent LLM calls. Existing in-flight calls
@@ -1893,16 +1909,7 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		}
 		page := findingPaginationParam(q.Get("page"), 1, 0)
 		limit := findingPaginationParam(q.Get("limit"), 20, 200)
-		filter := db.FindingFilter{
-			Severity:  normFilter(q.Get("severity")),
-			Status:    normFilter(q.Get("status")),
-			VulnClass: normFilter(q.Get("vulnclass")),
-			// task_id(独立于会切到「按任务节点」分支的 task 参数):全局表按任务筛选。
-			TaskID: normFilter(q.Get("task_id")),
-			Query:  q.Get("q"),
-			Sort:   q.Get("sort"),
-		}
-		fs, total, err := s.m.pg.ListFindingsPage(filter, page, limit)
+		fs, total, err := s.m.pg.ListFindingsPage(findingFilterFromQuery(q), page, limit)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -2098,14 +2105,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	case "all":
 		// 空 filter = 不加任何条件。
 	case "filtered", "":
-		filter = db.FindingFilter{
-			Severity:  normFilter(q.Get("severity")),
-			Status:    normFilter(q.Get("status")),
-			VulnClass: normFilter(q.Get("vulnclass")),
-			TaskID:    normFilter(q.Get("task_id")),
-			Query:     q.Get("q"),
-			Sort:      q.Get("sort"),
-		}
+		filter = findingFilterFromQuery(q)
 	default:
 		writeErr(w, 400, "bad scope: "+scope)
 		return
@@ -3110,6 +3110,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
 		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
@@ -3152,6 +3153,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		BraveKey         *string `json:"brave_search_api_key"`
 		TavilyKey        *string `json:"tavily_search_api_key"`
 		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
+		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
@@ -3246,6 +3248,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changed = true
+	}
+	if req.GlobalProxy != nil {
+		// Validation failure (bad scheme/host) is a client error, not a 500.
+		if err := s.m.SetGlobalProxy(*req.GlobalProxy); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		changed = true // capture-off egress is baked into agents at build time → rebuild
 	}
 	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.

@@ -312,6 +312,18 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     pool_exclude     BOOLEAN NOT NULL DEFAULT false,
     -- streaming=true(默认)走流式 SSE；false 走真·非流式(stream:false，一次性 JSON)。
     streaming        BOOLEAN NOT NULL DEFAULT true,
+    -- 单次回复的输出上限(token)。0=不发送该字段，由服务端默认值决定——保持既有行为。
+    -- 与 context_window_k(模型总容量，仅本地用于压缩阈值)是两回事：本值会随请求发出。
+    max_tokens       INTEGER NOT NULL DEFAULT 0,
+    -- 输出上限用哪个请求字段名，仅对 format='openai' 生效：
+    --   ''                      = max_tokens(默认，兼容绝大多数网关)
+    --   'max_completion_tokens' = 新字段；OpenAI 推理模型(o 系列/GPT-5)只认它，
+    --                             发 max_tokens 会被 unsupported_parameter 拒绝。
+    -- anthropic(max_tokens 必填)与 openai-responses(max_output_tokens)自带字段名，不受此值影响。
+    max_tokens_field TEXT NOT NULL DEFAULT '',
+    -- 自定义会话头：非空时每次请求带一个该名字的 HTTP 头，头值=当前运行的 session id
+    -- (chat 会话/worker 意图)。用于某些按 session-id 头做提示缓存/粘性路由的网关。''=不发送。
+    session_header_key TEXT NOT NULL DEFAULT '',
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -329,6 +341,20 @@ ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS streaming    BOOLEAN NOT NULL 
 ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_format_check;
 ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_format_check
     CHECK (format IN ('openai','anthropic','openai-responses'));
+
+-- 输出上限及其字段名；补旧库。默认 0 / '' = 不发送上限、沿用 max_tokens 字段名，
+-- 旧配置行为完全不变。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS max_tokens       INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS max_tokens_field TEXT    NOT NULL DEFAULT '';
+-- 同 format：先删再建，保证每次启动幂等。
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_max_tokens_field_check;
+ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_field_check
+    CHECK (max_tokens_field IN ('','max_completion_tokens'));
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_max_tokens_check;
+ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
+    CHECK (max_tokens >= 0);
+-- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
@@ -960,6 +986,8 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
+-- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
+CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
 
 -- =====================================================================
 -- M. 后端日志持久化
