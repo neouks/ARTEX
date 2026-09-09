@@ -26,7 +26,7 @@ func TestProfileSessionHeaderKeyRoundTrip(t *testing.T) {
 		t.Fatalf("ProfileByID after create: profile=%v err=%v", p, err)
 	}
 	p.APIKey = "key-two"
-	p.SessionHeaderKey = "  x-session-id  "
+	p.SessionHeaderKey = "x-session-id"
 	if _, err := d.SaveProfile(p); err != nil {
 		t.Fatalf("update key and session header: %v", err)
 	}

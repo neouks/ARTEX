@@ -286,156 +286,27 @@ func intentAssetIDs(intent *db.Node) []int64 {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	var payload map[string]any
-	_ = json.Unmarshal(intent.Payload, &payload)
-	summary, _ := payload["summary"].(string)
-	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n<intent id=%d priority=%d>\n%s\n</intent>\n写回 record_fact / report_finding 时传 intent_id=%d", intent.ID, intent.Priority, lightText(summary), intent.ID)
+	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
 }
 
-func workerNodeContext(n *db.Node) map[string]any {
-	var payload map[string]any
-	_ = json.Unmarshal(n.Payload, &payload)
-	out := map[string]any{"id": n.ID, "kind": n.Kind, "state": n.State}
-	for _, key := range []string{"summary", "confidence", "evidence", "detail", "vulnclass", "severity"} {
-		if value, ok := payload[key]; ok && value != nil && value != "" {
-			out[key] = value
-		}
+// renderWorkerGraphOverview folds the global situational snapshot into the worker's
+// launch USER message for AWARENESS ONLY. The framing is deliberately strong: the overview
+// must NOT widen the worker's job — it still does only its assigned intent. Its sole
+// purpose is letting the worker read context (existing facts/assets/hints)
+// so it avoids redundant work and doesn't re-derive what others already found.
+func renderWorkerGraphOverview(data map[string]any) string {
+	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
+	// 那条意图、别追未覆盖的点」的职责边界相悖 → 从 worker 视图里剔除。data 是本次 worker
+	// 专属的新 map，删键不影响 planner。
+	delete(data, "coverage")
+	b, err := json.Marshal(data)
+	if err != nil {
+		return "" // fall back silently: the worker just won't have the global context
 	}
-	if n.Inherited {
-		out["source_task_id"] = n.SourceTaskID
-	}
-	return out
-}
-
-// workerContextData is intentionally intent-scoped. It includes direct lineage,
-// evidence on the same assets, a very small recent-fact window for write dedup,
-// active hints, and a few concurrent intents so the worker avoids overlapping
-// work. It never embeds goals, coverage, related-task overviews, or the full DAG.
-func workerContextData(ts *db.ExplorationStore, intent *db.Node) map[string]any {
-	out := map[string]any{}
-	if ts == nil || intent == nil {
-		return out
-	}
-	if _, goal, err := ts.Root(); err == nil && strings.TrimSpace(goal) != "" {
-		out["task_goal"] = goal
-	}
-	seenEvidence := map[int64]bool{}
-	if edges, err := ts.EdgesForNode(intent.ID); err == nil {
-		var parents, yielded []map[string]any
-		for _, edge := range edges {
-			var nodeID int64
-			var target *[]map[string]any
-			switch {
-			case edge.To == intent.ID && (edge.Rel == db.RelDerivedFrom || edge.Rel == db.RelSpawns):
-				nodeID, target = edge.From, &parents
-			case edge.From == intent.ID && edge.Rel == db.RelYields:
-				nodeID, target = edge.To, &yielded
-			default:
-				continue
-			}
-			if node, _ := ts.GetNodeWithSources(nodeID); node != nil {
-				*target = append(*target, workerNodeContext(node))
-				seenEvidence[node.ID] = true
-			}
-		}
-		if len(parents) > 0 {
-			out["parents"] = parents
-		}
-		if len(yielded) > 0 {
-			out["previous_yields"] = yielded
-		}
-	}
-	if related, err := ts.EvidenceSharingAnchors(intent.ID, 8); err == nil {
-		items := make([]map[string]any, 0, len(related))
-		for _, node := range related {
-			if !seenEvidence[node.ID] {
-				items = append(items, workerNodeContext(node))
-				seenEvidence[node.ID] = true
-			}
-		}
-		if len(items) > 0 {
-			out["same_asset_evidence"] = items
-		}
-	}
-	if facts, err := ts.ListByKindWithSources(db.KindFact, 6); err == nil {
-		items := make([]map[string]any, 0, len(facts))
-		for _, node := range facts {
-			if !seenEvidence[node.ID] {
-				items = append(items, compactFact(node))
-			}
-		}
-		if len(items) > 0 {
-			out["recent_facts_for_dedup"] = items
-		}
-	}
-	if hints, err := ts.ListByKind(db.KindHint, 8); err == nil {
-		items := make([]map[string]any, 0, len(hints))
-		for _, node := range hints {
-			if node.State == "active" {
-				items = append(items, workerNodeContext(node))
-			}
-		}
-		if len(items) > 0 {
-			out["active_hints"] = items
-		}
-	}
-	if intents, err := ts.ListByKind(db.KindIntent, 100); err == nil {
-		items := make([]map[string]any, 0, 8)
-		for _, node := range intents {
-			if node.ID == intent.ID || node.State != "open" && node.State != "running" {
-				continue
-			}
-			items = append(items, workerNodeContext(node))
-			if len(items) == 8 {
-				break
-			}
-		}
-		if len(items) > 0 {
-			out["other_active_intents_do_not_execute"] = items
-		}
-	}
-	return out
-}
-
-func renderWorkerContext(ts *db.ExplorationStore, intent *db.Node) string {
-	const workerContextMaxRunes = 6_500
-	return "\n\n【本意图相关上下文（仅用于避免重复，不扩大任务边界）】：\n" +
-		renderLightTaggedOrdered("intent_context", workerContextData(ts, intent), []string{
-			"task_goal", "parents", "previous_yields", "same_asset_evidence",
-			"recent_facts_for_dedup", "active_hints", "other_active_intents_do_not_execute",
-		}, workerContextMaxRunes)
-}
-
-func compactWorkerAssets(assets []*db.Asset) []map[string]any {
-	out := make([]map[string]any, 0, len(assets))
-	for _, asset := range assets {
-		item := map[string]any{"id": asset.ID, "type": asset.Type}
-		for key, value := range map[string]string{
-			"url": asset.URL, "domain": asset.Domain, "root_domain": asset.RootDomain,
-			"ip": asset.IP, "method": asset.Method, "title": asset.PageTitle,
-		} {
-			if value != "" {
-				item[key] = value
-			}
-		}
-		if asset.Port != nil {
-			item["port"] = *asset.Port
-		}
-		if asset.StatusCode != nil {
-			item["status"] = *asset.StatusCode
-		}
-		if len(asset.Technologies) > 0 {
-			item["technologies"] = asset.Technologies
-		}
-		if len(asset.Params) > 0 {
-			item["params"] = asset.Params
-		}
-		if len(asset.Auth) > 0 {
-			item["auth"] = asset.Auth
-		}
-		out = append(out, item)
-	}
-	return out
+	return "\n\n【全局探索态势（仅供你了解大局，不是你的任务清单）】：\n" +
+		"下面是整个任务当前的探索概况。给你的**唯一目的**是让你了解全局动态。\n" +
+		"**它绝不扩大你的职责边界**：你仍然只做上面领到的那一条意图。看到这里有别的 open 意图 / 未覆盖的点 / 其它可打方向，也**绝不要自己去动手**——那些是别的 worker 的事，由规划者调度。你若发现相关新线索，最多写进 fact 让规划者知道，不要自己追。\n" +
+		string(b)
 }
 
 // Execute runs one intent. hooks (the per-task Guard) gates every tool call; may
