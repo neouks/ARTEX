@@ -35,6 +35,7 @@ type Planner struct {
 	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	shellProfile      actool.ShellProfile
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -77,6 +78,8 @@ func (p *Planner) compactionWindow() int {
 // SetProxy points the planner's WebFetch at the recording proxy plus the CA cert
 // it trusts to verify HTTPS through it (empty addr = direct).
 func (p *Planner) SetProxy(addr, caCert string) { p.proxyAddr, p.proxyCACert = addr, caCert }
+
+func (p *Planner) SetShellProfile(profile actool.ShellProfile) { p.shellProfile = profile }
 
 // SetWebSearch selects the web_search backend for the planner (off by default).
 func (p *Planner) SetWebSearch(o WebSearchOpts) { p.webSearch = o }
@@ -338,10 +341,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if origin, _ := ts.OriginFactID(); origin > 0 {
 		tsx.SetOwnerNode(origin) // planner-side anchors default to the task root (origin fact)
 	}
+	// Resolve the run directory before tool assembly so Bash describes the same
+	// path mapping that the executor uses.
+	taskDir := ensureRunDir(p.workDir, taskID, 0)
+	runProfile := shellProfileFor(p.shellProfile, taskDir)
 	// Planner 只保留开局极轻量探测需要的 Bash；文件编辑、目录遍历与 Sleep 都不属于
 	// 规划职责，避免它们的 schema 在每次 completion 中反复占用输入。
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.NewBash())
+	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.NewBashWithProfile(runProfile))
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "planner"})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
@@ -357,7 +364,6 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		situational += "\n\n【任务终局收尾（本轮特殊指令，覆盖上面的常规规划流程）】：" + resolveTaskTimeoutWrapup("planner")
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
-	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
@@ -379,6 +385,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		UnlockSet:              def.Unlock,
 		PermissionMode:         permission.ModeBypass,
 		DisableBackgroundTasks: true,
+		EnableTaskManager:      toolsNeedTaskManager(tools),
 		EnableWebFetch:         true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
 		WebFetchProxy:          p.proxyAddr,
 		WebFetchCACert:         p.proxyCACert,
@@ -390,7 +397,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		TavilySearchAPIKey: p.webSearch.TavilyKey,
 		WebSearchProxy:     p.webSearch.Proxy,
 		BashEnv:            proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:         taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
+		ShellProfile:       runProfile,
+		WorkingDir:         taskDir, // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:      cmdOutDir(taskDir),
 		MaxTurns:           p.maxTurns, // 0 = unlimited (configurable in agent management)
 		MaxDuration:        maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余

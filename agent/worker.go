@@ -69,7 +69,8 @@ type Worker struct {
 	nonStreamingFn func() bool
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
-	maxTokensFn func() int
+	maxTokensFn  func() int
+	shellProfile actool.ShellProfile
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -159,6 +160,8 @@ func (w *Worker) compactionWindow() int {
 // traffic through, plus the CA cert path WebFetch trusts to verify HTTPS through
 // that MITM proxy. Empty addr disables the hint.
 func (w *Worker) SetProxy(addr, caCert string) { w.proxyAddr, w.proxyCACert = addr, caCert }
+
+func (w *Worker) SetShellProfile(profile actool.ShellProfile) { w.shellProfile = profile }
 
 // SetWebSearch selects the web_search backend for this worker (off by default).
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
@@ -341,13 +344,17 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetOwnerNode(intent.ID)         // assets this worker discovers anchor to its intent → visible to the task
 	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for assets this worker writes
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
+	// Capture the run directory before tool assembly so Bash's model-facing
+	// prompt can use the shell-specific path (notably /mnt/c/... for WSL).
+	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
+	runProfile := shellProfileFor(w.shellProfile, runDir)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
 	// 不把它的 schema 重复发送给每一次 completion。
-	base = append(base, workerLocalTools()...)
+	base = append(base, workerLocalTools(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, AgentKey: "worker"})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
@@ -360,7 +367,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 与 planner「态势块放 user turn」分叉是有意的：planner 本身是产意图的那个、没有单一 mandate，
 	// worker 有。仅【全局态势 overview】留在启动 user 消息里——它可降级、容忍 stale，压掉无碍。
 	// 本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
-	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
@@ -404,6 +410,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		UnlockSet:              def.Unlock,
 		PermissionMode:         permission.ModeBypass,
 		DisableBackgroundTasks: true,
+		EnableTaskManager:      toolsNeedTaskManager(tools),
 		// WebFetch 走记录代理，其 HTTP 与 curl 一样被留痕；载入代理 CA 让经 MITM
 		// 重签的 HTTPS 证书能【正常校验通过】（而非关掉校验）。proxy 空则直连。
 		EnableWebFetch: true,
@@ -417,9 +424,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		TavilySearchAPIKey: w.webSearch.TavilyKey,
 		WebSearchProxy:     w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
-		WorkingDir: runDir,
-		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
+		BashEnv:      proxyEnv(w.proxyAddr, w.proxyCACert),
+		ShellProfile: runProfile,
+		WorkingDir:   runDir,
+		MaxTurns:     w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,

@@ -16,6 +16,8 @@ require (
 	modernc.org/sqlite v1.52.0
 )
 
+replace github.com/Autumn-27/norma => ./third_party/norma
+
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect

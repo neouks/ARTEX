@@ -33,6 +33,7 @@ type ChatAgent struct {
 	guard          *guard.Guard // optional; nil disables intercept hooks for chat
 	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
+	shellProfile   actool.ShellProfile
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -59,6 +60,8 @@ func (c *ChatAgent) maxTokens() int {
 // SetProxy points the chat agent's WebFetch/Bash at the recording proxy plus the
 // CA cert it trusts (empty addr = direct). Kept for parity with the other agents.
 func (c *ChatAgent) SetProxy(addr, caCert string) { c.proxyAddr, c.proxyCACert = addr, caCert }
+
+func (c *ChatAgent) SetShellProfile(profile actool.ShellProfile) { c.shellProfile = profile }
 
 // SetWebSearch selects the web_search backend for the chat agent (off by default).
 func (c *ChatAgent) SetWebSearch(o WebSearchOpts) { c.webSearch = o }
@@ -110,7 +113,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// Pure assistant: DefaultTools as the base; AugmentTools layers in the key's
 	// visible skills/MCP and lets the DB tools table filter/override. DefaultTools
 	// have no tools-table rows, so they always pass through.
-	base := actool.DefaultTools()
+	runProfile := shellProfileFor(c.shellProfile, sessionWorkDir)
+	base := actool.DefaultToolsWithProfile(runProfile)
 	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID, AgentKey: agentKey, Trigger: "human_message"})
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
@@ -135,6 +139,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		TavilySearchAPIKey: ws.TavilyKey,
 		WebSearchProxy:     ws.Proxy,
 		BashEnv:            proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		ShellProfile:       runProfile,
 		WorkingDir:         sessionWorkDir,
 		MaxTurns:           maxTurns,
 		MaxDuration:        maxDuration,
@@ -147,7 +152,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		// (自定义 agent 各自一份;留空/0 用通用默认:10 轮)。
 		Settlement:   wrapupSettlement(agentKey, nil),
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    c.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()

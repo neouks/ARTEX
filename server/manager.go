@@ -259,6 +259,7 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
+	settingShellMode   = "shell_mode"
 	settingWorkers     = "workers"
 	settingLLMRecord   = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
@@ -326,6 +327,28 @@ func (m *Manager) SetWorkers(n int) error {
 		return fmt.Errorf("workers 必须 >0")
 	}
 	return m.pg.SetSetting(settingWorkers, strconv.Itoa(n))
+}
+
+// ShellMode returns the configured execution mode (auto when unset).
+func (m *Manager) ShellMode() string {
+	v, ok, err := m.pg.GetSetting(settingShellMode)
+	if err != nil || !ok || strings.TrimSpace(v) == "" {
+		return "auto"
+	}
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+// ShellProfile resolves the configured mode for a new run.
+func (m *Manager) ShellProfile() (actool.ShellProfile, error) {
+	return actool.DetectShell(m.ShellMode())
+}
+
+func (m *Manager) SetShellMode(mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if _, err := actool.DetectShell(mode); err != nil {
+		return err
+	}
+	return m.pg.SetSetting(settingShellMode, mode)
 }
 
 // Enrich returns the asset auto-completion engine (may be nil if init failed).

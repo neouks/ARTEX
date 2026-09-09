@@ -1824,7 +1824,24 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/traffic") return D.traffic;
   if (path === "/traffic/exchange") return D.trafficDetail;
   if (path === "/settings" && m === "GET") return D.settings;
-  if (path === "/settings" && m === "PUT") return { ...D.settings, ...b };
+  if (path === "/settings" && m === "PUT") {
+    Object.assign(D.settings, b);
+    const mode = typeof b.shell_mode === "string" ? b.shell_mode : "auto";
+    if (b.shell_mode) {
+      let pathStyle = "native";
+      if (mode === "gitbash") pathStyle = "gitbash";
+      if (mode === "wsl") pathStyle = "wsl";
+      D.settings.shell_detected = {
+        ok: true,
+        os: "darwin",
+        mode: mode === "auto" ? "bash" : mode,
+        path: mode === "auto" ? "/bin/bash" : mode,
+        path_style: pathStyle,
+        interactive: true,
+      };
+    }
+    return D.settings;
+  }
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
   if (path === "/settings/global-proxy/test") {
     return {

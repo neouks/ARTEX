@@ -30,6 +30,7 @@ type MainAgent struct {
 	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
 	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	shellProfile   actool.ShellProfile
 }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
@@ -65,6 +66,8 @@ func (m *MainAgent) compactionWindow() int {
 // SetProxy points the main agent's WebFetch at the recording proxy plus the CA
 // cert it trusts to verify HTTPS through it (empty addr = direct).
 func (m *MainAgent) SetProxy(addr, caCert string) { m.proxyAddr, m.proxyCACert = addr, caCert }
+
+func (m *MainAgent) SetShellProfile(profile actool.ShellProfile) { m.shellProfile = profile }
 
 // SetWebSearch selects the web_search backend for the main agent (off by default).
 func (m *MainAgent) SetWebSearch(o WebSearchOpts) { m.webSearch = o }
@@ -112,15 +115,16 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
 	tsx.SetNotifyGoal(notifyGoal) // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发
 	tsx.steerWork = m.steerWork   // enable steer_work tool (nil = unavailable)
+	mainDir := ensureRunDir(m.workDir, taskID, 0)
+	runProfile := shellProfileFor(m.shellProfile, mainDir)
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
+	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultToolsWithProfile(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "mainagent", Trigger: "human_message"})
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
-	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
@@ -141,7 +145,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		TavilySearchAPIKey: m.webSearch.TavilyKey,
 		WebSearchProxy:     m.webSearch.Proxy,
 		BashEnv:            proxyEnv(m.proxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:         mainDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
+		ShellProfile:       runProfile,
+		WorkingDir:         mainDir, // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:      cmdOutDir(mainDir),
 		MaxTurns:           m.maxTurns,                             // 0 = unlimited (configurable in agent management)
 		Compaction:         compactionConfig(m.compactionWindow()), // long chats stay within the window
@@ -149,7 +154,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    m.maxTokens(),   // 0 = 不发上限,由服务端默认值决定
+		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx

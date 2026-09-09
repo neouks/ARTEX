@@ -3353,6 +3353,8 @@ export const settings: Settings = {
   tavily_key_set: true,
   web_search_proxy: "",
   global_proxy: "",
+  shell_mode: "auto",
+  shell_detected: { ok: true, os: "darwin", mode: "bash", path: "/bin/bash", path_style: "posix", interactive: true },
   python_interpreter: "/usr/bin/python3",
   workers: 3,
   llm_pool_enabled: true,

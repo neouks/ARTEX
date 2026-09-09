@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Autumn-27/artex/agent"
@@ -301,7 +302,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// web_search), NOT by tools-table binding. When on, inject the 5 shell_* tools
 		// and COUPLE the Bash description addendum so it points at shell_open — and never
 		// dangles when off. See docs/交互式shell设计.md §14.2.
-		if !actool.InteractiveShellDisabled() {
+		if runtime.GOOS != "windows" && !actool.InteractiveShellDisabled() {
 			if a, err := pg.GetAgentByKey(agentKey); err == nil && a != nil && a.InteractiveShell {
 				out = append(out, actool.ShellSessionTools()...)
 				for i, t := range out {
@@ -339,7 +340,7 @@ func shellToolNote(rows []*db.Tool, agentKey string) string {
 	if len(hints) == 0 {
 		return ""
 	}
-	return "\n\n以下工具已安装在此 bash 环境中，可直接通过 Bash 调用：\n" + strings.Join(hints, "\n")
+	return "\n\n以下工具已安装在当前命令执行环境中，可直接通过 Bash 工具调用：\n" + strings.Join(hints, "\n")
 }
 
 func appendShellHintField(lines []string, label, value string) []string {

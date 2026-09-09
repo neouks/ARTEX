@@ -21,7 +21,7 @@ func TestShellToolNote(t *testing.T) {
 	}
 
 	note := shellToolNote(rows, "worker")
-	want := "\n\n以下工具已安装在此 bash 环境中，可直接通过 Bash 调用：\n" +
+	want := "\n\n以下工具已安装在当前命令执行环境中，可直接通过 Bash 工具调用：\n" +
 		"- nmap: network scanner\n" +
 		"  with service detection\n" +
 		"  所在目录：/opt/nmap/bin\n" +
