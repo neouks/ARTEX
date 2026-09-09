@@ -80,3 +80,68 @@ func TestCustomToolCRUD(t *testing.T) {
 		t.Fatal("tool still present after delete")
 	}
 }
+
+func TestCustomToolShellMetadata(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	key := "ct_test_shell_metadata"
+	_ = d.DeleteCustomTool(key)
+	t.Cleanup(func() { _ = d.DeleteCustomTool(key) })
+
+	in := &Tool{
+		Key:         key,
+		Description: "network scanner",
+		Schema:      json.RawMessage(`{}`),
+		Agents:      []string{"worker"},
+		Enabled:     true,
+		Kind:        "shell",
+		Exec:        json.RawMessage(`{}`),
+		Directory:   "  /opt/nmap/bin  ",
+		UsageHelp:   "  nmap [options] target  ",
+		WhenToUse:   "  discover ports and services  ",
+	}
+	if err := d.CreateCustomTool(in); err != nil {
+		t.Fatalf("create shell tool: %v", err)
+	}
+	got, err := d.GetTool(key)
+	if err != nil || got == nil {
+		t.Fatalf("get shell tool: %v (nil=%v)", err, got == nil)
+	}
+	if got.Directory != "/opt/nmap/bin" || got.UsageHelp != "nmap [options] target" || got.WhenToUse != "discover ports and services" {
+		t.Fatalf("shell metadata did not round-trip trimmed: %+v", got)
+	}
+
+	// The DB boundary must clear stale shell guidance regardless of which API path
+	// changes the tool into an independently executable kind.
+	in.Kind = "command"
+	in.Exec = json.RawMessage(`{"command":"nmap"}`)
+	if err := d.UpdateCustomTool(in); err != nil {
+		t.Fatalf("change shell tool to command: %v", err)
+	}
+	got, err = d.GetTool(key)
+	if err != nil || got == nil {
+		t.Fatalf("get command tool: %v (nil=%v)", err, got == nil)
+	}
+	if got.Directory != "" || got.UsageHelp != "" || got.WhenToUse != "" {
+		t.Fatalf("non-shell tool retained shell metadata: %+v", got)
+	}
+}
+
+func TestShellMetadataNormalization(t *testing.T) {
+	directory, usageHelp, whenToUse := shellMetadata(&Tool{
+		Kind: "shell", Directory: " /opt/tool ", UsageHelp: " tool --help ", WhenToUse: " when needed ",
+	})
+	if directory != "/opt/tool" || usageHelp != "tool --help" || whenToUse != "when needed" {
+		t.Fatalf("shell metadata not trimmed: %q, %q, %q", directory, usageHelp, whenToUse)
+	}
+	directory, usageHelp, whenToUse = shellMetadata(&Tool{
+		Kind: "script", Directory: "/opt/tool", UsageHelp: "tool --help", WhenToUse: "when needed",
+	})
+	if directory != "" || usageHelp != "" || whenToUse != "" {
+		t.Fatalf("non-shell metadata not cleared: %q, %q, %q", directory, usageHelp, whenToUse)
+	}
+}

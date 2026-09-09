@@ -830,8 +830,14 @@ CREATE TABLE IF NOT EXISTS tools (
     kind        TEXT    NOT NULL DEFAULT 'builtin',
     exec        JSONB   NOT NULL DEFAULT '{}',
     deferred    BOOLEAN NOT NULL DEFAULT false,
+    directory   TEXT    NOT NULL DEFAULT '',
+    usage_help  TEXT    NOT NULL DEFAULT '',
+    when_to_use TEXT    NOT NULL DEFAULT '',
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE tools ADD COLUMN IF NOT EXISTS directory   TEXT NOT NULL DEFAULT '';
+ALTER TABLE tools ADD COLUMN IF NOT EXISTS usage_help  TEXT NOT NULL DEFAULT '';
+ALTER TABLE tools ADD COLUMN IF NOT EXISTS when_to_use TEXT NOT NULL DEFAULT '';
 DROP TRIGGER IF EXISTS trg_tools_upd ON tools;
 CREATE TRIGGER trg_tools_upd BEFORE UPDATE ON tools
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

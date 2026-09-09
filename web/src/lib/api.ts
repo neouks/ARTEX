@@ -36,6 +36,7 @@ import type {
   FindingStats,
   FindingStatus,
   FindingsPage,
+  GlobalProxyProbeResult,
   IntentAsset,
   InterceptApprovalRow,
   InterceptPending,
@@ -619,6 +620,7 @@ export const api = {
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
+  testGlobalProxy: (proxy: string) => post<GlobalProxyProbeResult>(`/settings/global-proxy/test`, { proxy }),
   report: async (task?: string) => {
     if (MOCK) return mockReport(task);
     const token = getToken();
@@ -835,11 +837,36 @@ export const api = {
   resetTool: (key: string) => post<{ ok: boolean }>(`/tools/${key}/reset`, {}),
   // custom tools (自定义工具)
   createCustomTool: (
-    t: Pick<Tool, "key" | "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
+    t: Pick<
+      Tool,
+      | "key"
+      | "description"
+      | "schema"
+      | "agents"
+      | "enabled"
+      | "kind"
+      | "exec"
+      | "deferred"
+      | "directory"
+      | "usage_help"
+      | "when_to_use"
+    >,
   ) => post<{ key: string }>("/tools/custom", t),
   updateCustomTool: (
     key: string,
-    t: Pick<Tool, "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
+    t: Pick<
+      Tool,
+      | "description"
+      | "schema"
+      | "agents"
+      | "enabled"
+      | "kind"
+      | "exec"
+      | "deferred"
+      | "directory"
+      | "usage_help"
+      | "when_to_use"
+    >,
   ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
   deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
   testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>

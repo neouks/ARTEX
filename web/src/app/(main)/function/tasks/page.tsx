@@ -101,6 +101,7 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
   SheetClose,
@@ -226,6 +227,28 @@ function fmtDateTime(unix?: number): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function fmtFullDateTime(unix?: number, iso?: string): string {
+  let millis = Number.NaN;
+  if (unix && unix > 0) millis = unix * 1000;
+  else if (iso) millis = Date.parse(iso);
+  if (Number.isNaN(millis)) return "—";
+  return new Date(millis).toLocaleString("zh-CN", { hour12: false });
+}
+
+function taskLLMStateLabel(state?: string): string {
+  switch (state) {
+    case "ready":
+      return "配置链就绪";
+    case "chain_exhausted":
+      return "配置链已耗尽";
+    case "default":
+    case undefined:
+      return "跟随默认配置";
+    default:
+      return state;
+  }
+}
+
 const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: "created", label: "已创建" },
   { value: "queued", label: "排队中" },
@@ -321,6 +344,7 @@ export default function TasksPage() {
   const [nowSec, setNowSec] = React.useState(() => Math.floor(Date.now() / 1000));
   const [batchControlling, setBatchControlling] = React.useState<"pause" | "resume" | null>(null);
   const [movingCategory, setMovingCategory] = React.useState(false);
+  const [previewTaskID, setPreviewTaskID] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const raw = getLocalStorageValue(TASK_FILTER_PREFERENCE_KEY);
@@ -456,6 +480,7 @@ export default function TasksPage() {
       .tasks()
       .then((r) => {
         const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
+        setPreviewTaskID((current) => (current && !next.some((task) => task.id === current) ? null : current));
         const sig = JSON.stringify(next);
         if (sig === lastRef.current) return;
         lastRef.current = sig;
@@ -775,6 +800,11 @@ export default function TasksPage() {
     [movingCategory, refreshCategoriesAndTasks, selectedIds],
   );
 
+  const previewTask = React.useMemo(
+    () => tasks.find((task) => task.id === previewTaskID) ?? null,
+    [previewTaskID, tasks],
+  );
+
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
       <TabsList className="mx-4 lg:mx-6">
@@ -788,7 +818,7 @@ export default function TasksPage() {
               <div className="relative w-full sm:max-w-xs">
                 <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
                 <Input
-                  placeholder="搜索描述 / 目标 / ID"
+                  placeholder="搜索名称 / 描述 / 目标 / ID"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   className="pl-8"
@@ -939,7 +969,6 @@ export default function TasksPage() {
                     />
                     <TableHead>名称</TableHead>
                     <TableHead>描述</TableHead>
-                    <TableHead>目标</TableHead>
                     <SortableTaskHead
                       field="status"
                       label="状态"
@@ -984,6 +1013,7 @@ export default function TasksPage() {
                       onRename={renameTask}
                       onTogglePinned={toggleTaskPinned}
                       onArchive={queueTaskArchive}
+                      onPreview={setPreviewTaskID}
                       selected={selectedIds.has(task.id)}
                       onSelectedChange={toggleSelected}
                     />
@@ -1007,7 +1037,224 @@ export default function TasksPage() {
       <TabsContent value="archived">
         <TaskArchivesPanel onChanged={load} />
       </TabsContent>
+      <TaskPreviewSheet task={previewTask} nowSec={nowSec} onClose={() => setPreviewTaskID(null)} />
     </Tabs>
+  );
+}
+
+function TaskPreviewSheet({ task, nowSec, onClose }: { task: Task | null; nowSec: number; onClose: () => void }) {
+  const goalsTotal = task?.goals_total ?? 0;
+  const goalsMet = task?.goals_met ?? 0;
+  const goalsPct = goalsTotal > 0 ? Math.min(100, Math.max(0, Math.round((goalsMet / goalsTotal) * 100))) : 0;
+  let profileCount = 0;
+  if (task?.llm_profile_ids && task.llm_profile_ids.length > 0) profileCount = task.llm_profile_ids.length;
+  else if (task?.llm_profile_id || task?.active_llm_profile_id) profileCount = 1;
+
+  return (
+    <Sheet
+      open={task !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <SheetContent side="right" className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-lg">
+        <SheetHeader className="pr-14">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <SheetTitle className="break-words">{task?.name?.trim() || "未命名任务"}</SheetTitle>
+              <SheetDescription className="mt-1 flex flex-wrap items-center gap-1.5">
+                {task ? (
+                  <>
+                    <code className="font-mono">#{task.id}</code>
+                    <span aria-hidden="true">·</span>
+                    <span>{task.category_name || "未分类"}</span>
+                  </>
+                ) : (
+                  "任务运行状态预览"
+                )}
+              </SheetDescription>
+            </div>
+            {task && <StatusBadge domain="task" value={task.status} dot className="shrink-0" />}
+          </div>
+        </SheetHeader>
+        <Separator />
+
+        {task && (
+          <>
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div className="flex flex-col gap-6 px-4 py-5">
+                <section aria-labelledby="task-preview-content" className="flex flex-col gap-4">
+                  <h3 id="task-preview-content" className="text-sm font-medium">
+                    任务内容
+                  </h3>
+                  <dl className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">描述</dt>
+                      <dd className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                        {task.description.trim() || "—"}
+                      </dd>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">目标</dt>
+                      <dd className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                        {task.goal.trim() || "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <Separator />
+
+                <section aria-labelledby="task-preview-runtime" className="flex flex-col gap-4">
+                  <h3 id="task-preview-runtime" className="text-sm font-medium">
+                    运行状态
+                  </h3>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-5">
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">任务状态</dt>
+                      <dd>
+                        <StatusBadge domain="task" value={task.status} dot />
+                      </dd>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">引擎状态</dt>
+                      <dd>
+                        <StatusBadge domain="engine" value={task.engine_mode ?? "idle"} dot />
+                      </dd>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">运行中 Worker</dt>
+                      <dd className="text-base font-medium tabular-nums">{task.in_flight ?? 0}</dd>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <dt className="text-muted-foreground text-xs">运行时长</dt>
+                      <dd className="text-base font-medium tabular-nums">{fmtDuration(taskDuration(task, nowSec))}</dd>
+                    </div>
+                    <div className="col-span-2 flex flex-col gap-2">
+                      <dt className="flex items-center justify-between gap-3 text-xs">
+                        <span className="text-muted-foreground">目标进度</span>
+                        <span className="tabular-nums">{goalsTotal > 0 ? `${goalsMet}/${goalsTotal}` : "—"}</span>
+                      </dt>
+                      <dd>
+                        {goalsTotal > 0 ? (
+                          <Progress value={goalsPct} aria-label={`目标进度 ${goalsMet}/${goalsTotal}`} />
+                        ) : (
+                          <span className="text-muted-foreground text-sm">暂无目标进度</span>
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <Separator />
+
+                <section aria-labelledby="task-preview-time" className="flex flex-col gap-4">
+                  <h3 id="task-preview-time" className="text-sm font-medium">
+                    时间
+                  </h3>
+                  <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">创建时间</dt>
+                      <dd className="text-sm tabular-nums">{fmtFullDateTime(taskCreatedUnix(task))}</dd>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">最近活动</dt>
+                      <dd className="text-sm tabular-nums">
+                        {fmtFullDateTime(task.last_activity_unix, task.last_activity)}
+                      </dd>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">完成时间</dt>
+                      <dd className="text-sm tabular-nums">
+                        {fmtFullDateTime(task.completed_unix, task.completed_at)}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <Separator />
+
+                <section aria-labelledby="task-preview-token" className="flex flex-col gap-4">
+                  <h3 id="task-preview-token" className="text-sm font-medium">
+                    Token
+                  </h3>
+                  <dl className="grid grid-cols-3 gap-3">
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">输入</dt>
+                      <dd
+                        className="truncate text-sm font-medium tabular-nums"
+                        title={task.tokens?.input_tokens.toLocaleString()}
+                      >
+                        {task.tokens ? fmtTokens(task.tokens.input_tokens) : "—"}
+                      </dd>
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">缓存读取</dt>
+                      <dd
+                        className="truncate text-sm font-medium tabular-nums"
+                        title={task.tokens?.cache_read_tokens.toLocaleString()}
+                      >
+                        {task.tokens ? fmtTokens(task.tokens.cache_read_tokens) : "—"}
+                      </dd>
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">输出</dt>
+                      <dd
+                        className="truncate text-sm font-medium tabular-nums"
+                        title={task.tokens?.output_tokens.toLocaleString()}
+                      >
+                        {task.tokens ? fmtTokens(task.tokens.output_tokens) : "—"}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <Separator />
+
+                <section aria-labelledby="task-preview-llm" className="flex flex-col gap-4">
+                  <h3 id="task-preview-llm" className="text-sm font-medium">
+                    LLM 配置
+                  </h3>
+                  <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">当前配置</dt>
+                      <dd className="text-sm">
+                        {task.active_llm_profile_id ? `配置 #${task.active_llm_profile_id}` : "默认配置"}
+                      </dd>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground text-xs">配置链状态</dt>
+                      <dd className="text-sm">
+                        {taskLLMStateLabel(task.llm_failover_state)}
+                        {profileCount > 0 ? ` · ${profileCount} 个配置` : ""}
+                      </dd>
+                    </div>
+                    {task.llm_failover_reason?.trim() && (
+                      <div className="flex flex-col gap-1 sm:col-span-2">
+                        <dt className="text-muted-foreground text-xs">切换原因</dt>
+                        <dd className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                          {task.llm_failover_reason}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </section>
+              </div>
+            </ScrollArea>
+
+            <Separator />
+            <SheetFooter className="mt-0">
+              <Button asChild>
+                <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`} onClick={onClose}>
+                  进入任务详情
+                  <ChevronRightIcon data-icon="inline-end" />
+                </Link>
+              </Button>
+            </SheetFooter>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -1159,6 +1406,7 @@ const TaskRow = React.memo(function TaskRow({
   onRename,
   onTogglePinned,
   onArchive,
+  onPreview,
   selected,
   onSelectedChange,
 }: {
@@ -1169,6 +1417,7 @@ const TaskRow = React.memo(function TaskRow({
   onRename: (task: Task, name: string) => Promise<void>;
   onTogglePinned: (task: Task) => Promise<void>;
   onArchive: (task: Task) => Promise<void>;
+  onPreview: (id: string) => void;
   selected: boolean;
   onSelectedChange: (id: string, checked: boolean) => void;
 }) {
@@ -1200,7 +1449,6 @@ const TaskRow = React.memo(function TaskRow({
           {task.description}
         </Link>
       </TableCell>
-      <TableCell className="text-muted-foreground max-w-xs truncate">{task.goal}</TableCell>
       <TableCell>
         <StatusBadge domain="task" value={task.status} dot />
       </TableCell>
@@ -1254,10 +1502,15 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))] group-hover:bg-muted/50">
         <div className="flex items-center justify-end gap-0.5">
-          <Button size="icon" variant="ghost" asChild aria-label="查看任务详情" title="查看任务详情">
-            <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}>
-              <EyeIcon />
-            </Link>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label={`预览任务 #${task.id} 运行状态`}
+            title="预览任务状态"
+            onClick={() => onPreview(task.id)}
+          >
+            <EyeIcon />
           </Button>
           <TaskControlButton task={task} onControl={onControl} />
           <TaskPinAction task={task} onTogglePinned={onTogglePinned} />

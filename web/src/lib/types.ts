@@ -884,6 +884,15 @@ export interface Settings {
   constraints_inject_worker?: boolean;
 }
 
+export interface GlobalProxyProbeResult {
+  ok: boolean;
+  ip?: string;
+  location?: string;
+  isp?: string;
+  latency_ms?: number;
+  error?: string;
+}
+
 // ---- LLM config ----
 export interface LLMProfile {
   id: string;
@@ -1071,6 +1080,9 @@ export interface Tool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
+  directory?: string; // shell 专属：工具所在目录，仅作为 Bash 环境提示
+  usage_help?: string; // shell 专属：工具用法帮助
+  when_to_use?: string; // shell 专属：何时调用
   calls?: number; // persistent runtime invocation count (older APIs may omit it)
 }
 

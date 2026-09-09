@@ -26,6 +26,7 @@ import type {
   TaskLLMResolution,
   TaskScopeRow,
   TaskTemplate,
+  Tool,
 } from "../types";
 import * as D from "./data";
 
@@ -43,6 +44,7 @@ const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
 const mockActivity = structuredClone(D.activity);
+const mockTools: Tool[] = structuredClone(D.tools);
 type MockTaskArchiveSnapshot = {
   task: Task;
   numericTaskID: number;
@@ -1820,6 +1822,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/settings" && m === "GET") return D.settings;
   if (path === "/settings" && m === "PUT") return { ...D.settings, ...b };
   if (path === "/settings/web-search/test") return { ok: true, count: 5, backend: D.settings.web_search_backend };
+  if (path === "/settings/global-proxy/test") {
+    return {
+      ok: true,
+      ip: "203.0.113.10",
+      location: "测试地区",
+      isp: "测试运营商",
+      latency_ms: 128,
+    };
+  }
   if (path === "/settings/python/detect") return { python_interpreter: "/usr/bin/python3" };
   if (path === "/chat")
     return { reply: "（demo）我已把该建议注入为一条高优意图，work agent 会尽快执行。", mode: "hint" };
@@ -1947,8 +1958,64 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "conversations" && seg[2] === "stop") return { status: "stopped" };
 
   // ── tools ──
-  if (path === "/tools" && m === "GET") return { tools: D.tools };
-  if (path === "/tools/custom" && m === "POST") return { key: String(b.key ?? "custom-tool") };
+  if (path === "/tools" && m === "GET") return { tools: mockTools };
+  if (path === "/tools/custom" && m === "POST") {
+    const key = String(b.key ?? "custom_tool");
+    const requestedKind = String(b.kind ?? "shell");
+    const kind = (["shell", "command", "script", "http"] as const).includes(
+      requestedKind as "shell" | "command" | "script" | "http",
+    )
+      ? (requestedKind as "shell" | "command" | "script" | "http")
+      : "shell";
+    const isShell = kind === "shell";
+    mockTools.push({
+      key,
+      system: false,
+      description: String(b.description ?? ""),
+      schema: b.schema && typeof b.schema === "object" ? (b.schema as Tool["schema"]) : {},
+      agents: Array.isArray(b.agents) ? b.agents.map(String) : [],
+      enabled: typeof b.enabled === "boolean" ? b.enabled : true,
+      kind,
+      exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
+      deferred: !isShell && b.deferred === true,
+      directory: isShell ? String(b.directory ?? "").trim() : "",
+      usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
+      when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
+      calls: 0,
+    });
+    return { key };
+  }
+  if (seg[0] === "tools" && seg[1] === "custom" && seg.length === 3 && m === "PUT") {
+    const index = mockTools.findIndex((tool) => !tool.system && tool.key === seg[2]);
+    if (index < 0) throw new Error("只能编辑自定义工具");
+    const current = mockTools[index];
+    const requestedKind = String(b.kind ?? current.kind ?? "shell");
+    const kind = (["shell", "command", "script", "http"] as const).includes(
+      requestedKind as "shell" | "command" | "script" | "http",
+    )
+      ? (requestedKind as "shell" | "command" | "script" | "http")
+      : "shell";
+    const isShell = kind === "shell";
+    mockTools[index] = {
+      ...current,
+      description: String(b.description ?? current.description),
+      schema: b.schema && typeof b.schema === "object" ? (b.schema as Tool["schema"]) : current.schema,
+      agents: Array.isArray(b.agents) ? b.agents.map(String) : current.agents,
+      enabled: typeof b.enabled === "boolean" ? b.enabled : current.enabled,
+      kind,
+      exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
+      deferred: !isShell && (typeof b.deferred === "boolean" ? b.deferred : current.deferred),
+      directory: isShell ? String(b.directory ?? "").trim() : "",
+      usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
+      when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
+    };
+    return { ok: true };
+  }
+  if (seg[0] === "tools" && seg[1] === "custom" && seg.length === 3 && m === "DELETE") {
+    const index = mockTools.findIndex((tool) => !tool.system && tool.key === seg[2]);
+    if (index >= 0) mockTools.splice(index, 1);
+    return { deleted: seg[2] };
+  }
   if (path === "/tools/custom/test") return { output: "（demo）工具执行输出示例。", is_error: false };
 
   // ── mcp ──

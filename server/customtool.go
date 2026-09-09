@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/artex/db"
 )
 
 // 本文件实现自定义工具执行器(docs/自定义工具设计.md)。system=false 的 tools 行按
@@ -35,9 +35,12 @@ type customToolReq struct {
 	Schema      json.RawMessage `json:"schema"`
 	Agents      []string        `json:"agents"`
 	Enabled     bool            `json:"enabled"`
-	Kind        string          `json:"kind"` // command | script | http
+	Kind        string          `json:"kind"` // shell | command | script | http
 	Exec        json.RawMessage `json:"exec"`
 	Deferred    bool            `json:"deferred"`
+	Directory   string          `json:"directory"`
+	UsageHelp   string          `json:"usage_help"`
+	WhenToUse   string          `json:"when_to_use"`
 }
 
 var reToolKey = reAgentKey // 同 agent key 规则:小写字母开头 + 小写字母/数字/下划线
@@ -72,6 +75,7 @@ func (s *Server) pgCreateCustomTool(w http.ResponseWriter, r *http.Request) {
 	if err := pg.CreateCustomTool(&db.Tool{
 		Key: req.Key, Description: req.Description, Schema: req.Schema, Agents: req.Agents,
 		Enabled: req.Enabled, Kind: req.Kind, Exec: req.Exec, Deferred: req.Deferred,
+		Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
 	}); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -110,6 +114,7 @@ func (s *Server) pgUpdateCustomTool(w http.ResponseWriter, r *http.Request) {
 	if err := pg.UpdateCustomTool(&db.Tool{
 		Key: key, Description: req.Description, Schema: req.Schema, Agents: req.Agents,
 		Enabled: req.Enabled, Kind: req.Kind, Exec: req.Exec, Deferred: req.Deferred,
+		Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
 	}); err != nil {
 		writeErr(w, 500, err.Error())
 		return

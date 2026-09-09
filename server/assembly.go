@@ -289,14 +289,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// shell hints: user-defined kind="shell" tools are not callable — they are
 		// environment declarations that tell the model which command-line tools are
 		// installed. Collect the ones bound to this agent and append to Bash's description.
-		var shellHints []string
-		for _, row := range rows {
-			if row.Kind == "shell" && row.Enabled && contains(row.Agents, agentKey) {
-				shellHints = append(shellHints, "- "+row.Key+": "+row.Description)
-			}
-		}
-		if len(shellHints) > 0 {
-			note := "\n\n以下工具已安装在此 bash 环境中，可直接通过 Bash 调用：\n" + strings.Join(shellHints, "\n")
+		if note := shellToolNote(rows, agentKey); note != "" {
 			for i, t := range out {
 				if t.Name() == "Bash" {
 					out[i] = agent.DecorateTool(t, t.Description()+note, t.InputSchema())
@@ -321,6 +314,45 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		}
 		return out
 	}
+}
+
+func shellToolNote(rows []*db.Tool, agentKey string) string {
+	var hints []string
+	for _, row := range rows {
+		if row.Kind != "shell" || !row.Enabled || !contains(row.Agents, agentKey) {
+			continue
+		}
+		description := strings.ReplaceAll(strings.TrimSpace(row.Description), "\r\n", "\n")
+		lines := []string{"- " + row.Key}
+		if description != "" {
+			parts := strings.Split(description, "\n")
+			lines[0] += ": " + parts[0]
+			for _, part := range parts[1:] {
+				lines = append(lines, "  "+part)
+			}
+		}
+		lines = appendShellHintField(lines, "所在目录", row.Directory)
+		lines = appendShellHintField(lines, "用法帮助", row.UsageHelp)
+		lines = appendShellHintField(lines, "何时调用", row.WhenToUse)
+		hints = append(hints, strings.Join(lines, "\n"))
+	}
+	if len(hints) == 0 {
+		return ""
+	}
+	return "\n\n以下工具已安装在此 bash 环境中，可直接通过 Bash 调用：\n" + strings.Join(hints, "\n")
+}
+
+func appendShellHintField(lines []string, label, value string) []string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\r\n", "\n")
+	if value == "" {
+		return lines
+	}
+	parts := strings.Split(value, "\n")
+	lines = append(lines, "  "+label+"："+parts[0])
+	for _, part := range parts[1:] {
+		lines = append(lines, "    "+part)
+	}
+	return lines
 }
 
 func contains(ss []string, v string) bool {

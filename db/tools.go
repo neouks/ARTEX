@@ -3,12 +3,12 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 )
 
-// Tool is one row of the built-in tool catalog. key + handler live in code; this
-// row carries only the page-editable surface: description, parameter schema
-// (structure read-only, per-param description/default editable), agent binding,
-// and the on/off switch. See schema.sql §H and agent/toolcatalog.go.
+// Tool is one row of the shared tool catalog. Built-in rows carry the page-editable
+// model surface; custom rows additionally carry an execution spec or shell-only
+// environment guidance. See schema.sql §H and agent/toolcatalog.go.
 type Tool struct {
 	Key         string          `json:"key"`
 	System      bool            `json:"system"`
@@ -16,13 +16,16 @@ type Tool struct {
 	Schema      json.RawMessage `json:"schema"`
 	Agents      []string        `json:"agents"`
 	Enabled     bool            `json:"enabled"`
-	Kind        string          `json:"kind"`     // builtin | command | script | http
-	Exec        json.RawMessage `json:"exec"`     // 自定义工具执行规格(kind!=builtin)
+	Kind        string          `json:"kind"`     // builtin | shell | command | script | http
+	Exec        json.RawMessage `json:"exec"`     // 自定义工具执行规格；builtin/shell 为空
 	Deferred    bool            `json:"deferred"` // schema 延迟(走 SearchExtraTools/ExecuteExtraTool)
-	Calls       int             `json:"calls"`    // runtime ledger aggregate; not stored in tools
+	Directory   string          `json:"directory"`
+	UsageHelp   string          `json:"usage_help"`
+	WhenToUse   string          `json:"when_to_use"`
+	Calls       int             `json:"calls"` // runtime ledger aggregate; not stored in tools
 }
 
-const toolCols = `key, system, description, schema, agents, enabled, kind, exec, deferred`
+const toolCols = `key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use`
 
 // SeedTool inserts a built-in tool's code-defined defaults ONCE. ON CONFLICT DO
 // NOTHING: an existing row (possibly edited in the UI) is never overwritten on
@@ -107,7 +110,10 @@ func (d *DB) RefreshToolDefaults(key, desc string, schema json.RawMessage) error
 func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var agents []byte
-	if err := rows.Scan(&t.Key, &t.System, &t.Description, &t.Schema, &agents, &t.Enabled, &t.Kind, &t.Exec, &t.Deferred); err != nil {
+	if err := rows.Scan(
+		&t.Key, &t.System, &t.Description, &t.Schema, &agents, &t.Enabled,
+		&t.Kind, &t.Exec, &t.Deferred, &t.Directory, &t.UsageHelp, &t.WhenToUse,
+	); err != nil {
 		return nil, err
 	}
 	if len(agents) > 0 {
@@ -162,10 +168,12 @@ func (d *DB) CreateCustomTool(t *Tool) error {
 	if len(agents) == 0 {
 		agents = json.RawMessage("[]")
 	}
+	directory, usageHelp, whenToUse := shellMetadata(t)
 	_, err := d.Exec(`
-INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred)
-VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8)`,
-		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred)
+INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use)
+VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred,
+		directory, usageHelp, whenToUse)
 	return err
 }
 
@@ -184,11 +192,23 @@ func (d *DB) UpdateCustomTool(t *Tool) error {
 	if len(agents) == 0 {
 		agents = json.RawMessage("[]")
 	}
+	directory, usageHelp, whenToUse := shellMetadata(t)
 	_, err := d.Exec(`
-UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5, kind=$6, exec=$7, deferred=$8
+UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5, kind=$6, exec=$7, deferred=$8,
+                 directory=$9, usage_help=$10, when_to_use=$11
 WHERE key=$1 AND system=false`,
-		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred)
+		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred,
+		directory, usageHelp, whenToUse)
 	return err
+}
+
+// shellMetadata keeps environment guidance separate from executable tool specs.
+// Changing a tool away from shell clears stale guidance at the shared DB boundary.
+func shellMetadata(t *Tool) (directory, usageHelp, whenToUse string) {
+	if t.Kind != "shell" {
+		return "", "", ""
+	}
+	return strings.TrimSpace(t.Directory), strings.TrimSpace(t.UsageHelp), strings.TrimSpace(t.WhenToUse)
 }
 
 // DeleteCustomTool removes a custom tool (system=false only; built-ins protected).

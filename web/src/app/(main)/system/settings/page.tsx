@@ -2,7 +2,17 @@
 
 import * as React from "react";
 
-import { CpuIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  CheckCircle2Icon,
+  CpuIcon,
+  GlobeIcon,
+  KeyboardIcon,
+  Loader2Icon,
+  RadioTowerIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+  XCircleIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { Settings } from "@/lib/types";
+import type { GlobalProxyProbeResult, Settings } from "@/lib/types";
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -28,6 +38,8 @@ export default function SystemSettingsPage() {
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
+  const [testingGlobalProxy, setTestingGlobalProxy] = React.useState(false);
+  const [globalProxyProbe, setGlobalProxyProbe] = React.useState<GlobalProxyProbeResult | null>(null);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -47,9 +59,9 @@ export default function SystemSettingsPage() {
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
-    setProxyInput(s.web_search_proxy || "");
-    setGlobalProxyInput(s.global_proxy || "");
-    setPyInterp(s.python_interpreter || "");
+    setProxyInput(s.web_search_proxy ?? "");
+    setGlobalProxyInput(s.global_proxy ?? "");
+    setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
@@ -195,6 +207,27 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingGlobalProxy(false));
   };
 
+  const testGlobalProxy = () => {
+    setTestingGlobalProxy(true);
+    setGlobalProxyProbe(null);
+    api
+      .testGlobalProxy(globalProxyInput.trim())
+      .then((result) => {
+        setGlobalProxyProbe(result);
+        if (result.ok) {
+          toast.success(`代理检测成功 · ${result.ip ?? "未知 IP"}`);
+        } else {
+          toast.error(`代理检测失败：${result.error ?? "未知错误"}`);
+        }
+      })
+      .catch((e) => {
+        const result = { ok: false, error: (e as Error).message } satisfies GlobalProxyProbeResult;
+        setGlobalProxyProbe(result);
+        toast.error(`代理检测失败：${result.error}`);
+      })
+      .finally(() => setTestingGlobalProxy(false));
+  };
+
   // Run a real "test" search ("test") against the CURRENT form values (backend +
   // proxy + entered key), falling back to saved values server-side. Toasts result.
   const runTest = () => {
@@ -269,8 +302,12 @@ export default function SystemSettingsPage() {
               开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>（流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入
               Agent 的 bash / WebFetch 出网。与网络搜索代理、LLM 代理相互独立。
               <br />
-              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl 可用，部分工具可能忽略）；
-              若主要用 socks5，建议开启流量捕获——此路径由 MITM 亲自拨号，工具无感知、稳定生效。
+              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl
+              可用，部分工具可能忽略）；若主要用 socks5，建议开启流量捕获——此路径由 MITM
+              亲自拨号，工具无感知、稳定生效。
+              <br />
+              点击检测会通过当前输入的代理请求 <code>cip.cc</code>，返回实际出口公网 IP
+              与地理位置；检测不会自动保存代理。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -281,20 +318,67 @@ export default function SystemSettingsPage() {
               <Input
                 id="global-proxy"
                 autoComplete="off"
+                className="flex-1"
                 placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
                 value={globalProxyInput}
-                disabled={!loaded || savingGlobalProxy}
-                onChange={(e) => setGlobalProxyInput(e.target.value)}
+                disabled={!loaded || savingGlobalProxy || testingGlobalProxy}
+                onChange={(e) => {
+                  setGlobalProxyInput(e.target.value);
+                  setGlobalProxyProbe(null);
+                }}
               />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={testGlobalProxy}
+                disabled={!loaded || savingGlobalProxy || testingGlobalProxy}
+              >
+                {testingGlobalProxy ? <Loader2Icon className="animate-spin" /> : <GlobeIcon />}
+                {testingGlobalProxy ? "检测中…" : "检测连通性 / 获取出口 IP"}
+              </Button>
               <Button type="button" onClick={saveGlobalProxy} disabled={!loaded || savingGlobalProxy}>
                 保存
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim()
-                ? "已配置 · 所有目标流量经此代理出网"
-                : "未配置 · 目标流量直连出网"}
+              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
             </p>
+            {globalProxyProbe && (
+              <div className="bg-muted/50 flex flex-col gap-1 rounded-md border px-3 py-2 text-sm">
+                <div className="flex items-center gap-2">
+                  {globalProxyProbe.ok ? (
+                    <CheckCircle2Icon className="text-emerald-600" />
+                  ) : (
+                    <XCircleIcon className="text-destructive" />
+                  )}
+                  <span className={globalProxyProbe.ok ? "font-medium" : "text-destructive"}>
+                    {globalProxyProbe.ok ? "出口检测成功" : "出口检测失败"}
+                  </span>
+                </div>
+                {globalProxyProbe.ok ? (
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                    <dt className="text-muted-foreground">公网 IP</dt>
+                    <dd className="break-all font-mono">{globalProxyProbe.ip ?? "—"}</dd>
+                    <dt className="text-muted-foreground">地理位置</dt>
+                    <dd className="break-words">{globalProxyProbe.location ?? "—"}</dd>
+                    {globalProxyProbe.isp && (
+                      <>
+                        <dt className="text-muted-foreground">运营商</dt>
+                        <dd className="break-words">{globalProxyProbe.isp}</dd>
+                      </>
+                    )}
+                    <dt className="text-muted-foreground">耗时</dt>
+                    <dd>
+                      {typeof globalProxyProbe.latency_ms === "number" ? `${globalProxyProbe.latency_ms} ms` : "—"}
+                    </dd>
+                  </dl>
+                ) : (
+                  <p className="text-destructive break-words text-xs">{globalProxyProbe.error ?? "未知错误"}</p>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -308,8 +392,8 @@ export default function SystemSettingsPage() {
               开启后，把每个任务的<b>操作约束</b>（在任务总览「操作约束」里维护的 allow/deny 条目）拼进对应 Agent
               的系统提示，用来框定探索边界（如「仅测当前端口」「禁止爆破」）。
               <br />
-              可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>；默认都开。切换即时生效（下一轮读取），无需重建
-              Agent。关闭后该 Agent 不再看到约束。
+              可分别控制注入到 <b>规划者（planner）</b>与 <b>执行者（worker）</b>
+              ；默认都开。切换即时生效（下一轮读取），无需重建 Agent。关闭后该 Agent 不再看到约束。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">

@@ -168,6 +168,9 @@ type customToolToolInput struct {
 	Agents      []string        `json:"agents"`
 	Deferred    bool            `json:"deferred"`
 	Enabled     *bool           `json:"enabled"`
+	Directory   string          `json:"directory"`
+	UsageHelp   string          `json:"usage_help"`
+	WhenToUse   string          `json:"when_to_use"`
 }
 
 func customToolSchema(keyDesc string) map[string]any {
@@ -180,6 +183,9 @@ func customToolSchema(keyDesc string) map[string]any {
 		"agents":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "绑定的 agent key(可选)"},
 		"deferred":    map[string]any{"type": "boolean", "description": "是否延迟(shell 类型无效；仅 command/script/http 的不常用工具才开)"},
 		"enabled":     map[string]any{"type": "boolean", "description": "是否启用(默认 true)"},
+		"directory":   strParam("工具所在目录，仅 kind=shell 有效；只作为 Bash 环境提示，不改变工作目录"),
+		"usage_help":  strParam("工具用法帮助，仅 kind=shell 有效"),
+		"when_to_use": strParam("何时调用该工具，仅 kind=shell 有效"),
 	}, "key", "kind")
 }
 
@@ -191,11 +197,12 @@ func toDBTool(a customToolToolInput) *db.Tool {
 	return &db.Tool{
 		Key: a.Key, Description: a.Description, Schema: a.Schema, Agents: a.Agents,
 		Enabled: enabled, Kind: a.Kind, Exec: a.Exec, Deferred: a.Deferred,
+		Directory: a.Directory, UsageHelp: a.UsageHelp, WhenToUse: a.WhenToUse,
 	}
 }
 
 func (s *Server) toolCreateCustomTool() actool.CoreTool {
-	return wrTool("create_custom_tool", "【重要】当安装一些平台没有的工具时，调用该工具将安装的工具放入平台中，让平台可以调用！创建一个自定义工具(shell/command/script/http)。shell=bash 环境声明，只需 key+description+agents，无需 exec/schema。",
+	return wrTool("create_custom_tool", "【重要】当安装一些平台没有的工具时，调用该工具将安装的工具放入平台中，让平台可以调用！创建一个自定义工具(shell/command/script/http)。shell=bash 环境声明，可填写 directory、usage_help、when_to_use，无需 exec/schema。",
 		customToolSchema("工具 key(小写字母开头，字母/数字/下划线)"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a customToolToolInput

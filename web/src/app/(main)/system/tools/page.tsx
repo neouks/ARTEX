@@ -10,11 +10,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -210,8 +212,9 @@ function ToolEditor({
             <Label className="text-muted-foreground text-xs">绑定 Agent（决定该工具给哪些 Agent）</Label>
             <div className="flex flex-wrap gap-3">
               {agents.map((ag) => (
-                <label key={ag.key} className="flex items-center gap-2 text-sm">
+                <label key={ag.key} htmlFor={`system-tool-agent-${ag.key}`} className="flex items-center gap-2 text-sm">
                   <Checkbox
+                    id={`system-tool-agent-${ag.key}`}
                     checked={bound.includes(ag.key)}
                     disabled={trafficGated}
                     onCheckedChange={() => toggleAgent(ag.key)}
@@ -375,8 +378,8 @@ export default function ToolsPage() {
   }, []);
   React.useEffect(() => {
     reload();
-    api.agents().then(setAgents).catch(() => {});
-    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => {});
+    api.agents().then(setAgents).catch(() => { /* optional page data */ });
+    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => { /* optional page data */ });
   }, [reload]);
 
   const [query, setQuery] = React.useState("");
@@ -403,7 +406,7 @@ export default function ToolsPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">工具</h1>
-          <p className="text-muted-foreground text-sm">系统工具的描述/绑定，以及自定义工具(command/script/http)</p>
+          <p className="text-muted-foreground text-sm">系统工具的描述/绑定，以及自定义工具(shell/command/script/http)</p>
         </div>
         <div className="relative w-64">
           <SearchIcon className="text-muted-foreground absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2" />
@@ -549,6 +552,9 @@ function CustomToolDialog({
   const [key, setKey] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [kind, setKind] = React.useState<"shell" | "command" | "script" | "http">("shell");
+  const [directory, setDirectory] = React.useState("");
+  const [usageHelp, setUsageHelp] = React.useState("");
+  const [whenToUse, setWhenToUse] = React.useState("");
   const [ex, setEx] = React.useState<ExecState>({
     command: "", code: "", method: "GET", url: "", headers: "", body: "", timeout_ms: "", proxy: "", use_recording_proxy: false,
   });
@@ -567,6 +573,7 @@ function CustomToolDialog({
     setParamsText(""); setTestResult(null);
     if (edit === "new") {
       setKey(""); setDescription(""); setKind("shell");
+      setDirectory(""); setUsageHelp(""); setWhenToUse("");
       setEx({ command: "", code: "", method: "GET", url: "", headers: "", body: "", timeout_ms: "", proxy: "", use_recording_proxy: false });
       setSchemaText(""); setBound([]); setDeferred(false); setEnabled(true);
       return;
@@ -576,6 +583,9 @@ function CustomToolDialog({
     setKey(t.key);
     setDescription(t.description);
     setKind((t.kind as "shell" | "command" | "script" | "http") ?? "shell");
+    setDirectory(t.directory ?? "");
+    setUsageHelp(t.usage_help ?? "");
+    setWhenToUse(t.when_to_use ?? "");
     setEx({
       command: String(e.command ?? ""),
       code: String(e.code ?? ""),
@@ -627,7 +637,19 @@ function CustomToolDialog({
       }
     }
     setSaving(true);
-    const payload = { description, schema: kind === "shell" ? {} : schema, agents: bound, enabled, kind, exec: buildExec(), deferred: kind === "shell" ? false : deferred };
+    const isShell = kind === "shell";
+    const payload = {
+      description,
+      schema: isShell ? {} : schema,
+      agents: bound,
+      enabled,
+      kind,
+      exec: buildExec(),
+      deferred: isShell ? false : deferred,
+      directory: isShell ? directory.trim() : "",
+      usage_help: isShell ? usageHelp.trim() : "",
+      when_to_use: isShell ? whenToUse.trim() : "",
+    };
     try {
       if (isNew) await api.createCustomTool({ key: key.trim(), ...payload });
       else await api.updateCustomTool(tool!.key, payload);
@@ -675,11 +697,11 @@ function CustomToolDialog({
     <Sheet open={!!edit} onOpenChange={(o) => !o && onClose()}>
       <SheetContent
         side="right"
-        className="flex flex-col gap-0 p-0 data-[side=right]:w-[45vw] data-[side=right]:sm:max-w-[45vw] data-[side=right]:min-w-[480px]"
+        className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:max-w-full data-[side=right]:sm:w-[45vw] data-[side=right]:sm:min-w-[480px] data-[side=right]:sm:max-w-[45vw]"
       >
         <SheetHeader className="px-4">
           <SheetTitle>{isNew ? "新建自定义工具" : `编辑 ${tool?.key}`}</SheetTitle>
-          <SheetDescription>shell=bash 环境声明(只需名称+描述，告知模型可用 bash 调用)；command/script/http 需写执行规格。</SheetDescription>
+          <SheetDescription>shell 用于声明 Bash 环境中的工具及调用提示；command/script/http 需填写执行规格。</SheetDescription>
         </SheetHeader>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4">
@@ -698,16 +720,55 @@ function CustomToolDialog({
             <Select value={kind} onValueChange={(v) => setKind(v as "shell" | "command" | "script" | "http")}>
               <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="shell">shell（bash 环境声明）</SelectItem>
-                <SelectItem value="command">command（shell 命令模板）</SelectItem>
-                <SelectItem value="script">script（Python 脚本）</SelectItem>
-                <SelectItem value="http">http（API 请求）</SelectItem>
+                <SelectGroup>
+                  <SelectItem value="shell">shell（bash 环境声明）</SelectItem>
+                  <SelectItem value="command">command（shell 命令模板）</SelectItem>
+                  <SelectItem value="script">script（Python 脚本）</SelectItem>
+                  <SelectItem value="http">http（API 请求）</SelectItem>
+                </SelectGroup>
               </SelectContent>
             </Select>
             {kind === "shell" && (
-              <p className="text-muted-foreground text-xs">适合 nmap、sqlmap、ffuf 等出名工具——模型已知用法，只需声明"可在 bash 中调用"即可。名称+描述会追加到 Bash 工具描述里。</p>
+              <p className="text-muted-foreground text-xs">名称、描述、目录、用法帮助和调用时机会追加到绑定 Agent 的 Bash 工具描述中。</p>
             )}
           </div>
+
+          {kind === "shell" && (
+            <FieldGroup className="gap-4">
+              <Field>
+                <FieldLabel htmlFor="custom-tool-directory">工具所在目录</FieldLabel>
+                <Input
+                  id="custom-tool-directory"
+                  className="font-mono"
+                  placeholder="如 /opt/nmap/bin"
+                  value={directory}
+                  onChange={(e) => setDirectory(e.target.value)}
+                />
+                <FieldDescription>仅作为 Agent 提示，不会改变 Bash 或其他工具的工作目录。</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="custom-tool-usage-help">工具用法帮助</FieldLabel>
+                <Textarea
+                  id="custom-tool-usage-help"
+                  className="font-mono text-xs"
+                  rows={4}
+                  placeholder="如 nmap [options] target"
+                  value={usageHelp}
+                  onChange={(e) => setUsageHelp(e.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="custom-tool-when-to-use">何时调用</FieldLabel>
+                <Textarea
+                  id="custom-tool-when-to-use"
+                  rows={3}
+                  placeholder="如需要探测端口和服务时"
+                  value={whenToUse}
+                  onChange={(e) => setWhenToUse(e.target.value)}
+                />
+              </Field>
+            </FieldGroup>
+          )}
 
           {kind === "command" && (
             <div className="grid gap-1.5">
@@ -750,8 +811,8 @@ function CustomToolDialog({
                   <Label className="text-xs">代理 URL（空=直连）</Label>
                   <Input className="font-mono text-xs w-56" value={ex.proxy} onChange={(e) => setEx({ ...ex, proxy: e.target.value })} />
                 </div>
-                <label className="mt-4 flex items-center gap-2 text-sm">
-                  <Checkbox checked={ex.use_recording_proxy} onCheckedChange={(v) => setEx({ ...ex, use_recording_proxy: !!v })} />
+                <label htmlFor="custom-tool-recording-proxy" className="mt-4 flex items-center gap-2 text-sm">
+                  <Checkbox id="custom-tool-recording-proxy" checked={ex.use_recording_proxy} onCheckedChange={(v) => setEx({ ...ex, use_recording_proxy: !!v })} />
                   走记录代理
                 </label>
               </div>
@@ -782,8 +843,8 @@ function CustomToolDialog({
             <Label className="text-muted-foreground text-xs">绑定 Agent</Label>
             <div className="flex flex-wrap gap-3">
               {agents.map((a) => (
-                <label key={a.key} className="flex items-center gap-2 text-sm">
-                  <Checkbox checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
+                <label key={a.key} htmlFor={`custom-tool-agent-${a.key}`} className="flex items-center gap-2 text-sm">
+                  <Checkbox id={`custom-tool-agent-${a.key}`} checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
                   {a.name}<span className="text-muted-foreground font-mono text-xs">{a.key}</span>
                 </label>
               ))}
@@ -791,12 +852,12 @@ function CustomToolDialog({
           </div>
 
           <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={enabled} onCheckedChange={setEnabled} /> 启用
+            <label htmlFor="custom-tool-enabled" className="flex items-center gap-2 text-sm">
+              <Switch id="custom-tool-enabled" checked={enabled} onCheckedChange={setEnabled} /> 启用
             </label>
             {kind !== "shell" && (
-              <label className="flex items-center gap-2 text-sm">
-                <Switch checked={deferred} onCheckedChange={setDeferred} /> deferred（大量不常用工具才开）
+              <label htmlFor="custom-tool-deferred" className="flex items-center gap-2 text-sm">
+                <Switch id="custom-tool-deferred" checked={deferred} onCheckedChange={setDeferred} /> deferred（大量不常用工具才开）
               </label>
             )}
           </div>
