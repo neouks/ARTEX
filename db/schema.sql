@@ -355,6 +355,11 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+-- 兼容曾以 nullable 列部署的旧库，并持续固定空值语义为 ''。ADD COLUMN IF NOT EXISTS
+-- 不会修正已有列的 default / nullability，因此这里必须显式收敛列约束。
+UPDATE llm_profiles SET session_header_key = '' WHERE session_header_key IS NULL;
+ALTER TABLE llm_profiles ALTER COLUMN session_header_key SET DEFAULT '';
+ALTER TABLE llm_profiles ALTER COLUMN session_header_key SET NOT NULL;
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，
