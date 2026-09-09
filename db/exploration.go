@@ -832,6 +832,18 @@ func (s *ExplorationStore) countByKindFiltered(kind, q string) (int, error) {
 	return n, err
 }
 
+// CountFinishedIntents counts this exploration's intents in a terminal explored
+// state (done/blocked/exhausted) — graph_overview's done_intents_total, so the planner
+// knows recent_done_intents (capped at a recent window) is a truncated view and
+// stays cautious about "already tried" dedup. Excludes 'stopped' (killed/deleted),
+// matching exactly what recent_done_intents surfaces.
+func (s *ExplorationStore) CountFinishedIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('done','blocked','exhausted')`, s.expID).Scan(&n)
+	return n, err
+}
+
 // GetNode returns one node of this exploration by id (nil, nil if not found).
 func (s *ExplorationStore) GetNode(id int64) (*Node, error) {
 	n, err := scanNode(s.db.QueryRow(`SELECT `+nodeCols+` FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, id, s.expID))
@@ -882,47 +894,29 @@ func (s *ExplorationStore) Edges(limit int) ([]Edge, error) {
 	return out, rows.Err()
 }
 
-// EdgesForNode returns only the direct lineage edges touching nodeID. Worker
-// launch context uses this instead of loading the full exploration DAG.
-func (s *ExplorationStore) EdgesForNode(nodeID int64) ([]Edge, error) {
-	rows, err := s.db.Query(`SELECT src_id, rel, dst_id FROM exploration_edges
-WHERE exploration_id=$1 AND (src_id=$2 OR dst_id=$2)
-ORDER BY created_at, src_id, dst_id`, s.expID, nodeID)
+// FactsYielded returns the ids of fact nodes an intent produced (intent --yields-->
+// fact), oldest first. Used to spell out the round's incremental facts to the planner
+// alongside the finished worker's output. Best-effort: returns nil for an intent with
+// no facts (or a missing one).
+func (s *ExplorationStore) FactsYielded(intentID int64) ([]int64, error) {
+	rows, err := s.db.Query(`SELECT n.id
+		FROM exploration_edges e
+		JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+		WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3 AND n.kind=$4
+		ORDER BY n.id`, s.expID, intentID, RelYields, KindFact)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Edge
+	var ids []int64
 	for rows.Next() {
-		var edge Edge
-		if err := rows.Scan(&edge.From, &edge.Rel, &edge.To); err != nil {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		out = append(out, edge)
+		ids = append(ids, id)
 	}
-	return out, rows.Err()
-}
-
-// EvidenceSharingAnchors returns recent local facts/findings attached to at least
-// one of the same assets as nodeID. It is a focused Worker context query, not a
-// visibility rule; inherited/full history remains available through read tools.
-func (s *ExplorationStore) EvidenceSharingAnchors(nodeID int64, limit int) ([]*Node, error) {
-	if limit <= 0 {
-		limit = 8
-	}
-	rows, err := s.db.Query(`
-SELECT DISTINCT n.id, n.kind, n.payload, n.priority, n.state,
-       COALESCE(n.origin,''), COALESCE(n.owner,''), COALESCE(n.blocked_reason,''), n.created_at
-FROM exploration_nodes n
-JOIN exploration_anchors candidate ON candidate.node_id=n.id
-JOIN exploration_anchors target ON target.asset_id=candidate.asset_id AND target.node_id=$2
-WHERE n.exploration_id=$1 AND n.kind IN ('fact','finding') AND n.id<>$2
-ORDER BY n.id DESC LIMIT $3`, s.expID, nodeID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanNodes(rows)
+	return ids, rows.Err()
 }
 
 // FindingLineage returns the sub-DAG that leads FROM the exploration root TO the
@@ -1303,9 +1297,10 @@ type GoalCounts struct{ Total, Met int }
 
 // TaskListMetrics contains the aggregates rendered in task lists.
 type TaskListMetrics struct {
-	Tokens       TokenUsage
-	LastActivity int64
-	Goals        GoalCounts
+	Tokens         TokenUsage
+	LastActivity   int64
+	Goals          GoalCounts
+	RunningIntents int // kind='intent' 且 state='running' 的条数，即运行中 Worker 数
 }
 
 // TaskListMetricsAll returns list aggregates for every live task in one query.
@@ -1320,7 +1315,8 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		       COALESCE(token_metrics.cache_write_tokens,0),
 		       COALESCE(latest_activity.created_at,0),
 		       COALESCE(goal_metrics.total,0),
-		       COALESCE(goal_metrics.met,0)
+		       COALESCE(goal_metrics.met,0),
+		       COALESCE(intent_metrics.running,0)
 		FROM tasks task
 		LEFT JOIN LATERAL (
 			SELECT SUM(input_tokens) AS input_tokens,
@@ -1343,6 +1339,11 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			FROM exploration_nodes
 			WHERE exploration_id=task.exploration_id AND kind='goal'
 		) goal_metrics ON true
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS running
+			FROM exploration_nodes
+			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
+		) intent_metrics ON true
 		WHERE task.deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
@@ -1361,6 +1362,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			&metrics.LastActivity,
 			&metrics.Goals.Total,
 			&metrics.Goals.Met,
+			&metrics.RunningIntents,
 		); err != nil {
 			return nil, err
 		}

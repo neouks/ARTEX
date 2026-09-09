@@ -412,6 +412,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
+	// 平行命名——后者只是它的最新窗口（≤15）截断视图。两键并排即自描述："看到的是 N/总数"，
+	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
+	if dt, err := t.ts.CountFinishedIntents(); err == nil {
+		out["done_intents_total"] = dt
+	}
 	out["frontier_open"] = len(fr)
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
@@ -532,16 +538,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				m["scope"] = scope
 			}
 			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
-				const hostContextLimit = 500
-				visible := hosts
-				if len(visible) > hostContextLimit {
-					visible = visible[:hostContextLimit]
-				}
-				m["hosts"] = visible
+				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
+				// 都重复携带的大量字符串，对规划决策价值有限）；具体主机按需 list_assets 查。
 				m["host_count"] = len(hosts)
-				if len(visible) < len(hosts) {
-					m["hosts_truncated"] = true
-				}
 			}
 			if len(m) > 0 {
 				out["coverage"] = m
@@ -1314,7 +1313,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"⚠️只写你在工具输出里【真实看到】的结论，不要脑补。evidence 与 confidence 用来防止不准确的结论污染图谱：\n"+
 		"  · evidence=支撑本结论的【一行】关键证据（命令+最能证明的那一两行输出），**务必简洁**——细节已在 detail，这里不要再粘大段输出。\n"+
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
-		"  · **否定结论**（不可注入/端口关闭/未发现入口等）尤其要给 evidence 并如实标 confidence——它会让规划者放弃这个方向，错的否定代价很大；只探了一次或证据弱，就标 inferred、别当铁案。",
+		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
 			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
@@ -1972,6 +1971,9 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
+		// list_assets：规划时按 DSL 检索全资产库（配合 list_untested_assets 的"范围内未测"视角，
+		// 补上"按域名/指纹/端口/状态码等条件在整库里查"的能力）。
+		t.listAssets(),
 		// add_company_scope：规划时可把域名/IP/CIDR/ICP/关键词纳入某公司的资产范围（自动认领命中资产）。
 		t.addCompanyScope(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。
