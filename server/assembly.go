@@ -14,6 +14,7 @@ import (
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/skill"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
@@ -28,6 +29,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
 			return nil, agent.DeferredInfo{}, nil
+		}
+		runInfo := agent.RunInfoFrom(ctx)
+		// Task runs carry explicit attribution in RunInfo; conversational runs
+		// additionally carry the transcript session id in norma's context.
+		// Preserve both so MCP recent-call history can identify either dimension.
+		if runInfo.SessionID == "" {
+			runInfo.SessionID = transcript.SessionIDFrom(ctx)
 		}
 		var extra []actool.CoreTool
 
@@ -96,7 +104,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				for _, t := range ts {
-					extra = append(extra, t)
+					extra = append(extra, meterMCPTool(t, pg, m.ID, m.Name, a.Key, runInfo))
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
 					if directVisible && !skillGated {
@@ -142,7 +150,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
 			// once here — this closure is rebuilt per run, so the captured value always
 			// belongs to this run.
-			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, agent.RunInfoFrom(ctx)))
+			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, a.Key, runInfo))
 		}
 
 		// host tools (traffic / orchestration / custom) — added to every agent's base;

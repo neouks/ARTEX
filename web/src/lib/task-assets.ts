@@ -14,6 +14,7 @@ const TASK_ASSET_SOURCE_LABELS: Record<string, string> = {
   anchor: "黑板锚点",
   api: "资产 API",
   company: "企业关联",
+  direct: "任务直接选择",
   legacy: "历史关联",
   manual: "人工加入",
   system: "系统关联",

@@ -46,9 +46,14 @@ target AS (
 	JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
 ),
 tested AS (
+  SELECT DISTINCT link.asset_id
+  FROM task_asset_links link
+  JOIN context_tasks ctx ON ctx.task_id=link.task_id
+  WHERE link.tested
+  UNION
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
-  JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind='fact'
+  JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind IN ('fact','finding')
   JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
 )`
 

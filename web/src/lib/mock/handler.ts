@@ -60,7 +60,10 @@ const mockTaskArchives: MockTaskArchive[] = [];
 let nextMockTaskArchiveID = 1;
 const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
 const mockTaskScopes = new Map<string, TaskScopeRow[]>();
-type MockTaskAssetSource = Pick<Asset, "task_source" | "task_source_summary" | "task_source_node_id">;
+type MockTaskAssetSource = Pick<
+  Asset,
+  "task_source" | "task_source_summary" | "task_source_node_id" | "tested" | "tested_at" | "tested_by"
+>;
 const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
 let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
@@ -259,12 +262,14 @@ function mockDeleteArchive(archive: MockTaskArchive): void {
 }
 
 function setMockTaskAssetSource(taskID: string, assetID: number, source: MockTaskAssetSource) {
-  mockTaskAssetSources.set(mockTaskAssetSourceKey(taskID, assetID), source);
+  const key = mockTaskAssetSourceKey(taskID, assetID);
+  const previous = mockTaskAssetSources.get(key);
+  mockTaskAssetSources.set(key, { ...previous, ...source, tested: previous?.tested ?? source.tested ?? false });
 }
 
 function mockAssetForTask(taskID: string, asset: Asset): Asset {
   const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, asset.id));
-  return source ? { ...asset, ...source } : asset;
+  return source ? { ...asset, ...source } : { ...asset, tested: false };
 }
 
 function deleteMockTaskAssetSources(taskID: string, assetID?: number) {
@@ -974,6 +979,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const profileIDs = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
     const sourceTaskIDs = [...((b.source_task_ids as string[] | undefined) ?? [])];
     const companyIDs = [...new Set((b.company_ids as number[] | undefined) ?? [])];
+    const assetIDs = [...new Set((b.asset_ids as number[] | undefined) ?? [])];
+    if (assetIDs.length > 100 || assetIDs.some((assetID) => !Number.isInteger(assetID) || assetID <= 0)) {
+      throw new Error("关联资产不存在或无效");
+    }
+    if (assetIDs.some((assetID) => !mockAssets.some((asset) => asset.id === assetID))) {
+      throw new Error("关联资产不存在或无效");
+    }
     if (companyIDs.some((companyID) => !mockCompanies.some((company) => company.id === companyID))) {
       throw new Error("关联企业不存在或无效");
     }
@@ -1016,7 +1028,48 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         task_source: "company",
         task_source_summary: `任务创建时关联企业：${company?.name ?? `#${asset.company_id}`}`,
         task_source_node_id: undefined,
+        tested: false,
       });
+    }
+    for (const assetID of assetIDs) {
+      const asset = mockAssets.find((candidate) => candidate.id === assetID);
+      if (!asset) continue;
+      if (!asset.task_ids.includes(numericTaskID)) asset.task_ids.push(numericTaskID);
+      setMockTaskAssetSource(id, asset.id, {
+        task_source: "direct",
+        task_source_summary: "任务创建时直接选择",
+        task_source_node_id: undefined,
+        tested: false,
+      });
+      const host =
+        asset.domain ||
+        asset.ip ||
+        (asset.url
+          ? (() => {
+              try {
+                return new URL(asset.url).hostname;
+              } catch {
+                return "";
+              }
+            })()
+          : "");
+      if (host) {
+        const scopes = mockTaskScopes.get(id) ?? [];
+        const kind = asset.ip ? "ip" : asset.type === "root_domain" ? "root_domain" : "subdomain";
+        const key = `${kind}|${host}`;
+        if (!scopes.some((scope) => `${scope.kind}|${scope.domain ?? scope.net ?? ""}` === key)) {
+          scopes.push({
+            id: Date.now() + scopes.length,
+            task_id: numericTaskID,
+            kind,
+            domain: kind === "ip" ? undefined : host,
+            net: kind === "ip" ? `${host}/32` : undefined,
+            source: "manual",
+            reason: "任务创建时直接选择资产",
+          });
+          mockTaskScopes.set(id, scopes);
+        }
+      }
     }
     for (const item of mockTasks) item.active = false;
     mockTasks.unshift(created);
@@ -1412,11 +1465,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/assets" && m === "GET") {
     const type = q.get("type") ?? "";
     const taskID = q.get("task_id");
+    const tested = q.get("tested") ?? "all";
+    if (!["all", "true", "false"].includes(tested)) throw new Error("tested 必须是 all、true 或 false");
     const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
     const dsl = q.get("dsl") ?? "";
     const list = mockAssets.filter((asset) => {
       if (type && asset.type !== type) return false;
       if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return false;
+      if (taskID && tested !== "all" && Boolean(mockAssetForTask(taskID, asset).tested) !== (tested === "true"))
+        return false;
       return !dsl || mockAssetMatchesDSL(asset, dsl);
     });
     const limit = Number(q.get("limit") ?? 50);
@@ -2054,6 +2111,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       url: current.transport === "http" ? String(current.url ?? "") : "",
       enabled: typeof current.enabled === "boolean" ? current.enabled : true,
       tools: mockMcpServers.find((server) => server.id === id)?.tools ?? [],
+      calls: Number(current.calls ?? mockMcpServers.find((server) => server.id === id)?.calls ?? 0),
+      tasks: Number(current.tasks ?? mockMcpServers.find((server) => server.id === id)?.tasks ?? 0),
+      usage_agents: Array.isArray(current.usage_agents)
+        ? current.usage_agents.map(String)
+        : (mockMcpServers.find((server) => server.id === id)?.usage_agents ?? []),
+      last_used:
+        typeof current.last_used === "string"
+          ? current.last_used
+          : mockMcpServers.find((server) => server.id === id)?.last_used,
     };
     const index = mockMcpServers.findIndex((server) => server.id === id);
     if (index >= 0) mockMcpServers[index] = item;
@@ -2074,12 +2140,21 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const results = imported.map((server: MCPServer) => {
       const existing = mockMcpServers.find((item) => item.name === server.name);
       const id = existing?.id ?? nextMockMcpID++;
-      const item = { ...server, id, tools: existing?.tools ?? [] };
+      const item = {
+        ...server,
+        id,
+        tools: existing?.tools ?? [],
+        calls: existing?.calls ?? 0,
+        tasks: existing?.tasks ?? 0,
+      };
       if (existing) mockMcpServers[mockMcpServers.indexOf(existing)] = item;
       else mockMcpServers.push(item);
       return { id, name: item.name, action: existing ? "updated" : "created" };
     });
     return { ok: true, results };
+  }
+  if (seg[0] === "mcp" && seg[2] === "usage" && m === "GET") {
+    return D.mcpUsageById[Number(seg[1])] ?? { stats: [], calls: [] };
   }
   if (seg[0] === "mcp" && seg[2] === "tools") return { tools: mockMcpToolsById[Number(seg[1])] ?? [] };
   if (seg[0] === "mcp" && seg[2] === "refresh") return { tools: mockMcpToolsById[Number(seg[1])] ?? [] };

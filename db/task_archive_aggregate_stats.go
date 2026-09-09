@@ -15,6 +15,7 @@ type taskArchiveAggregate struct {
 	SkillStats        []SkillStat       `json:"skill_stats"`
 	MissingSkillStats []SkillStat       `json:"missing_skill_stats"`
 	Tools             map[string]int    `json:"tools"`
+	MCPStats          []MCPUsageStat    `json:"mcp_stats"`
 	FindingStats      FindingStats      `json:"finding_stats"`
 }
 

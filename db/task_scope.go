@@ -317,10 +317,14 @@ target AS (
   )
 ),
 tested AS (
+  SELECT DISTINCT link.asset_id
+  FROM task_asset_links link
+  WHERE link.task_id = $1 AND link.tested
+  UNION
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id = ea.node_id
-  WHERE en.exploration_id = $2 AND en.kind = 'fact'
+  WHERE en.exploration_id = $2 AND en.kind IN ('fact','finding')
 )`
 
 // TaskCoverage computes rough per-type coverage for a task. taskID indexes

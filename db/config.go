@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -140,6 +141,10 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
+	// Optional header names are persisted as a stable empty-string sentinel.
+	// Trimming here keeps both INSERT and UPDATE paths consistent and avoids
+	// storing whitespace-only values that would later be emitted as a header.
+	p.SessionHeaderKey = strings.TrimSpace(p.SessionHeaderKey)
 	hint := p.APIKeyHint
 	if len(p.APIKey) >= 4 {
 		hint = "…" + p.APIKey[len(p.APIKey)-4:]
@@ -785,15 +790,19 @@ func (d *DB) ListPromptVersions(agentID int64) ([]PromptVersion, error) {
 // ---------- MCP servers ----------
 
 type MCPServer struct {
-	ID        int64           `json:"id"`
-	Name      string          `json:"name"`
-	Transport string          `json:"transport"`
-	Command   string          `json:"command,omitempty"`
-	Args      json.RawMessage `json:"args"`
-	Env       json.RawMessage `json:"env"`
-	URL       string          `json:"url,omitempty"`
-	Enabled   bool            `json:"enabled"`
-	Tools     []string        `json:"tools,omitempty"` // cached tool names (mcp_tools_cache)
+	ID          int64           `json:"id"`
+	Name        string          `json:"name"`
+	Transport   string          `json:"transport"`
+	Command     string          `json:"command,omitempty"`
+	Args        json.RawMessage `json:"args"`
+	Env         json.RawMessage `json:"env"`
+	URL         string          `json:"url,omitempty"`
+	Enabled     bool            `json:"enabled"`
+	Tools       []string        `json:"tools,omitempty"` // cached tool names (mcp_tools_cache)
+	Calls       int             `json:"calls"`
+	Tasks       int             `json:"tasks"`
+	UsageAgents []string        `json:"usage_agents,omitempty"`
+	LastUsed    *time.Time      `json:"last_used,omitempty"`
 }
 
 func (d *DB) ListMCP() ([]*MCPServer, error) {
@@ -821,6 +830,13 @@ func (d *DB) ListMCP() ([]*MCPServer, error) {
 	for _, m := range out {
 		m.Tools, _ = d.MCPToolNames(m.ID)
 	}
+	if stats, err := d.MCPServerUsageStats(); err == nil {
+		for _, m := range out {
+			if st, ok := stats[m.ID]; ok {
+				m.Calls, m.Tasks, m.UsageAgents, m.LastUsed = st.Calls, st.Tasks, st.Agents, st.LastUsed
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -846,6 +862,7 @@ func (d *DB) MCPToolNames(serverID int64) ([]string, error) {
 type MCPTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Calls       int    `json:"calls"`
 }
 
 type MCPImportResult struct {
@@ -856,7 +873,8 @@ type MCPImportResult struct {
 
 // MCPToolsDetailed returns the cached tools (name + description) for a server.
 func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
-	rows, err := d.Query(`SELECT tool_name, COALESCE(description,'') FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
+	rows, err := d.Query(`SELECT tool_name, COALESCE(description,'')
+FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -869,7 +887,28 @@ func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	// Release the connection before querying the usage ledger. This matters for
+	// test/single-connection pools and keeps the cache query independent from
+	// the aggregate query below.
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	stats, err := d.MCPToolUsageStats(serverID)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]int, len(stats))
+	for _, stat := range stats {
+		byName[stat.ToolName] = stat.Calls
+	}
+	for i := range out {
+		out[i].Calls = byName[out[i].Name]
+	}
+	return out, nil
 }
 
 // SaveMCPTools replaces the cached tool list for a server (called after discovery).

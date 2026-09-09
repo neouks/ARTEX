@@ -1102,6 +1102,30 @@ func (s *Server) pgMCPTools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"tools": tools})
 }
 
+func (s *Server) pgMCPUsage(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeErr(w, 400, "bad MCP id")
+		return
+	}
+	stats, err := pg.MCPToolUsageStats(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	calls, err := pg.RecentMCPCalls(id, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"stats": stats, "calls": calls})
+}
+
 // ---------- skills (文件系统) ----------
 
 type skillFileNode struct {

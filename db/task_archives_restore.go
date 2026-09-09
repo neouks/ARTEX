@@ -73,7 +73,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM llm_usage WHERE COALESCE(task_id,'')=$1 OR exploration_id=$2`, strconv.FormatInt(taskID, 10), expID); err != nil {
 		return err
 	}
-	for _, table := range []string{"skill_usage", "tool_usage"} {
+	for _, table := range []string{"skill_usage", "tool_usage", "mcp_usage"} {
 		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE task_id=$1 OR exploration_id=$2`, taskID, expID); err != nil {
 			return err
 		}
@@ -271,7 +271,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else if err := insertArchiveRows(tx, "llm_records", remappedTables["llm_records"]); err != nil {
 		return nil, fmt.Errorf("restore llm_records: %w", err)
 	}
-	for _, table := range []string{"llm_usage", "skill_usage", "tool_usage"} {
+	for _, table := range []string{"llm_usage", "skill_usage", "tool_usage", "mcp_usage"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -350,7 +350,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
-		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
+		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true, "mcp_usage": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
@@ -358,7 +358,40 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	if rawRowCount(raw) == 0 {
 		return nil
 	}
+	if table == "task_asset_links" {
+		// v1 archives predate task-local test metadata. json_populate_recordset
+		// would otherwise materialize missing NOT NULL columns as NULL and abort
+		// the whole restore. Fill only the additive fields; existing values win.
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if _, ok := row["tested"]; !ok {
+				row["tested"] = false
+			}
+			if _, ok := row["tested_at"]; !ok {
+				row["tested_at"] = nil
+			}
+			if _, ok := row["tested_by"]; !ok {
+				row["tested_by"] = nil
+			}
+		}
+		encoded, err := json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+		raw = encoded
+	}
 	_, err := tx.Exec(`INSERT INTO `+table+` SELECT * FROM json_populate_recordset(NULL::`+table+`,$1::json)`, string(raw))
+	if err != nil {
+		return err
+	}
+	if table == "mcp_usage" {
+		// Archive rows retain their original ids. Advance the sequence so the
+		// first post-restore call cannot collide with a restored ledger row.
+		_, err = tx.Exec(`SELECT setval(pg_get_serial_sequence('mcp_usage','id'), COALESCE((SELECT MAX(id) FROM mcp_usage), 1), (SELECT COUNT(*) > 0 FROM mcp_usage))`)
+	}
 	return err
 }
 

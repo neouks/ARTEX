@@ -121,6 +121,7 @@ export interface TaskArchive {
     tokens?: TaskArchiveTokenStats;
     skills?: Record<string, number>;
     tools?: Record<string, number>;
+    mcp_stats?: MCPUsageStat[];
     findings?: Record<string, number>;
   };
   archived_at?: string;
@@ -252,6 +253,9 @@ export interface Asset {
   task_source?: string;
   task_source_summary?: string;
   task_source_node_id?: number;
+  tested?: boolean;
+  tested_at?: string;
+  tested_by?: string;
 }
 
 export interface IntentAsset {
@@ -1033,11 +1037,34 @@ export interface MCPServer {
   url?: string;
   enabled: boolean;
   tools?: string[]; // mcp_tools_cache (names only, for the count)
+  calls: number;
+  tasks: number;
+  usage_agents?: string[];
+  last_used?: string;
 }
 
 export interface MCPTool {
   name: string;
   description: string;
+  calls?: number;
+}
+
+export interface MCPUsageStat {
+  server_id: number;
+  server_name: string;
+  tool_name: string;
+  calls: number;
+  tasks: number;
+  agents: string[];
+  last_used?: string;
+}
+
+export interface MCPCall {
+  ts: string;
+  tool_name: string;
+  agent_key: string;
+  task_id: number;
+  session_id: string;
 }
 
 export interface MCPTestResult {

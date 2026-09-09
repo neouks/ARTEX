@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 // =====================================================================
@@ -58,6 +59,11 @@ type Asset struct {
 	TaskSource        string         `json:"task_source,omitempty"`
 	TaskSourceSummary string         `json:"task_source_summary,omitempty"`
 	TaskSourceNodeID  *int64         `json:"task_source_node_id,omitempty"`
+	// Task-local test state. These fields are populated only by task-scoped
+	// asset queries; global asset listings omit them entirely.
+	Tested   *bool      `json:"tested,omitempty"`
+	TestedAt *time.Time `json:"tested_at,omitempty"`
+	TestedBy string     `json:"tested_by,omitempty"`
 }
 
 // AuthItem is one entry in the auth array.
@@ -1155,6 +1161,12 @@ func pageClause(args *[]any, limit, offset int) string {
 
 // QueryByTask returns assets rows that have a given task_id in task_ids.
 func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([]*Asset, error) {
+	return s.QueryByTaskTested(taskID, typ, "all", limit, offset)
+}
+
+// QueryByTaskTested is the task asset page query with an optional task-local
+// tested filter: all, true, or false.
+func (s *AssetStore) QueryByTaskTested(taskID int64, typ, tested string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
@@ -1170,6 +1182,10 @@ FROM assets WHERE $1 = ANY(task_ids)`
 	if typ != "" {
 		args = append(args, typ)
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
+	}
+	if tested == "true" || tested == "false" {
+		args = append(args, tested == "true")
+		q += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM task_asset_links link WHERE link.task_id=$1 AND link.asset_id=assets.id AND link.tested=$%d)`, len(args))
 	}
 	q += pageClause(&args, limit, offset)
 	rows, err := s.db.Query(q, args...)
@@ -1188,11 +1204,19 @@ FROM assets WHERE $1 = ANY(task_ids)`
 }
 
 func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
+	return s.CountByTaskTested(taskID, typ, "all")
+}
+
+func (s *AssetStore) CountByTaskTested(taskID int64, typ, tested string) (int, error) {
 	q := `SELECT count(*) FROM assets WHERE $1 = ANY(task_ids)`
 	args := []any{taskID}
 	if typ != "" {
 		args = append(args, typ)
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
+	}
+	if tested == "true" || tested == "false" {
+		args = append(args, tested == "true")
+		q += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM task_asset_links link WHERE link.task_id=$1 AND link.asset_id=assets.id AND link.tested=$%d)`, len(args))
 	}
 	var n int
 	err := s.db.QueryRow(q, args...).Scan(&n)

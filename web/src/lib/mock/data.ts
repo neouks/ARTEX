@@ -3169,6 +3169,10 @@ export const mcpServers: MCPServer[] = [
     env: {},
     enabled: true,
     tools: ["host_info", "search", "dns_resolve"],
+    calls: 18,
+    tasks: 4,
+    usage_agents: ["worker", "planner"],
+    last_used: "2026-09-09T10:00:00Z",
   },
   {
     id: 2,
@@ -3179,6 +3183,8 @@ export const mcpServers: MCPServer[] = [
     env: {},
     enabled: false,
     tools: ["browser_navigate", "browser_click", "browser_snapshot"],
+    calls: 0,
+    tasks: 0,
   },
   {
     id: 3,
@@ -3189,6 +3195,8 @@ export const mcpServers: MCPServer[] = [
     env: {},
     enabled: false,
     tools: [],
+    calls: 0,
+    tasks: 0,
   },
   {
     id: 4,
@@ -3199,14 +3207,16 @@ export const mcpServers: MCPServer[] = [
     env: {},
     enabled: false,
     tools: [],
+    calls: 0,
+    tasks: 0,
   },
 ];
 
 export const mcpToolsById: Record<number, MCPTool[]> = {
   1: [
-    { name: "host_info", description: "查询某 IP 的 Shodan 主机信息" },
-    { name: "search", description: "Shodan 搜索" },
-    { name: "dns_resolve", description: "DNS 解析" },
+    { name: "host_info", description: "查询某 IP 的 Shodan 主机信息", calls: 8 },
+    { name: "search", description: "Shodan 搜索", calls: 7 },
+    { name: "dns_resolve", description: "DNS 解析", calls: 3 },
   ],
   2: [
     { name: "browser_navigate", description: "浏览器打开 URL" },
@@ -3215,6 +3225,47 @@ export const mcpToolsById: Record<number, MCPTool[]> = {
   ],
   3: [],
   4: [],
+};
+
+export const mcpUsageById: Record<
+  number,
+  { stats: import("../types").MCPUsageStat[]; calls: import("../types").MCPCall[] }
+> = {
+  1: {
+    stats: [
+      {
+        server_id: 1,
+        server_name: "shodan",
+        tool_name: "host_info",
+        calls: 8,
+        tasks: 3,
+        agents: ["worker"],
+        last_used: "2026-09-09T10:00:00Z",
+      },
+      {
+        server_id: 1,
+        server_name: "shodan",
+        tool_name: "search",
+        calls: 7,
+        tasks: 2,
+        agents: ["planner", "worker"],
+        last_used: "2026-09-08T18:20:00Z",
+      },
+      {
+        server_id: 1,
+        server_name: "shodan",
+        tool_name: "dns_resolve",
+        calls: 3,
+        tasks: 1,
+        agents: ["worker"],
+        last_used: "2026-09-07T12:05:00Z",
+      },
+    ],
+    calls: [
+      { ts: "2026-09-09T10:00:00Z", tool_name: "host_info", agent_key: "worker", task_id: 42, session_id: "" },
+      { ts: "2026-09-08T18:20:00Z", tool_name: "search", agent_key: "planner", task_id: 41, session_id: "" },
+    ],
+  },
 };
 
 // ── Skills ───────────────────────────────────────────────────────────────────

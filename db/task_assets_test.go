@@ -186,3 +186,69 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 		t.Fatalf("unexpected intent provenance: %+v", assets[0])
 	}
 }
+
+func TestTaskCreationDirectAssetsHaveIndependentTestState(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+
+	domain := fmt.Sprintf("direct-task-%d.example.test", time.Now().UnixNano())
+	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Assets().DeleteByIDs([]int64{assetID}) })
+	first, err := d.CreateTaskWithOptions("direct first", "goal", TaskCreateOptions{AssetIDs: []int64{assetID, assetID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := d.CreateTaskWithOptions("direct second", "goal", TaskCreateOptions{AssetIDs: []int64{assetID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(first.ID); _ = d.DeleteTask(second.ID) })
+
+	page, err := d.Assets().QueryByTaskTested(first.ID, "root_domain", "false", 10, 0)
+	if err != nil || len(page) != 1 || page[0].Tested == nil || *page[0].Tested || page[0].TaskSource != "direct" {
+		t.Fatalf("initial direct task asset=%+v err=%v", page, err)
+	}
+	if err := d.Assets().MarkTaskAssetsTested(first.ID, []int64{assetID}, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	page, err = d.Assets().QueryByTaskTested(first.ID, "root_domain", "true", 10, 0)
+	if err != nil || len(page) != 1 || page[0].Tested == nil || !*page[0].Tested || page[0].TestedBy != "worker" || page[0].TestedAt == nil {
+		t.Fatalf("marked direct task asset=%+v err=%v", page, err)
+	}
+	page, err = d.Assets().QueryByTaskTested(second.ID, "root_domain", "false", 10, 0)
+	if err != nil || len(page) != 1 || page[0].Tested == nil || *page[0].Tested {
+		t.Fatalf("second task state leaked=%+v err=%v", page, err)
+	}
+	scopes, err := d.Assets().ListTaskScope(first.ID)
+	if err != nil || len(scopes) != 1 || scopes[0].Kind != "root_domain" || scopes[0].Domain != domain {
+		t.Fatalf("direct asset scope=%+v err=%v", scopes, err)
+	}
+}
+
+func TestTaskCreationMissingAssetRollsBack(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+	description := fmt.Sprintf("missing-direct-asset-%d", time.Now().UnixNano())
+	if _, err := d.CreateTaskWithOptions(description, "goal", TaskCreateOptions{AssetIDs: []int64{1 << 62}}); !errors.Is(err, ErrTaskAssetAssetNotFound) {
+		t.Fatalf("missing asset error=%v", err)
+	}
+	var tasks, explorations int
+	if err := d.QueryRow(`SELECT count(*) FROM tasks WHERE description=$1`, description).Scan(&tasks); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`SELECT count(*) FROM explorations WHERE description=$1`, description).Scan(&explorations); err != nil {
+		t.Fatal(err)
+	}
+	if tasks != 0 || explorations != 0 {
+		t.Fatalf("failed create leaked rows: tasks=%d explorations=%d", tasks, explorations)
+	}
+}

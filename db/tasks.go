@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"time"
 )
@@ -148,6 +149,7 @@ type TaskCreateOptions struct {
 	CategoryID           *int64
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
+	AssetIDs             []int64
 	LLMProfileIDs        []int64
 	TimeoutSeconds       int
 	PlanHeartbeatSeconds int
@@ -167,6 +169,11 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
+	assetIDs, err := NormalizeTaskAssetIDs(opts.AssetIDs)
+	if err != nil {
+		return nil, err
+	}
+	opts.AssetIDs = assetIDs
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -235,6 +242,9 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
 		return nil, err
 	}
+	if err := insertTaskAssets(tx, t.ID, opts.AssetIDs); err != nil {
+		return nil, err
+	}
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
 		return nil, err
 	}
@@ -244,6 +254,91 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 		t.LLMFailoverState = "ready"
 	}
 	return t, tx.Commit()
+}
+
+// insertTaskAssets attaches the explicitly selected global assets during task
+// creation and derives conservative task scopes from their host identity. It
+// runs in the creation transaction so a missing asset cannot leave a partial
+// task behind.
+func insertTaskAssets(tx *sql.Tx, taskID int64, assetIDs []int64) error {
+	if len(assetIDs) == 0 {
+		return nil
+	}
+	var found int
+	if err := tx.QueryRow(`SELECT count(*) FROM assets WHERE id=ANY($1::bigint[])`, assetIDs).Scan(&found); err != nil {
+		return err
+	}
+	if found != len(assetIDs) {
+		return ErrTaskAssetAssetNotFound
+	}
+	if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE
+WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END
+WHERE id=ANY($2::bigint[])`, taskID, assetIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO task_asset_links(task_id,asset_id,source,source_summary)
+SELECT $1,id,'direct','任务创建时直接选择'
+FROM assets WHERE id=ANY($2::bigint[])
+ON CONFLICT (task_id,asset_id) DO UPDATE
+SET source='direct', source_summary=EXCLUDED.source_summary, source_node_id=NULL`, taskID, assetIDs); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id,type,COALESCE(domain,''),COALESCE(url,''),COALESCE(ip,'')
+FROM assets WHERE id=ANY($1::bigint[])`, assetIDs)
+	if err != nil {
+		return err
+	}
+	// database/sql cannot run another statement on this transaction's pgx
+	// connection while rows is still streaming. Materialize the conservative
+	// scopes first, close the result set, and only then perform the upserts.
+	var scopes []TaskScope
+	for rows.Next() {
+		var id int64
+		var typ, domain, rawURL, ip string
+		if err := rows.Scan(&id, &typ, &domain, &rawURL, &ip); err != nil {
+			rows.Close()
+			return err
+		}
+		var scope TaskScope
+		scope.TaskID, scope.Source, scope.Reason = taskID, "manual", "任务创建时直接选择资产"
+		switch typ {
+		case "root_domain":
+			scope.Kind, scope.Domain = "root_domain", DomainKey(domain)
+		case "subdomain":
+			scope.Kind, scope.Domain = "subdomain", DomainKey(domain)
+		case "ip":
+			scope.Kind, scope.Net = "ip", ipToHostCIDR(ip)
+		case "service", "endpoint":
+			host := DomainKey(domain)
+			if host == "" && rawURL != "" {
+				host, _, _ = parseURL(normalizeURL(rawURL))
+			}
+			if host != "" && net.ParseIP(host) == nil {
+				scope.Kind, scope.Domain = "subdomain", host
+			} else if c := ipToHostCIDR(host); c != "" {
+				scope.Kind, scope.Net = "ip", c
+			} else if c := ipToHostCIDR(ip); c != "" {
+				scope.Kind, scope.Net = "ip", c
+			}
+		}
+		if scope.Kind != "" {
+			scopes = append(scopes, scope)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	scoped := &AssetStore{tx: tx}
+	for _, scope := range scopes {
+		if _, err := scoped.upsertTaskScopeResult(scope); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {

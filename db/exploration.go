@@ -340,6 +340,34 @@ func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 	return err
 }
 
+// AnchorAssetIDs returns the assets explicitly anchored to one node in this
+// exploration. It is intentionally scoped by exploration id so a malformed or
+// stale node id can never leak anchors from another task.
+func (s *ExplorationStore) AnchorAssetIDs(nodeID int64) ([]int64, error) {
+	if s == nil || s.db == nil || nodeID <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+SELECT anchor.asset_id
+FROM exploration_anchors anchor
+JOIN exploration_nodes node ON node.id=anchor.node_id AND node.exploration_id=$2
+WHERE anchor.node_id=$1
+ORDER BY anchor.asset_id`, nodeID, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
 	_, err := s.db.Exec(`

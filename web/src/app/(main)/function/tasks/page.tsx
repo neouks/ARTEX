@@ -122,6 +122,7 @@ import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
+  Asset,
   ChatAttachment,
   Company,
   DeleteTaskOptions,
@@ -162,11 +163,13 @@ function appendUploads(desc: string, atts: ChatAttachment[]): string {
 // worker), so the list has to be pulled; 10s is plenty for status / 进度 / token 变化.
 const POLL_MS = 10_000;
 const MAX_SOURCE_TASKS = 8;
+const MAX_TASK_ASSETS = 100;
+const TASK_ASSET_TYPES = ["root_domain", "ip", "subdomain", "app", "service", "endpoint"] as const;
 
 // fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
 function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   return String(n);
 }
 
@@ -559,7 +562,7 @@ export default function TasksPage() {
         }
         load();
       } catch (e) {
-        toast.error("删除失败：" + (e as Error).message);
+        toast.error(`删除失败：${(e as Error).message}`);
         throw e;
       }
     },
@@ -674,7 +677,7 @@ export default function TasksPage() {
           return next;
         });
         const details = deleteDetails(total);
-        const summary = `已删除 ${deleted.length} 个任务` + (details.length > 0 ? `（${details.join("，")}）` : "");
+        const summary = `已删除 ${deleted.length} 个任务${details.length > 0 ? `（${details.join("，")}）` : ""}`;
         if (warnings.length > 0) {
           toast.warning(`${summary}；部分外部数据清理未完成：${warnings.join("；")}`);
         } else {
@@ -2866,6 +2869,110 @@ function CompanyPicker({
   );
 }
 
+function assetPickerLabel(asset: Asset): string {
+  const service = [asset.service_name, asset.port ? String(asset.port) : ""].filter(Boolean).join(":");
+  return (
+    [asset.domain, asset.ip, asset.url, asset.app_name, service].find((value) => Boolean(value?.trim()))?.trim() ??
+    `资产 #${asset.id}`
+  );
+}
+
+function TaskAssetPicker({
+  value,
+  onValueChange,
+  portalContainer,
+}: {
+  value: number[];
+  onValueChange: (value: number[]) => void;
+  portalContainer?: React.RefObject<HTMLElement | null>;
+}) {
+  const [assets, setAssets] = React.useState<Asset[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  React.useEffect(() => {
+    let active = true;
+    setLoading(true);
+    const loadType = async (type: (typeof TASK_ASSET_TYPES)[number]) => {
+      const first = await api.assets(type, 200, 0);
+      const result = [...first.assets];
+      for (let offset = result.length; offset < first.total; offset += 200) {
+        const next = await api.assets(type, 200, offset);
+        result.push(...next.assets);
+        if (next.assets.length === 0) break;
+      }
+      return result;
+    };
+    Promise.all(TASK_ASSET_TYPES.map(loadType))
+      .then((pages) => {
+        if (!active) return;
+        const byID = new Map<number, Asset>();
+        for (const page of pages) for (const asset of page) byID.set(asset.id, asset);
+        setAssets([...byID.values()]);
+      })
+      .catch(() => {
+        if (active) setAssets([]);
+      })
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, []);
+  const byID = React.useMemo(() => new Map(assets.map((asset) => [String(asset.id), asset])), [assets]);
+  const ids = React.useMemo(() => assets.map((asset) => String(asset.id)), [assets]);
+  const selectedIDs = React.useMemo(() => value.map(String), [value]);
+  const atLimit = value.length >= MAX_TASK_ASSETS;
+  return (
+    <Combobox
+      items={ids}
+      multiple
+      value={selectedIDs}
+      itemToStringValue={(id) => {
+        const asset = byID.get(id);
+        return asset ? `${assetPickerLabel(asset)} ${asset.type} ${asset.url ?? ""}` : id;
+      }}
+      onValueChange={(next) => onValueChange(next.slice(0, MAX_TASK_ASSETS).map(Number))}
+    >
+      <ComboboxChips>
+        <ComboboxValue>
+          {selectedIDs.map((id) => (
+            <ComboboxChip key={id}>{assetPickerLabel(byID.get(id) ?? ({ id: Number(id) } as Asset))}</ComboboxChip>
+          ))}
+        </ComboboxValue>
+        <ComboboxChipsInput
+          id="task-assets"
+          placeholder={
+            loading
+              ? "加载资产中…"
+              : atLimit
+                ? `最多关联 ${MAX_TASK_ASSETS} 项资产`
+                : "搜索名称、域名、IP、URL 或应用名"
+          }
+          disabled={loading || atLimit}
+        />
+      </ComboboxChips>
+      <ComboboxContent portalContainer={portalContainer}>
+        <ComboboxEmpty>{loading ? "加载资产中…" : "没有匹配的资产"}</ComboboxEmpty>
+        <ComboboxList>
+          {(id: string) => {
+            const asset = byID.get(id);
+            if (!asset) return null;
+            return (
+              <ComboboxItem key={id} value={id} disabled={atLimit && !selectedIDs.includes(id)}>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">{assetPickerLabel(asset)}</span>
+                  <Badge variant="outline" className="shrink-0">
+                    {asset.type}
+                  </Badge>
+                  <code className="text-muted-foreground shrink-0 text-xs">#{asset.id}</code>
+                </div>
+              </ComboboxItem>
+            );
+          }}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
+  );
+}
+
 type CategoryManagementView = number | "uncategorized" | "new";
 
 function CategoryDropTarget({
@@ -3306,6 +3413,7 @@ function CreateTaskSheet({
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
+  const [assetIDs, setAssetIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
@@ -3374,6 +3482,7 @@ function CreateTaskSheet({
         llmProfileIds: llmProfileIDs.map(Number),
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
+        assetIds: assetIDs,
         timeoutSeconds: timeoutSec,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
@@ -3387,6 +3496,7 @@ function CreateTaskSheet({
       setSelectedTemplateID(null);
       setSourceTaskIDs([]);
       setCompanyIDs([]);
+      setAssetIDs([]);
       setLLMProfileIDs([]);
       setTimeoutMin("");
       setHeartbeatMin("10");
@@ -3525,6 +3635,14 @@ function CreateTaskSheet({
               <FieldDescription>
                 创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
                 作为范围上下文；不会自动生成意图或强制改变执行目标。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-assets">关联测试资产</FieldLabel>
+              <TaskAssetPicker value={assetIDs} onValueChange={setAssetIDs} portalContainer={sheetContentRef} />
+              <FieldDescription>
+                {assetIDs.length > 0 ? `已选择 ${assetIDs.length} 项资产。` : "尚未选择独立资产。"}{" "}
+                从全局资产库选择的资产会与企业快照一起加入任务范围，最多 {MAX_TASK_ASSETS} 项。
               </FieldDescription>
             </Field>
             <Field>

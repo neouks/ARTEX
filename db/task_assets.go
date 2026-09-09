@@ -30,6 +30,16 @@ type TaskAssetMutation struct {
 	Existing  int `json:"existing"`
 }
 
+// NormalizeTaskAssetIDs validates, de-duplicates, and bounds an optional list
+// used during task creation. An empty list is valid; attach endpoints still use
+// the stricter internal helper so an empty mutation remains an error there.
+func NormalizeTaskAssetIDs(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return normalizeTaskAssetIDs(ids)
+}
+
 // TaskAssetScopeMutation summarizes one free-form scope registration. Domain
 // and IP entries create or reuse global assets; every entry also becomes an
 // idempotent task_scope row.
@@ -125,6 +135,28 @@ SET source=EXCLUDED.source,
 		return fmt.Errorf("%w: task or asset association does not exist", ErrTaskAssetInvalid)
 	}
 	return nil
+}
+
+// MarkTaskAssetsTested records that the current task's agent produced a fact
+// or finding for these assets. The update is task-local, so shared global asset
+// rows never leak test state across tasks.
+func (s *AssetStore) MarkTaskAssetsTested(taskID int64, assetIDs []int64, agentKey string) error {
+	if taskID <= 0 || len(assetIDs) == 0 {
+		return nil
+	}
+	ids, err := normalizeTaskAssetIDs(assetIDs)
+	if err != nil {
+		return err
+	}
+	query := `UPDATE task_asset_links
+SET tested=true, tested_at=COALESCE(tested_at,now()), tested_by=COALESCE(NULLIF($3,''),tested_by)
+	WHERE task_id=$1 AND asset_id=ANY($2::bigint[])`
+	if s.tx != nil {
+		_, err = s.tx.Exec(query, taskID, ids, strings.TrimSpace(agentKey))
+	} else {
+		_, err = s.db.Exec(query, taskID, ids, strings.TrimSpace(agentKey))
+	}
+	return err
 }
 
 // RegisterTaskAssetScopes accepts the same structured scope rules as enterprise
@@ -342,7 +374,7 @@ func (s *AssetStore) hydrateTaskAssetSources(taskID int64, assets []*Asset) erro
 		byID[asset.ID] = asset
 	}
 	rows, err := s.db.Query(`
-SELECT asset_id, source, source_summary, source_node_id
+	SELECT asset_id, source, source_summary, source_node_id, tested, tested_at, COALESCE(tested_by,'')
 FROM task_asset_links
 WHERE task_id=$1 AND asset_id=ANY($2::bigint[])`, taskID, ids)
 	if err != nil {
@@ -353,12 +385,21 @@ WHERE task_id=$1 AND asset_id=ANY($2::bigint[])`, taskID, ids)
 		var assetID int64
 		var source, summary string
 		var sourceNodeID sql.NullInt64
-		if err := rows.Scan(&assetID, &source, &summary, &sourceNodeID); err != nil {
+		var tested bool
+		var testedAt sql.NullTime
+		var testedBy string
+		if err := rows.Scan(&assetID, &source, &summary, &sourceNodeID, &tested, &testedAt, &testedBy); err != nil {
 			return err
 		}
 		if asset := byID[assetID]; asset != nil {
 			asset.TaskSource = source
 			asset.TaskSourceSummary = summary
+			asset.Tested = &tested
+			if testedAt.Valid {
+				t := testedAt.Time
+				asset.TestedAt = &t
+			}
+			asset.TestedBy = testedBy
 			if sourceNodeID.Valid {
 				id := sourceNodeID.Int64
 				asset.TaskSourceNodeID = &id

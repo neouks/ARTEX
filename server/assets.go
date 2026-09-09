@@ -334,6 +334,11 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
+	tested := q.Get("tested")
+	if tested != "" && tested != "all" && tested != "true" && tested != "false" {
+		writeErr(w, http.StatusBadRequest, "tested 必须是 all、true 或 false")
+		return
+	}
 
 	assets := []*db.Asset{}
 	var err error
@@ -360,9 +365,9 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 				assets, err = as.QueryByCompany(companyID, typ, limit, offset)
 			}
 		case taskID > 0:
-			total, err = as.CountByTask(taskID, typ)
+			total, err = as.CountByTaskTested(taskID, typ, tested)
 			if err == nil && offset < total {
-				assets, err = as.QueryByTask(taskID, typ, limit, offset)
+				assets, err = as.QueryByTaskTested(taskID, typ, tested, limit, offset)
 			}
 		default:
 			if typ == "" {

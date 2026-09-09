@@ -134,22 +134,36 @@ function SourceCell({ asset }: { asset: Asset }) {
   const source = firstText([asset.task_source], "legacy");
   const summary = firstText([asset.task_source_summary], "由历史任务资产关联迁移，暂无更详细来源说明");
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant="outline" className="max-w-28 shrink-0 font-normal">
-          <span className="truncate">{taskAssetSourceLabel(source)}</span>
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent side="left" align="start" className="max-w-sm">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="font-medium">{taskAssetSourceLabel(source)}</span>
-          <span className="[overflow-wrap:anywhere]">{summary}</span>
-          {asset.task_source_node_id ? (
-            <span className="font-mono opacity-80">来源节点 #{asset.task_source_node_id}</span>
-          ) : null}
-        </div>
-      </TooltipContent>
-    </Tooltip>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="outline" className="max-w-28 shrink-0 font-normal">
+            <span className="truncate">{taskAssetSourceLabel(source)}</span>
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent side="left" align="start" className="max-w-sm">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="font-medium">{taskAssetSourceLabel(source)}</span>
+            <span className="[overflow-wrap:anywhere]">{summary}</span>
+            {asset.task_source_node_id ? (
+              <span className="font-mono opacity-80">来源节点 #{asset.task_source_node_id}</span>
+            ) : null}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant={asset.tested ? "default" : "secondary"} className="shrink-0">
+            {asset.tested ? "已测试" : "未测试"}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          {asset.tested
+            ? `测试时间：${asset.tested_at ? new Date(asset.tested_at).toLocaleString() : "未知"}${asset.tested_by ? ` · Agent：${asset.tested_by}` : ""}`
+            : "尚未记录 Agent 对该任务资产的事实或漏洞发现"}
+        </TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -347,6 +361,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const [page, setPage] = React.useState(0);
   const [size, setSize] = React.useState(50);
   const [refreshKey, setRefreshKey] = React.useState(0);
+  const [testedFilter, setTestedFilter] = React.useState<"all" | "true" | "false">("all");
   const [addOpen, setAddOpen] = React.useState(false);
   const [removeTarget, setRemoveTarget] = React.useState<Asset | null>(null);
   const [removing, setRemoving] = React.useState(false);
@@ -357,12 +372,14 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     setLoaded(false);
   }, []);
 
+  // refreshKey intentionally restarts the polling effect after attach/remove.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit reload nonce.
   React.useEffect(() => {
     let active = true;
     const load = async () => {
       try {
         const [current, nextCounts] = await Promise.all([
-          api.taskAssets(taskId, tab, size, page * size),
+          api.taskAssets(taskId, tab, size, page * size, testedFilter),
           api.assetCounts(taskId),
         ]);
         if (!active) return;
@@ -381,7 +398,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       active = false;
       clearInterval(timer);
     };
-  }, [page, refreshKey, size, tab, taskId]);
+  }, [page, refreshKey, size, tab, taskId, testedFilter]);
 
   React.useEffect(() => {
     const maxPage = Math.max(0, Math.ceil(total / size) - 1);
@@ -430,10 +447,30 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           <h2 className="font-medium text-sm">测试资产</h2>
           <p className="text-muted-foreground text-xs">当前任务共关联 {totalAll} 项资产</p>
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <PlusIcon data-icon="inline-start" />
-          新增测试资产
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={testedFilter}
+            onValueChange={(value) => {
+              setTestedFilter(value as typeof testedFilter);
+              setPage(0);
+            }}
+          >
+            <SelectTrigger size="sm" className="w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="false">未测试</SelectItem>
+                <SelectItem value="true">已测试</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <PlusIcon data-icon="inline-start" />
+            新增测试资产
+          </Button>
+        </div>
       </div>
 
       <Tabs value={tab} onValueChange={(value) => setTab(value as NewAssetType)} className="min-h-0 flex-1">

@@ -1248,6 +1248,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				// conversation context: no exploration store available, cannot record finding
 				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
 			}
+			if t.as != nil && t.taskID > 0 {
+				marked := anchors
+				if len(marked) == 0 {
+					marked = t.ownerAssetIDs()
+				}
+				_ = t.as.MarkTaskAssetsTested(t.taskID, marked, t.worker)
+			}
 			t.writes.Findings++
 			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
 		})
@@ -1302,8 +1309,34 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	if intent > 0 {
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
+	if t.as != nil && t.taskID > 0 {
+		anchors := pidList(it.AssetIDs)
+		if len(anchors) == 0 {
+			anchors = t.ownerAssetIDs()
+		}
+		_ = t.as.MarkTaskAssetsTested(t.taskID, anchors, t.worker)
+	}
 	t.writes.Facts++
 	return id, nil
+}
+
+// ownerAssetIDs returns assets anchored to the current worker intent and is
+// used when a write tool omits an explicit asset_ids list.
+func (t *ToolSet) ownerAssetIDs() []int64 {
+	if t.ts == nil || t.ownerNode <= 0 {
+		return nil
+	}
+	n, err := t.ts.GetNode(t.ownerNode)
+	if err == nil && n != nil {
+		var p struct {
+			AssetIDs []int64 `json:"asset_ids"`
+		}
+		if json.Unmarshal(n.Payload, &p) == nil && len(p.AssetIDs) > 0 {
+			return p.AssetIDs
+		}
+	}
+	ids, _ := t.ts.AnchorAssetIDs(t.ownerNode)
+	return ids
 }
 
 func (t *ToolSet) recordFact() actool.CoreTool {

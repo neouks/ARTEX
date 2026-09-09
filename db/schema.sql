@@ -547,11 +547,21 @@ CREATE TABLE IF NOT EXISTS task_asset_links (
     source         TEXT NOT NULL DEFAULT 'system',
     source_summary TEXT NOT NULL DEFAULT '',
     source_node_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
+    tested         BOOLEAN NOT NULL DEFAULT false,
+    tested_at      TIMESTAMPTZ,
+    tested_by      TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (task_id, asset_id)
 );
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested BOOLEAN;
+UPDATE task_asset_links SET tested=false WHERE tested IS NULL;
+ALTER TABLE task_asset_links ALTER COLUMN tested SET DEFAULT false;
+ALTER TABLE task_asset_links ALTER COLUMN tested SET NOT NULL;
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested_at TIMESTAMPTZ;
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested_by TEXT;
 CREATE INDEX IF NOT EXISTS idx_task_asset_links_asset ON task_asset_links(asset_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_tested ON task_asset_links(task_id, tested, asset_id);
 CREATE INDEX IF NOT EXISTS idx_task_asset_links_node ON task_asset_links(source_node_id)
     WHERE source_node_id IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_asset_links;
@@ -586,6 +596,30 @@ FROM assets asset
 CROSS JOIN LATERAL unnest(asset.task_ids) AS requested(task_id)
 JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
 ON CONFLICT (task_id, asset_id) DO NOTHING;
+
+-- Backfill the task-local tested flag for existing installations. Facts and
+-- findings already anchored to an asset are durable evidence that an agent
+-- tested it; later writes maintain the flag directly from the write tools.
+WITH first_test AS (
+    SELECT task.id AS task_id, anchor.asset_id,
+           MIN(node.created_at) AS tested_at,
+           (ARRAY_AGG(NULLIF(node.origin,'') ORDER BY node.created_at, node.id)
+             FILTER (WHERE NULLIF(node.origin,'') IS NOT NULL))[1] AS tested_by
+    FROM tasks task
+    JOIN exploration_nodes node ON node.exploration_id=task.exploration_id
+                               AND node.kind IN ('fact','finding')
+                               AND node.state <> 'origin'
+    JOIN exploration_anchors anchor ON anchor.node_id=node.id
+    GROUP BY task.id, anchor.asset_id
+)
+UPDATE task_asset_links link
+SET tested=true,
+    tested_at=COALESCE(link.tested_at, first_test.tested_at),
+    tested_by=COALESCE(NULLIF(link.tested_by,''), first_test.tested_by)
+FROM first_test
+WHERE link.task_id=first_test.task_id
+  AND link.asset_id=first_test.asset_id
+  AND NOT link.tested;
 
 -- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
 -- until the user saves/resets the chain, which clears all failure state.
@@ -816,6 +850,25 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_key, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_usage_task ON tool_usage(task_id);
+
+-- MCP tool calls use a dedicated ledger instead of parsing the dynamic
+-- mcp__server__tool runtime name. No foreign keys by design: task/session or MCP
+-- deletion must not erase historical usage statistics.
+CREATE TABLE IF NOT EXISTS mcp_usage (
+    id             BIGSERIAL PRIMARY KEY,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    server_id      BIGINT,
+    server_name    TEXT NOT NULL,
+    tool_name      TEXT NOT NULL,
+    agent_key      TEXT,
+    task_id        BIGINT,
+    exploration_id BIGINT,
+    intent_id      BIGINT,
+    session_id     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_usage_server ON mcp_usage(server_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_usage_tool ON mcp_usage(server_id, tool_name, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_usage_task ON mcp_usage(task_id);
 
 -- =====================================================================
 -- H. 内置工具目录
