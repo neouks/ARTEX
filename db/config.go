@@ -848,6 +848,12 @@ type MCPTool struct {
 	Description string `json:"description"`
 }
 
+type MCPImportResult struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Action string `json:"action"`
+}
+
 // MCPToolsDetailed returns the cached tools (name + description) for a server.
 func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
 	rows, err := d.Query(`SELECT tool_name, COALESCE(description,'') FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
@@ -902,6 +908,52 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7 WHERE id=$8`,
 		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.ID)
 	return m.ID, err
+}
+
+// ImportMCP upserts a normalized MCP batch atomically. Existing IDs and agent
+// visibility are retained; only stale tool discovery cache rows are cleared.
+func (d *DB) ImportMCP(servers []*MCPServer) ([]MCPImportResult, error) {
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	results := make([]MCPImportResult, 0, len(servers))
+	for _, m := range servers {
+		args, env := string(m.Args), string(m.Env)
+		if args == "" {
+			args = "[]"
+		}
+		if env == "" {
+			env = "{}"
+		}
+
+		var id int64
+		err := tx.QueryRow(`INSERT INTO mcp_servers(name,transport,command,args,env,url,enabled)
+VALUES ($1,$2,NULLIF($3,''),$4,$5,NULLIF($6,''),$7)
+ON CONFLICT (name) DO NOTHING
+RETURNING id`, m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled).Scan(&id)
+		action := "created"
+		if errors.Is(err, sql.ErrNoRows) {
+			action = "updated"
+			err = tx.QueryRow(`UPDATE mcp_servers
+SET transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7
+WHERE name=$1 RETURNING id`, m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled).Scan(&id)
+			if err == nil {
+				_, err = tx.Exec(`DELETE FROM mcp_tools_cache WHERE server_id=$1`, id)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("import mcp %q: %w", m.Name, err)
+		}
+		m.ID = id
+		results = append(results, MCPImportResult{ID: id, Name: m.Name, Action: action})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (d *DB) DeleteMCP(id int64) error {

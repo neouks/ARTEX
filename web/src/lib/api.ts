@@ -47,7 +47,9 @@ import type {
   LLMRecordDetail,
   LLMRecordItem,
   LLMTask,
+  MCPImportResult,
   MCPServer,
+  MCPTestResult,
   MCPTool,
   MissingSkill,
   ModelTokenStat,
@@ -879,6 +881,18 @@ export const api = {
   deleteMcpServer: (id: number) => del<{ deleted: number }>(`/mcp/${id}`),
   mcpTools: (id: number) => get<{ tools: MCPTool[] }>(`/mcp/${id}/tools`).then((r) => arr(r.tools)),
   refreshMcpServer: (id: number) => post<{ tools: MCPTool[] }>(`/mcp/${id}/refresh`, {}).then((r) => arr(r.tools)),
+  testMcpServer: (m: Partial<MCPServer>) => post<MCPTestResult>("/mcp/test", m),
+  importMcpServers: (
+    servers: Array<{
+      name: string;
+      transport: "stdio" | "http";
+      command?: string;
+      args: string[];
+      env: Record<string, string>;
+      url?: string;
+      enabled: boolean;
+    }>,
+  ) => post<{ ok: boolean; results: MCPImportResult[] }>("/mcp/import", { servers }),
 
   // ---- 资产同步 (ScopeSentry 数据源) ----
   ssStatus: () =>

@@ -17,6 +17,7 @@ import type {
   CompanyScopeRule,
   Conversation,
   IntentAsset,
+  MCPServer,
   ScopeRow,
   Task,
   TaskArchive,
@@ -45,6 +46,9 @@ const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
 const mockActivity = structuredClone(D.activity);
 const mockTools: Tool[] = structuredClone(D.tools);
+const mockMcpServers: MCPServer[] = structuredClone(D.mcpServers);
+const mockMcpToolsById: Record<number, import("../types").MCPTool[]> = structuredClone(D.mcpToolsById);
+let nextMockMcpID = Math.max(0, ...mockMcpServers.map((server) => server.id)) + 1;
 type MockTaskArchiveSnapshot = {
   task: Task;
   numericTaskID: number;
@@ -2019,11 +2023,55 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/tools/custom/test") return { output: "（demo）工具执行输出示例。", is_error: false };
 
   // ── mcp ──
-  if (path === "/mcp" && m === "GET") return { servers: D.mcpServers };
-  if (path === "/mcp" && m === "POST") return { id: 3 };
-  if (seg[0] === "mcp" && seg[2] === "tools") return { tools: D.mcpToolsById[Number(seg[1])] ?? [] };
-  if (seg[0] === "mcp" && seg[2] === "refresh") return { tools: D.mcpToolsById[Number(seg[1])] ?? [] };
-  if (seg[0] === "mcp" && seg.length === 2 && m === "DELETE") return { deleted: Number(seg[1]) };
+  if (path === "/mcp" && m === "GET") return { servers: mockMcpServers };
+  if (path === "/mcp" && m === "POST") {
+    const current = b as Partial<MCPServer>;
+    const id = Number(current.id ?? nextMockMcpID++);
+    const item: MCPServer = {
+      id,
+      name: String(current.name ?? "new-mcp"),
+      transport: current.transport === "http" ? "http" : "stdio",
+      command: current.transport === "http" ? "" : String(current.command ?? ""),
+      args: Array.isArray(current.args) ? current.args.map(String) : [],
+      env: current.env && typeof current.env === "object" ? (current.env as Record<string, string>) : {},
+      url: current.transport === "http" ? String(current.url ?? "") : "",
+      enabled: typeof current.enabled === "boolean" ? current.enabled : true,
+      tools: mockMcpServers.find((server) => server.id === id)?.tools ?? [],
+    };
+    const index = mockMcpServers.findIndex((server) => server.id === id);
+    if (index >= 0) mockMcpServers[index] = item;
+    else mockMcpServers.push(item);
+    return { id };
+  }
+  if (path === "/mcp/test" && m === "POST") {
+    const current = b as Partial<MCPServer>;
+    if (current.transport === "stdio" && !String(current.command ?? "").trim())
+      return { ok: false, error: "配置错误：stdio 传输缺少命令" };
+    if (current.transport === "http" && !String(current.url ?? "").trim())
+      return { ok: false, error: "配置错误：http 传输缺少 URL" };
+    const tools = current.name ? [{ name: `${current.name}_tool`, description: "（Mock）工具" }] : [];
+    return { ok: true, tool_count: tools.length, tools, latency_ms: 12 };
+  }
+  if (path === "/mcp/import" && m === "POST") {
+    const imported = Array.isArray(b.servers) ? b.servers : [];
+    const results = imported.map((server: MCPServer) => {
+      const existing = mockMcpServers.find((item) => item.name === server.name);
+      const id = existing?.id ?? nextMockMcpID++;
+      const item = { ...server, id, tools: existing?.tools ?? [] };
+      if (existing) mockMcpServers[mockMcpServers.indexOf(existing)] = item;
+      else mockMcpServers.push(item);
+      return { id, name: item.name, action: existing ? "updated" : "created" };
+    });
+    return { ok: true, results };
+  }
+  if (seg[0] === "mcp" && seg[2] === "tools") return { tools: mockMcpToolsById[Number(seg[1])] ?? [] };
+  if (seg[0] === "mcp" && seg[2] === "refresh") return { tools: mockMcpToolsById[Number(seg[1])] ?? [] };
+  if (seg[0] === "mcp" && seg.length === 2 && m === "DELETE") {
+    const id = Number(seg[1]);
+    const index = mockMcpServers.findIndex((server) => server.id === id);
+    if (index >= 0) mockMcpServers.splice(index, 1);
+    return { deleted: id };
+  }
 
   // ── scopesentry（demo：未配置）──
   if (path === "/sync/scopesentry/status")

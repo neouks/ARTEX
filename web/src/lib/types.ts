@@ -1030,6 +1030,20 @@ export interface MCPTool {
   description: string;
 }
 
+export interface MCPTestResult {
+  ok: boolean;
+  tool_count?: number;
+  tools?: MCPTool[];
+  latency_ms?: number;
+  error?: string;
+}
+
+export interface MCPImportResult {
+  id: number;
+  name: string;
+  action: "created" | "updated";
+}
+
 // ---- Skills ----
 // Fields align with the agentskills.io open specification.
 // description covers both "what the skill does" and "when to use it".

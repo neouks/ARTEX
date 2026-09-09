@@ -3175,10 +3175,30 @@ export const mcpServers: MCPServer[] = [
     name: "playwright",
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@playwright/mcp"],
+    args: ["@playwright/mcp", "--headless"],
     env: {},
-    enabled: true,
+    enabled: false,
     tools: ["browser_navigate", "browser_click", "browser_snapshot"],
+  },
+  {
+    id: 3,
+    name: "web_search",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@zhafron/mcp-web-search"],
+    env: {},
+    enabled: false,
+    tools: [],
+  },
+  {
+    id: 4,
+    name: "chrome-devtools",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "chrome-devtools-mcp", "--slim", "--headless"],
+    env: {},
+    enabled: false,
+    tools: [],
   },
 ];
 
@@ -3193,6 +3213,8 @@ export const mcpToolsById: Record<number, MCPTool[]> = {
     { name: "browser_click", description: "点击元素" },
     { name: "browser_snapshot", description: "抓取可访问性快照" },
   ],
+  3: [],
+  4: [],
 };
 
 // ── Skills ───────────────────────────────────────────────────────────────────

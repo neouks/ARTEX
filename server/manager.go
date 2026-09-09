@@ -428,9 +428,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		}
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
-	// Reconcile the seeded browser MCP with the persisted capture state, so a
+	// Reconcile the seeded Playwright MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
-	m.syncBrowserMCPProxy()
+	m.syncPlaywrightMCPProxy()
 	return m, nil
 }
 
@@ -451,11 +451,11 @@ func (m *Manager) SetTrafficEnabled(on bool) error {
 	m.mu.Lock()
 	m.trafficOn = on
 	m.mu.Unlock()
-	// Inject (on) or strip (off) the recording proxy + CA on the browser MCP so
+	// Inject (on) or strip (off) the recording proxy + CA on the Playwright MCP so
 	// Playwright routes through the MITM. Must run after the flag flip above, since
 	// ProxyAddr/ProxyCACert honor it. putSettings rebuilds agents next (applyLLM),
 	// which re-spawns the MCP with the new args/env.
-	m.syncBrowserMCPProxy()
+	m.syncPlaywrightMCPProxy()
 	return nil
 }
 
@@ -584,27 +584,39 @@ func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, pro
 	return nil
 }
 
-// browserMCPName is the seeded Playwright MCP whose proxy args + CA env are kept
-// in sync with the traffic-capture toggle.
-const browserMCPName = "browser"
+// playwrightMCPName is the canonical built-in Playwright MCP. The legacy name
+// remains a read fallback for databases where both rows existed during migration.
+const (
+	playwrightMCPName    = "playwright"
+	legacyBrowserMCPName = "browser"
+	// browserMCPName is kept as a source-compatible alias for older in-package
+	// tests and integrations; new code should use playwrightMCPName.
+	browserMCPName = legacyBrowserMCPName
+)
 
-// syncBrowserMCPProxy reconciles the seeded browser MCP's proxy args + CA env with
+// syncPlaywrightMCPProxy reconciles the seeded Playwright MCP's proxy args + CA env with
 // the current traffic-capture state: capture on → route Playwright through the
 // recording proxy (--proxy-server) and trust its MITM CA (NODE_EXTRA_CA_CERTS);
 // capture off → strip both. Idempotent, and a no-op if the user deleted/renamed the
 // MCP. Must be called WITHOUT m.mu held (ProxyAddr/ProxyCACert take the lock).
-func (m *Manager) syncBrowserMCPProxy() {
+func (m *Manager) syncPlaywrightMCPProxy() {
 	servers, err := m.pg.ListMCP()
 	if err != nil {
-		log.Printf("[mcp] browser 代理同步: 读取 MCP 列表失败: %v", err)
+		log.Printf("[mcp] playwright 代理同步: 读取 MCP 列表失败: %v", err)
 		return
 	}
-	var srv *pgdb.MCPServer
+	var srv, legacy *pgdb.MCPServer
 	for _, s := range servers {
-		if s.Name == browserMCPName {
+		if s.Name == playwrightMCPName {
 			srv = s
 			break
 		}
+		if s.Name == legacyBrowserMCPName {
+			legacy = s
+		}
+	}
+	if srv == nil {
+		srv = legacy
 	}
 	if srv == nil {
 		return // user removed/renamed it — leave it alone
@@ -625,13 +637,13 @@ func (m *Manager) syncBrowserMCPProxy() {
 	srv.Args = encodeJSON(args)
 	srv.Env = encodeJSON(env)
 	if _, err := m.pg.SaveMCP(srv); err != nil {
-		log.Printf("[mcp] browser 代理同步失败: %v", err)
+		log.Printf("[mcp] playwright 代理同步失败: %v", err)
 		return
 	}
 	if proxy != "" {
-		log.Printf("[mcp] browser MCP 已挂捕获代理 %s (CA %s)", proxy, cert)
+		log.Printf("[mcp] playwright MCP 已挂捕获代理 %s (CA %s)", proxy, cert)
 	} else {
-		log.Printf("[mcp] browser MCP 已移除捕获代理配置")
+		log.Printf("[mcp] playwright MCP 已移除捕获代理配置")
 	}
 }
 
@@ -751,8 +763,8 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 			return err
 		}
 	}
-	// Keep the browser MCP's egress in sync with the new global proxy too.
-	m.syncBrowserMCPProxy()
+	// Keep the Playwright MCP's egress in sync with the new global proxy too.
+	m.syncPlaywrightMCPProxy()
 	return nil
 }
 

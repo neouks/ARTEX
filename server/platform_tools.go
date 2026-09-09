@@ -266,7 +266,7 @@ type mcpToolInput struct {
 func mcpSchema(withID bool) map[string]any {
 	props := map[string]any{
 		"name":      strParam("MCP 服务器名"),
-		"transport": strParam("stdio | http / sse"),
+		"transport": strParam("stdio | http"),
 		"command":   strParam("stdio 的启动命令(如 npx)"),
 		"args":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "命令参数数组"},
 		"env":       map[string]any{"type": "object", "description": "环境变量 {KEY:VALUE}"},
@@ -302,7 +302,11 @@ func (s *Server) toolCreateMCP() actool.CoreTool {
 			if strings.TrimSpace(a.Name) == "" || strings.TrimSpace(a.Transport) == "" {
 				return actool.Errorf("name / transport 必填"), nil
 			}
-			id, err := s.m.pg.SaveMCP(a.toDB())
+			m := a.toDB()
+			if err := normalizeMCPServer(m); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			id, err := s.m.pg.SaveMCP(m)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -319,7 +323,11 @@ func (s *Server) toolUpdateMCP() actool.CoreTool {
 			if a.ID == 0 {
 				return actool.Errorf("id 必填"), nil
 			}
-			if _, err := s.m.pg.SaveMCP(a.toDB()); err != nil {
+			m := a.toDB()
+			if err := normalizeMCPServer(m); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if _, err := s.m.pg.SaveMCP(m); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			return actool.Text(fmt.Sprintf("mcp updated: id=%d", a.ID)), nil

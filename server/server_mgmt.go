@@ -862,8 +862,12 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m db.MCPServer
-	if err := decode(r, &m); err != nil {
-		writeErr(w, 400, err.Error())
+	if err := decodeMCPBody(w, r, &m); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := normalizeMCPServer(&m); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	isNew := m.ID == 0
@@ -884,6 +888,153 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	writeJSON(w, 200, map[string]any{"id": id})
+}
+
+const maxMCPRequestBody = 1 << 20
+
+func decodeMCPBody(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRequestBody)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		if strings.Contains(err.Error(), "request body too large") {
+			return fmt.Errorf("请求正文过大")
+		}
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err == nil {
+		return fmt.Errorf("invalid JSON: multiple values")
+	} else if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	return nil
+}
+
+type mcpTestTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+func (s *Server) pgTestMCP(w http.ResponseWriter, r *http.Request) {
+	var m db.MCPServer
+	if err := decodeMCPBody(w, r, &m); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	started := time.Now()
+	tools, err := discoverMCP(ctx, &m)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": mcpDiscoveryErrorMessage(ctx, err),
+		})
+		return
+	}
+	out := make([]mcpTestTool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, mcpTestTool{Name: t.Name, Description: t.Description})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"tool_count": len(out),
+		"tools":      out,
+		"latency_ms": time.Since(started).Milliseconds(),
+	})
+}
+
+type mcpImportServer struct {
+	Name      string          `json:"name"`
+	Transport string          `json:"transport"`
+	Type      string          `json:"type"`
+	Command   string          `json:"command"`
+	Args      json.RawMessage `json:"args"`
+	Env       json.RawMessage `json:"env"`
+	URL       string          `json:"url"`
+	Enabled   *bool           `json:"enabled"`
+}
+
+type mcpImportRequest struct {
+	Servers []mcpImportServer `json:"servers"`
+}
+
+func (in mcpImportServer) normalized() (*db.MCPServer, error) {
+	transport := strings.ToLower(strings.TrimSpace(in.Transport))
+	if transport == "" {
+		switch strings.ToLower(strings.TrimSpace(in.Type)) {
+		case "local", "stdio":
+			transport = "stdio"
+		case "http", "sse", "streamable-http":
+			transport = "http"
+		}
+	}
+	if transport == "" && strings.TrimSpace(in.URL) != "" {
+		transport = "http"
+	}
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+	m := &db.MCPServer{
+		Name:      in.Name,
+		Transport: transport,
+		Command:   in.Command,
+		Args:      in.Args,
+		Env:       in.Env,
+		URL:       in.URL,
+		Enabled:   enabled,
+	}
+	if err := normalizeMCPServer(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (s *Server) pgImportMCP(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var req mcpImportRequest
+	if err := decodeMCPBody(w, r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if len(req.Servers) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "servers 不能为空"})
+		return
+	}
+	servers := make([]*db.MCPServer, 0, len(req.Servers))
+	for i, raw := range req.Servers {
+		m, err := raw.normalized()
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("servers[%d]: %s", i, err)})
+			return
+		}
+		servers = append(servers, m)
+	}
+	results, err := pg.ImportMCP(servers)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// Discovery deliberately runs after the response transaction on the server
+	// context, so a browser disconnect cannot cancel newly imported MCP checks.
+	for _, m := range servers {
+		if !m.Enabled {
+			continue
+		}
+		m := m
+		go func() {
+			ctx, cancel := context.WithTimeout(s.ctx, 90*time.Second)
+			defer cancel()
+			if err := s.discoverAndCacheMCP(ctx, m); err != nil {
+				log.Printf("[mcp] 导入后工具发现 %s 失败: %v", m.Name, err)
+			}
+		}()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
 }
 
 func (s *Server) pgDeleteMCP(w http.ResponseWriter, r *http.Request) {
