@@ -8,6 +8,63 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
+func TestExpandIndexUsesOverviewRepresentative(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("digest index", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	as := d.Assets()
+	var assets []int64
+	for i := range 2 {
+		id, err := as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: fmt.Sprintf("index-%d-%d.test", task.ID, i), TaskID: task.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assets = append(assets, id)
+	}
+	store := d.Exploration(task.ExplorationID)
+	member, err := store.AddNode(db.KindFact, map[string]any{"summary": "shared", "asset_ids": assets}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range assets {
+		if err := store.Anchor(member, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := store.AddDigest(map[string]any{"body": "shared digest"}, []int64{member})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := &ToolSet{ts: store, as: as, taskID: task.ID}
+	_, index := tools.coldDigestOverview()
+	if len(index) != 1 || index[0]["asset_id"] != assets[0] {
+		t.Fatalf("unexpected representative: %+v", index)
+	}
+	for _, id := range []int64{assets[0], assets[1], 0} {
+		result, err := tools.expandIndex().Call(t.Context(), json.RawMessage(fmt.Sprintf(`{"asset_id":%d}`, id)), nil)
+		if err != nil || result.IsError {
+			t.Fatalf("expand: %+v %v", result, err)
+		}
+		var out struct {
+			Digests []struct{ ID int64 } `json:"digests"`
+		}
+		if err := json.Unmarshal([]byte(result.Flatten()), &out); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if id == assets[0] {
+			want = 1
+		}
+		if len(out.Digests) != want || (want == 1 && out.Digests[0].ID != digest) {
+			t.Fatalf("asset %d: %+v", id, out)
+		}
+	}
+}
+
 func TestDigestAuthorizationAcrossTasks(t *testing.T) {
 	d := testDB(t)
 	defer d.Close()

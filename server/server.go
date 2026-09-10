@@ -2290,12 +2290,7 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad finding id")
 		return
 	}
-	var body struct {
-		Status    *string `json:"status"`
-		Severity  *string `json:"severity"`
-		Name      *string `json:"name"`
-		VulnClass *string `json:"vulnclass"`
-	}
+	var body db.FindingPatch
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
@@ -2309,52 +2304,27 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "bad status: "+*body.Status)
 			return
 		}
-		n, err := s.m.pg.SetFindingStatus(id, *body.Status)
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		if n == 0 {
-			writeErr(w, 404, "finding not found")
-			return
-		}
 	}
 	if body.Severity != nil {
 		if !db.ValidSeverity(*body.Severity) {
 			writeErr(w, 400, "bad severity: "+*body.Severity)
 			return
 		}
-		n, err := s.m.pg.SetFindingSeverity(id, *body.Severity)
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		if n == 0 {
-			writeErr(w, 404, "finding not found")
-			return
-		}
 	}
 	if body.Name != nil {
-		n, err := s.m.pg.SetFindingName(id, strings.TrimSpace(*body.Name))
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		if n == 0 {
-			writeErr(w, 404, "finding not found")
-			return
-		}
+		*body.Name = strings.TrimSpace(*body.Name)
 	}
 	if body.VulnClass != nil {
-		n, err := s.m.pg.SetFindingVulnClass(id, strings.TrimSpace(*body.VulnClass))
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		if n == 0 {
-			writeErr(w, 404, "finding not found")
-			return
-		}
+		*body.VulnClass = strings.TrimSpace(*body.VulnClass)
+	}
+	n, err := s.m.pg.PatchFinding(id, body)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if n == 0 {
+		writeErr(w, 404, "finding not found")
+		return
 	}
 	f, err := s.m.pg.GetFinding(id)
 	if err != nil {

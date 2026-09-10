@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestChineseLanguagePolicyIdempotent(t *testing.T) {
+	for _, body := range []string{"role", withChineseLanguage("role"), withChineseLanguage("role") + "\n"} {
+		once := withChineseLanguage(body)
+		if twice := withChineseLanguage(once); twice != once || strings.Count(twice, chineseLanguagePrompt) != 1 {
+			t.Fatalf("duplicate policy: %q", twice)
+		}
+	}
+	if got, err := renderTmpl("plain }} text", nil); err != nil || got != "plain }} text" {
+		t.Fatalf("plain prompt changed: %q %v", got, err)
+	}
+}
+
 func TestAllAgentPromptsRequireChinese(t *testing.T) {
 	previous := PromptOverride
 	t.Cleanup(func() { PromptOverride = previous })
@@ -27,7 +39,8 @@ func TestAllAgentPromptsRequireChinese(t *testing.T) {
 }
 
 func TestRenderSystemOverrideAndFallback(t *testing.T) {
-	t.Cleanup(func() { PromptOverride = nil })
+	previous := PromptOverride
+	t.Cleanup(func() { PromptOverride = previous })
 
 	// no override → built-in default
 	PromptOverride = nil

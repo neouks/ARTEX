@@ -68,8 +68,7 @@ func (t *ToolSet) authorizedCoveredMembers(store *db.ExplorationStore, ownerTask
 }
 
 // coldDigestOverview returns the folded cold region for graph_overview: the flat
-// digest bodies and the asset-grouped index (§6.1/§6.2). covered is unused here
-// (kept for symmetry with the caller's coverage computation).
+// digest bodies and the asset-grouped index (§6.1/§6.2).
 func (t *ToolSet) coldDigestOverview() (digests []map[string]any, index []map[string]any) {
 	ads, err := t.ts.ActiveDigests()
 	if err != nil || len(ads) == 0 {
@@ -323,44 +322,22 @@ func (t *ToolSet) expandIndex() actool.CoreTool {
 				AssetID int64 `json:"asset_id"`
 			}
 			_ = json.Unmarshal(raw, &in)
-			ads, _ := t.ts.ActiveDigests()
+			digests, index := t.coldDigestOverview()
+			selected := map[int64]bool{}
+			for _, entry := range index {
+				assetID, _ := entry["asset_id"].(int64) // missing means unanchored
+				if assetID == in.AssetID {
+					for _, id := range entry["digest_ids"].([]int64) {
+						selected[id] = true
+					}
+					break
+				}
+			}
 			out := make([]map[string]any, 0)
-			for _, d := range ads {
-				if !t.digestAuthorized(t.ts, t.taskID, d.ID) {
-					continue
+			for _, d := range digests {
+				if selected[d["id"].(int64)] {
+					out = append(out, d)
 				}
-				members, _ := t.ts.DigestMembers(d.ID)
-				assetsByNode, _ := t.ts.NodeAssets(members)
-				match := in.AssetID == 0
-				for _, m := range members {
-					for _, a := range assetsByNode[m] {
-						if a == in.AssetID {
-							match = true
-						}
-					}
-					if match {
-						break
-					}
-				}
-				// asset_id==0 means "unanchored bucket": include only digests with no asset.
-				if in.AssetID == 0 {
-					anchored := false
-					for _, m := range members {
-						if len(assetsByNode[m]) > 0 {
-							anchored = true
-							break
-						}
-					}
-					match = !anchored
-				}
-				if !match {
-					continue
-				}
-				var p struct {
-					Body string `json:"body"`
-				}
-				_ = json.Unmarshal(d.Payload, &p)
-				out = append(out, map[string]any{"id": d.ID, "body": p.Body, "member_count": len(members)})
 			}
 			return jsonResult(map[string]any{"asset_id": in.AssetID, "digests": out})
 		})

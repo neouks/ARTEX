@@ -676,11 +676,7 @@ func (d *DB) DeleteFindingsByTask(taskID int64) (int64, error) {
 
 // SetFindingStatus updates one finding's triage state. Returns rows affected.
 func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
-	res, err := d.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, status, id)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return d.PatchFinding(id, FindingPatch{Status: &status})
 }
 
 // SetFindingReportByNodeID sets the Markdown report on the standalone finding row
@@ -694,25 +690,58 @@ func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error
 	return res.RowsAffected()
 }
 
-// setFindingCol updates one text column on the standalone finding row AND mirrors
-// the new value into the originating exploration node's payload under jsonKey, so the
-// per-task 发现 Tab (which reads the node payload, not this table) stays in sync.
-// Returns rows affected (0 when no finding has that id); the node sync is best-effort.
-// col and jsonKey MUST be trusted constants (they are interpolated into SQL) — never
-// pass user input.
-func (d *DB) setFindingCol(id int64, col, jsonKey, val string) (int64, error) {
+// FindingPatch distinguishes omitted fields from explicit empty values.
+type FindingPatch struct {
+	Status    *string `json:"status"`
+	Severity  *string `json:"severity"`
+	Name      *string `json:"name"`
+	VulnClass *string `json:"vulnclass"`
+}
+
+// PatchFinding atomically updates triage fields and the graph projection.
+// Triage status is not a graph node state. Payload edits invalidate cold digests.
+func (d *DB) PatchFinding(id int64, p FindingPatch) (int64, error) {
+	if p.Status != nil && !ValidFindingStatus(*p.Status) {
+		return 0, fmt.Errorf("bad status: %s", *p.Status)
+	}
+	if p.Severity != nil && !ValidSeverity(*p.Severity) {
+		return 0, fmt.Errorf("bad severity: %s", *p.Severity)
+	}
+	changes := map[string]string{}
+	for key, value := range map[string]*string{"severity": p.Severity, "name": p.Name, "vulnclass": p.VulnClass} {
+		if value != nil {
+			changes[key] = *value
+		}
+	}
+	payload, err := json.Marshal(changes)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	var nodeID *int64
-	err := d.QueryRow(`UPDATE findings SET `+col+`=$1 WHERE id=$2 RETURNING node_id`, val, id).Scan(&nodeID)
+	err = tx.QueryRow(`UPDATE findings SET status=COALESCE($2,status),
+		severity=COALESCE($3,severity), name=COALESCE($4,name),
+		vulnclass=COALESCE($5,vulnclass) WHERE id=$1 RETURNING node_id`,
+		id, p.Status, p.Severity, p.Name, p.VulnClass).Scan(&nodeID)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
-	if nodeID != nil {
-		_, _ = d.Exec(`UPDATE exploration_nodes
-			SET payload = jsonb_set(payload, '{`+jsonKey+`}', to_jsonb($1::text))
-			WHERE id = $2`, val, *nodeID)
+	if nodeID != nil && len(changes) > 0 {
+		if _, err := tx.Exec(`UPDATE exploration_nodes
+			SET payload=payload || $1::jsonb, content_version=content_version+1
+			WHERE id=$2 AND payload IS DISTINCT FROM payload || $1::jsonb`, string(payload), *nodeID); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return 1, nil
 }
@@ -720,18 +749,18 @@ func (d *DB) setFindingCol(id int64, col, jsonKey, val string) (int64, error) {
 // SetFindingSeverity updates one finding's severity (+ node payload sync). Returns
 // rows affected (0 when no finding has that id).
 func (d *DB) SetFindingSeverity(id int64, severity string) (int64, error) {
-	return d.setFindingCol(id, "severity", "severity", severity)
+	return d.PatchFinding(id, FindingPatch{Severity: &severity})
 }
 
 // SetFindingName updates one finding's 漏洞名称 (+ node payload sync). Empty name is
 // allowed — the frontend falls back to the vuln class for display.
 func (d *DB) SetFindingName(id int64, name string) (int64, error) {
-	return d.setFindingCol(id, "name", "name", name)
+	return d.PatchFinding(id, FindingPatch{Name: &name})
 }
 
 // SetFindingVulnClass updates one finding's 漏洞类别 (+ node payload sync).
 func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
-	return d.setFindingCol(id, "vulnclass", "vulnclass", vulnclass)
+	return d.PatchFinding(id, FindingPatch{VulnClass: &vulnclass})
 }
 
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the

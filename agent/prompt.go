@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -16,6 +17,9 @@ var PromptOverride func(agentKey string) (string, bool)
 const chineseLanguagePrompt = "【统一语言要求】所有回复、思考、推理、分析、计划及总结全程使用简体中文。代码、命令、工具/API 名称、标识符、协议字段和原始证据保持原样，不翻译或改写；严格输出格式中的固定值也保持原样。"
 
 func withChineseLanguage(body string) string {
+	if strings.HasSuffix(strings.TrimSpace(body), chineseLanguagePrompt) {
+		return body
+	}
 	return body + "\n\n" + chineseLanguagePrompt
 }
 
@@ -63,6 +67,9 @@ func renderSystem(agentKey, def string, vars any) (body string) {
 }
 
 func renderTmpl(tmpl string, vars any) (string, error) {
+	if !strings.Contains(tmpl, "{{") {
+		return tmpl, nil
+	}
 	t, err := template.New("p").Option("missingkey=error").Parse(tmpl)
 	if err != nil {
 		return "", err

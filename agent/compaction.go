@@ -13,8 +13,7 @@ package agent
 //	           reusing bodies whose signature is unchanged (§5.3).
 //
 // Concurrency: one compaction per task at a time (mutex), ≥cooldown between runs,
-// and a commit-time liveness recheck drops any member that revived while the body
-// was being generated so a digest never covers a hot node.
+// and a pre-write recheck discards a body whose source changed during generation.
 
 import (
 	"context"
@@ -195,7 +194,7 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
 	for _, b := range blocks {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil, nil))
+		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
 	}
 	// A minor may have pushed the segment count over M → merge in the same run.
 	if ad, e := ts.ActiveDigests(); e == nil && len(ad) >= c.m {
@@ -234,11 +233,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	blocks := g.group(elig, c.params)
 
 	bySig := map[string]*db.Node{}
-	genBySig := map[string]int{}
 	for _, d := range active {
-		sig, gen := digestSigGen(d)
+		sig, _ := digestSigGen(d)
 		bySig[sig] = d
-		genBySig[sig] = gen
 	}
 	desired := map[string]bool{}
 	var toCreate []block
@@ -261,16 +258,16 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	if err := ts.SupersedeDigests(stale); err != nil {
 		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
+		return
 	}
 	for _, b := range toCreate {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active, genBySig))
+		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
 	}
 }
 
 // foldBlock compresses one block and writes its digest — with a commit-time
-// liveness recheck (§ concurrency): between grouping and write the graph may have
-// changed, so any member that has since gone hot (revived) is dropped from the
-// covers set. If the block dissolves below K it is skipped.
+// source recheck: never attach a body generated from an old block to a different
+// membership or changed source. A discarded block can be retried next round.
 func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) {
 	if !c.blockAuthorized(ts, b, nodeByID) {
 		return
@@ -280,27 +277,29 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 		log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), b.Members, err)
 		return
 	}
-	// Re-read fresh state and drop any member that revived while we compressed.
-	fresh, _, err := loadColdGraph(ts)
+	// Removing only revived members would leave their conclusions in the body.
+	fresh, freshNodes, err := loadColdGraph(ts)
 	if err != nil {
 		return
 	}
 	freshHot := fresh.hotSet()
-	members := make([]int64, 0, len(b.Members))
 	for _, mID := range b.Members {
-		if !freshHot[mID] {
-			members = append(members, mID)
+		if freshHot[mID] || freshNodes[mID] == nil {
+			return
 		}
 	}
-	if len(members) < c.params.K {
-		return // block revived out from under us — leave those nodes hot, don't fold
-	}
-	final := block{Members: members, Anchors: b.Anchors}
-	if !c.blockAuthorized(ts, b, nodeByID) {
+	freshVersions, err := ts.ContentVersions()
+	if err != nil || blockSignature(b, freshVersions) != blockSignature(b, cvers) {
 		return
 	}
-	payload := digestPayload(body, final, nodeByID, generation, blockSignature(final, cvers))
-	if _, err := ts.AddDigest(payload, members); err != nil {
+	if buildCompressionInput(fresh, b, freshNodes) != buildCompressionInput(g, b, nodeByID) {
+		return
+	}
+	if !c.blockAuthorized(ts, b, freshNodes) {
+		return
+	}
+	payload := digestPayload(body, b, freshNodes, generation, blockSignature(b, freshVersions))
+	if _, err := ts.AddDigest(payload, b.Members); err != nil {
 		log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
 	}
 }
@@ -308,7 +307,7 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 // generationFor computes a digest's重摘代次 (§1): 1 for a fresh fold; for a major
 // merge, max(generation) over the active digests that overlap this block's
 // members, +1.
-func (c *Compactor) generationFor(b block, active []*db.Node, genBySig map[string]int) int {
+func (c *Compactor) generationFor(b block, active []*db.Node) int {
 	if len(active) == 0 {
 		return 1
 	}
