@@ -25,6 +25,13 @@ func Causef(code, short, format string, args ...any) *AbortCause {
 	return &AbortCause{Code: code, Short: short, Text: fmt.Sprintf(format, args...)}
 }
 
+// AssetAuthorizationChangedCause identifies an immediate Worker stop caused by
+// an operator revoking or deleting one of the intent's task-local assets.
+func AssetAuthorizationChangedCause(assetIDs []int64) *AbortCause {
+	return Causef("asset_authorization_changed", "任务资产授权已变更",
+		"用户撤回或删除了当前意图关联的任务资产（asset_ids=%v）；系统立即停止 Worker，且不会执行后续探测或收尾网络操作", assetIDs)
+}
+
 var (
 	// Task-level execution context.
 	AbortPausedByUser = cause("paused_by_user", "用户暂停了任务",

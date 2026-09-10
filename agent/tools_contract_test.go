@@ -3,8 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 func TestPlannerToolContractMatchesPrefetchedPrompt(t *testing.T) {
@@ -41,5 +44,20 @@ func TestAddIntentRejectsBatchOverFourBeforeWriting(t *testing.T) {
 	}
 	if !result.IsError || !strings.Contains(result.Flatten(), "最多新增 4 条") {
 		t.Fatalf("oversized batch result = error:%v text:%q", result.IsError, result.Flatten())
+	}
+}
+
+func TestRestrictNodeRelationsHidesUnauthorizedEndpoints(t *testing.T) {
+	visible := visibleNodeIDs([]*db.Node{{ID: 1}, {ID: 3}})
+	relations := restrictNodeRelations(map[int64][]int64{
+		1: {2, 3},
+		2: {1},
+	}, visible)
+	if !reflect.DeepEqual(relations, map[int64][]int64{1: {3}}) {
+		t.Fatalf("filtered relations=%v", relations)
+	}
+	origins := restrictNodeOrigins(map[int64]int64{1: 2, 3: 1, 4: 1}, visible)
+	if !reflect.DeepEqual(origins, map[int64]int64{3: 1}) {
+		t.Fatalf("filtered origins=%v", origins)
 	}
 }

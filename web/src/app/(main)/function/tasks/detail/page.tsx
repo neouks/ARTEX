@@ -39,6 +39,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
+import { AssetApprovalsTab } from "./_tabs/asset-approvals-tab";
 import { AssetsTab } from "./_tabs/assets-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
@@ -54,6 +55,7 @@ const TABS = [
   { value: "graph", label: "探索链路" },
   { value: "findings", label: "发现" },
   { value: "assets", label: "测试资产" },
+  { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
@@ -427,6 +429,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="assets" className="mt-0">
           <AssetsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="asset-approvals" className="mt-0">
+          <AssetApprovalsTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
           <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />

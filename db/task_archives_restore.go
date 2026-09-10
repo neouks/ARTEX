@@ -87,6 +87,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	}{
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_asset_blocks WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
@@ -255,7 +256,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_links", "findings"} {
+	for _, table := range []string{"task_asset_links", "task_asset_blocks", "findings"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -349,7 +350,7 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
-		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
+		"task_constraints": true, "activity": true, "task_asset_links": true, "task_asset_blocks": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true, "mcp_usage": true,
 	}
 	if !allowed[table] {
@@ -375,6 +376,21 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 			}
 			if _, ok := row["tested_by"]; !ok {
 				row["tested_by"] = nil
+			}
+			// Approval metadata was added after the v1 archive format. Missing
+			// fields must be materialized before json_populate_recordset because
+			// approval_state/approval_reason are NOT NULL in the live schema.
+			if _, ok := row["approval_state"]; !ok || row["approval_state"] == nil || row["approval_state"] == "" {
+				row["approval_state"] = "approved"
+			}
+			if _, ok := row["approved_at"]; !ok {
+				row["approved_at"] = nil
+			}
+			if _, ok := row["approved_by"]; !ok || row["approved_by"] == nil {
+				row["approved_by"] = ""
+			}
+			if _, ok := row["approval_reason"]; !ok || row["approval_reason"] == nil {
+				row["approval_reason"] = ""
 			}
 		}
 		encoded, err := json.Marshal(rows)
@@ -544,7 +560,10 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 	for name, raw := range tables {
 		out[name] = raw
 	}
-	for _, table := range []string{"exploration_anchors", "task_asset_links"} {
+	for _, table := range []string{"exploration_anchors", "task_asset_links", "task_asset_blocks"} {
+		if len(tables[table]) == 0 || rawRowCount(tables[table]) == 0 {
+			continue
+		}
 		rows, err := decodeArchiveRows(tables[table])
 		if err != nil {
 			return nil, err

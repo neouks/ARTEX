@@ -410,7 +410,8 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wProv, wCfg := s.providerForAgent("worker", pinID, gProv, gCfg)
 	wk := agent.NewWorker(wProv, wCfg.Model, s.m.dir, tx, wCfg.CompactionWindow(), s.agentMaxTurns("worker"))
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
-	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
+	wk.SetTrafficRecording(s.m.TrafficEnabled())
 	wk.SetShellProfile(shellProfile)
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
@@ -419,9 +420,9 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
-	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
-	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
-	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
+	pl.SetKillWork(s.engine.KillWork)                       // planner kill_work → terminate a running work
+	pl.SetSteerWork(s.engine.SteerWork)                     // planner steer_work → inject mid-run course-correction
+	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	pl.SetShellProfile(shellProfile)
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
@@ -485,7 +486,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	mProv, mCfg := s.providerForAgent("mainagent", nil, prov, cfg)
 	s.cfgMu.Lock()
 	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
-	s.mainAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
+	s.mainAgent.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	s.mainAgent.SetShellProfile(shellProfile)
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
@@ -763,6 +764,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
 	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
 	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
+	mux.HandleFunc("GET /api/tasks/{id}/asset-approvals", s.listTaskAssetApprovals)
+	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/approve", func(w http.ResponseWriter, r *http.Request) { s.updateTaskAssetApprovals(w, r, true) })
+	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/revoke", func(w http.ResponseWriter, r *http.Request) { s.updateTaskAssetApprovals(w, r, false) })
 
 	// 工作空间文件管理器（针对 workDir）
 	mux.HandleFunc("GET /api/workspace/list", s.wsList)
@@ -3465,7 +3469,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(req.Message, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
+			_, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Guard, t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）"})

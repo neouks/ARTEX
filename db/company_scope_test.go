@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -251,8 +252,9 @@ func TestCompanyICPAttribution(t *testing.T) {
 	})
 
 	// A keyword can guide an Agent, but must never claim an asset by its name.
+	icpValue := fmt.Sprintf("京 ICP备 %d号", 998877+suffix)
 	added, _, invalid, errs := cs.AddScopeInputs(companyID, []ScopeInput{
-		{Kind: "icp", Value: "京 ICP备 998877号"},
+		{Kind: "icp", Value: icpValue},
 		{Kind: "keyword", Value: "ICP Scope"},
 	}, "unit test")
 	if added != 2 || invalid != 0 || len(errs) != 0 {
@@ -260,7 +262,7 @@ func TestCompanyICPAttribution(t *testing.T) {
 	}
 
 	rootID, err := as.UpsertRootDomain(UpsertRootDomainReq{
-		Domain: fmt.Sprintf("icp-scope-%d.example", suffix), ICP: "京icp备998877号", TaskID: suffix,
+		Domain: fmt.Sprintf("icp-scope-%d.example", suffix), ICP: icpValue, TaskID: suffix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +274,7 @@ func TestCompanyICPAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	icpAppID, err := as.UpsertApp(UpsertAppReq{
-		Name: fmt.Sprintf("ICP Matched App %d", suffix), ICP: " 京 ICP备 998877号 ", TaskID: suffix,
+		Name: fmt.Sprintf("ICP Matched App %d", suffix), ICP: " " + icpValue + " ", TaskID: suffix,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -321,8 +323,10 @@ func TestCompanyScopeAttribution(t *testing.T) {
 	uniq := startMax + 1
 	root := fmt.Sprintf("scopetest%d.com", uniq)
 	sub := "api." + root
-	ipIn := "198.51.100.9"
-	ipOut := "203.0.113.9"
+	ipNonce := uint64(time.Now().UnixNano())
+	ipIn := fmt.Sprintf("fd%02x:%x:%x::9", byte(ipNonce), uint16(ipNonce>>8), uint16(ipNonce>>24))
+	ipCIDR := ipIn[:strings.LastIndex(ipIn, "::")] + "::/64"
+	ipOut := fmt.Sprintf("fc%02x:%x:%x::9", byte(ipNonce), uint16(ipNonce>>16), uint16(ipNonce>>32))
 	outDomain := fmt.Sprintf("other%d.net", uniq)
 
 	cid, _, err := cs.UpsertCompany(fmt.Sprintf("ScopeCo %d", uniq), "")
@@ -341,7 +345,7 @@ func TestCompanyScopeAttribution(t *testing.T) {
 		t.Fatalf("pre-scope asset should be unattributed, got %v", *preCompanyID)
 	}
 
-	cs.AddScope(cid, []string{root, "198.51.100.0/24"}, "unit test")
+	cs.AddScope(cid, []string{root, ipCIDR}, "unit test")
 
 	mustCid := func(id int64, want int64, label string) {
 		var cID *int64

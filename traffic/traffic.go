@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
@@ -124,7 +125,9 @@ type Traffic struct {
 	// through (nil = dial targets directly). Both the intercepted and the
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
 	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
-	upstream atomic.Pointer[url.URL]
+	upstream  atomic.Pointer[url.URL]
+	assets    *db.AssetStore
+	recording atomic.Bool
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -149,6 +152,7 @@ func Open(dir, addr string) (*Traffic, error) {
 		return nil, err
 	}
 	t := &Traffic{dir: dir, addr: addr, db: db}
+	t.recording.Store(true)
 	if _, err := db.Exec(ftsSchema); err != nil {
 		log.Printf("[traffic] 全文索引不可用，正文搜索将被禁用（元数据搜索不受影响）：%v", err)
 	} else {
@@ -180,6 +184,11 @@ func Open(dir, addr string) (*Traffic, error) {
 		_, tunnel := t.pass.Load(hostOnly(req.Host))
 		return !tunnel
 	})
+	// Task-bound agents put a signed task tag in the proxy credentials. This
+	// callback runs before the proxy opens the target connection (including
+	// CONNECT), providing a network-layer backstop for stale/model-bypassed tool
+	// inputs. Untagged traffic (independent chat, enrichment, UI) is unchanged.
+	p.SetAuthProxy(t.authorizeTaskRequest)
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
 	return t, nil
@@ -196,6 +205,40 @@ func hostOnly(hostport string) string {
 
 // ProxyAddr returns the address workers should set as HTTP(S)_PROXY.
 func (t *Traffic) ProxyAddr() string { return "http://127.0.0.1" + t.addr }
+
+// SetAssetPolicyStore enables task authorization at the recording proxy edge.
+func (t *Traffic) SetAssetPolicyStore(store *db.AssetStore) { t.assets = store }
+
+// SetRecordingEnabled controls persistence without stopping the proxy. This
+// lets task agents keep the authorization backstop when traffic capture is off.
+func (t *Traffic) SetRecordingEnabled(enabled bool) { t.recording.Store(enabled) }
+
+func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request) (bool, error) {
+	taskID, tagged, err := guard.ParseTaskProxyAuthorization(req.Header.Get("Proxy-Authorization"))
+	if err != nil {
+		return false, err
+	}
+	if !tagged {
+		return true, nil
+	}
+	// Consume the internal tag; it must never reach the target or traffic log.
+	req.Header.Del("Proxy-Authorization")
+	if t.assets == nil {
+		return true, nil
+	}
+	host := ""
+	if req.URL != nil {
+		host = req.URL.Hostname()
+	}
+	if host == "" {
+		host = hostOnly(req.Host)
+	}
+	if err := t.assets.ValidateTaskHostsApproved(taskID, []string{host}); err != nil {
+		log.Printf("[traffic] task %d blocked egress to %s: %v", taskID, host, err)
+		return false, fmt.Errorf("任务资产执行被阻止: %w", err)
+	}
+	return true, nil
+}
 
 // SetUpstreamProxy points every captured request at a global egress proxy
 // (http/https/socks5, optional user:pass in the URL). An empty raw string clears
@@ -262,7 +305,7 @@ type sink struct {
 }
 
 func (s *sink) Response(f *mproxy.Flow) {
-	if f.Request == nil || f.Response == nil {
+	if !s.t.recording.Load() || f.Request == nil || f.Response == nil {
 		return
 	}
 	s.t.record(f)

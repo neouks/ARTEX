@@ -550,6 +550,10 @@ CREATE TABLE IF NOT EXISTS task_asset_links (
     tested         BOOLEAN NOT NULL DEFAULT false,
     tested_at      TIMESTAMPTZ,
     tested_by      TEXT,
+    approval_state TEXT NOT NULL DEFAULT 'approved',
+    approved_at    TIMESTAMPTZ,
+    approved_by    TEXT,
+    approval_reason TEXT NOT NULL DEFAULT '',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (task_id, asset_id)
@@ -560,10 +564,201 @@ ALTER TABLE task_asset_links ALTER COLUMN tested SET DEFAULT false;
 ALTER TABLE task_asset_links ALTER COLUMN tested SET NOT NULL;
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested_at TIMESTAMPTZ;
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested_by TEXT;
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approval_state TEXT;
+UPDATE task_asset_links SET approval_state='approved' WHERE approval_state IS NULL OR approval_state='';
+ALTER TABLE task_asset_links ALTER COLUMN approval_state SET DEFAULT 'approved';
+ALTER TABLE task_asset_links ALTER COLUMN approval_state SET NOT NULL;
+ALTER TABLE task_asset_links DROP CONSTRAINT IF EXISTS task_asset_links_approval_state_check;
+ALTER TABLE task_asset_links ADD CONSTRAINT task_asset_links_approval_state_check CHECK (approval_state IN ('approved','pending','revoked'));
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approved_by TEXT;
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approval_reason TEXT;
+UPDATE task_asset_links SET approval_reason='' WHERE approval_reason IS NULL;
+ALTER TABLE task_asset_links ALTER COLUMN approval_reason SET DEFAULT '';
+ALTER TABLE task_asset_links ALTER COLUMN approval_reason SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_task_asset_links_asset ON task_asset_links(asset_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_asset_links_tested ON task_asset_links(task_id, tested, asset_id);
 CREATE INDEX IF NOT EXISTS idx_task_asset_links_node ON task_asset_links(source_node_id)
     WHERE source_node_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_task_asset_links_approval ON task_asset_links(task_id, approval_state, asset_id);
+
+-- Task-local deletion tombstones. These intentionally have no asset foreign key:
+-- a globally shared asset may be deleted/recreated while the current task must
+-- continue to reject the same normalized identity until an operator reattaches it.
+CREATE TABLE IF NOT EXISTS task_asset_blocks (
+    task_id    BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    asset_key  TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    host_key   TEXT NOT NULL DEFAULT '',
+    asset_id   BIGINT,
+    reason     TEXT NOT NULL DEFAULT '',
+    blocked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    blocked_by TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (task_id, asset_key)
+);
+CREATE INDEX IF NOT EXISTS idx_task_asset_blocks_host ON task_asset_blocks(task_id, host_key);
+CREATE INDEX IF NOT EXISTS idx_task_asset_blocks_asset ON task_asset_blocks(asset_id);
+
+-- Database-level authorization predicate used by intent claiming. A local link
+-- overrides inherited sources; without one, any directly-related source task
+-- may supply an approved read-only authorization. Parent host decisions remain
+-- an upper bound for services/endpoints, and current-task tombstones always win.
+CREATE OR REPLACE FUNCTION task_asset_effectively_approved(p_task_id BIGINT, p_asset_id BIGINT)
+RETURNS BOOLEAN AS $$
+WITH target AS (
+    SELECT a.*,
+           lower(trim(trailing '.' FROM COALESCE(NULLIF(a.domain,''), NULLIF(a.ip,''), ''))) AS host
+    FROM assets a WHERE a.id=p_asset_id
+), auth_tasks AS (
+    SELECT p_task_id AS task_id
+    WHERE EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
+    UNION ALL
+    SELECT relation.source_task_id
+    FROM task_relations relation
+    WHERE relation.task_id=p_task_id
+      AND NOT EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
+), authorized AS (
+    SELECT auth.task_id
+    FROM auth_tasks auth
+    JOIN task_asset_links own ON own.task_id=auth.task_id AND own.asset_id=p_asset_id
+    JOIN target t ON true
+    WHERE own.approval_state='approved'
+      AND NOT EXISTS (
+        SELECT 1 FROM task_asset_blocks block
+        WHERE block.task_id=auth.task_id
+          AND (block.asset_id=p_asset_id
+               OR block.asset_key=CASE t.type
+                    WHEN 'root_domain' THEN 'root_domain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                    WHEN 'subdomain' THEN 'subdomain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                    WHEN 'ip' THEN 'ip:' || lower(trim(trailing '.' FROM COALESCE(t.ip,'')))
+                    WHEN 'service' THEN CASE WHEN COALESCE(t.url,'')<>'' THEN 'service:'||t.url
+                      ELSE 'service:'||t.host||':'||COALESCE(t.port,0)::text||':'||lower(trim(COALESCE(t.service_name,''))) END
+                    WHEN 'endpoint' THEN 'endpoint:'||COALESCE(t.url,'')||':'||upper(trim(COALESCE(t.method,'')))
+                    WHEN 'app' THEN 'app:'||lower(trim(COALESCE(NULLIF(t.bundle_id,''),t.app_name,'')))
+                    ELSE t.type||':'||t.id::text END
+               OR (block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>''
+                   AND (t.host=block.host_key OR (block.asset_type IN ('root_domain','subdomain') AND t.host LIKE '%.'||block.host_key))))
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM task_asset_links parent_link
+        JOIN assets parent ON parent.id=parent_link.asset_id
+        WHERE own.asset_id<>parent.id
+          AND t.type IN ('service','endpoint')
+          AND parent_link.task_id=auth.task_id
+          AND parent.type IN ('root_domain','subdomain','ip')
+          AND lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))<>''
+          AND (t.host=lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))
+               OR (parent.type<>'ip' AND t.host LIKE '%.'||lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))))
+          AND parent_link.approval_state<>'approved'
+      )
+)
+SELECT EXISTS(SELECT 1 FROM authorized)
+   AND NOT EXISTS (
+     SELECT 1 FROM task_asset_blocks block JOIN target t ON true
+     WHERE block.task_id=p_task_id
+       AND (block.asset_id=p_asset_id
+            OR block.asset_key=CASE t.type
+                 WHEN 'root_domain' THEN 'root_domain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                 WHEN 'subdomain' THEN 'subdomain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                 WHEN 'ip' THEN 'ip:' || lower(trim(trailing '.' FROM COALESCE(t.ip,'')))
+                 WHEN 'service' THEN CASE WHEN COALESCE(t.url,'')<>'' THEN 'service:'||t.url
+                   ELSE 'service:'||t.host||':'||COALESCE(t.port,0)::text||':'||lower(trim(COALESCE(t.service_name,''))) END
+                 WHEN 'endpoint' THEN 'endpoint:'||COALESCE(t.url,'')||':'||upper(trim(COALESCE(t.method,'')))
+                 WHEN 'app' THEN 'app:'||lower(trim(COALESCE(NULLIF(t.bundle_id,''),t.app_name,'')))
+                 ELSE t.type||':'||t.id::text END
+            OR (block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>''
+                AND (t.host=block.host_key OR (block.asset_type IN ('root_domain','subdomain') AND t.host LIKE '%.'||block.host_key))))
+   );
+$$ LANGUAGE SQL STABLE;
+
+-- Return the state users actually see after applying parent-host decisions and
+-- task-local tombstones. The boolean predicate above remains the hot execution
+-- guard; this richer form keeps pending/revoked list filters aligned with the
+-- hydrated DTO instead of filtering only by the child's stored link state.
+CREATE OR REPLACE FUNCTION task_asset_blocked(p_task_id BIGINT, p_asset_id BIGINT)
+RETURNS BOOLEAN AS $$
+WITH target AS (
+    SELECT a.*,
+           lower(trim(trailing '.' FROM COALESCE(NULLIF(a.domain,''), NULLIF(a.ip,''), ''))) AS host
+    FROM assets a WHERE a.id=p_asset_id
+)
+SELECT EXISTS (
+    SELECT 1 FROM task_asset_blocks block JOIN target t ON true
+    WHERE block.task_id=p_task_id
+      AND (block.asset_id=p_asset_id
+           OR block.asset_key=CASE t.type
+                WHEN 'root_domain' THEN 'root_domain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                WHEN 'subdomain' THEN 'subdomain:' || lower(trim(trailing '.' FROM COALESCE(t.domain,'')))
+                WHEN 'ip' THEN 'ip:' || lower(trim(trailing '.' FROM COALESCE(t.ip,'')))
+                WHEN 'service' THEN CASE WHEN COALESCE(t.url,'')<>'' THEN 'service:'||t.url
+                  ELSE 'service:'||t.host||':'||COALESCE(t.port,0)::text||':'||lower(trim(COALESCE(t.service_name,''))) END
+                WHEN 'endpoint' THEN 'endpoint:'||COALESCE(t.url,'')||':'||upper(trim(COALESCE(t.method,'')))
+                WHEN 'app' THEN 'app:'||lower(trim(COALESCE(NULLIF(t.bundle_id,''),t.app_name,'')))
+                ELSE t.type||':'||t.id::text END
+           OR (block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>''
+               AND (t.host=block.host_key OR (block.asset_type IN ('root_domain','subdomain') AND t.host LIKE '%.'||block.host_key))))
+);
+$$ LANGUAGE SQL STABLE;
+
+CREATE OR REPLACE FUNCTION task_asset_effective_approval_state(p_task_id BIGINT, p_asset_id BIGINT)
+RETURNS TEXT AS $$
+WITH target AS (
+    SELECT a.*,
+           lower(trim(trailing '.' FROM COALESCE(NULLIF(a.domain,''), NULLIF(a.ip,''), ''))) AS host
+    FROM assets a WHERE a.id=p_asset_id
+), auth_tasks AS (
+    SELECT p_task_id AS task_id
+    WHERE EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
+    UNION ALL
+    SELECT relation.source_task_id
+    FROM task_relations relation
+    WHERE relation.task_id=p_task_id
+      AND NOT EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
+), candidate_states AS (
+    SELECT CASE
+      WHEN task_asset_blocked(auth.task_id,p_asset_id) THEN 'revoked'
+      WHEN own.approval_state='revoked' THEN 'revoked'
+      WHEN EXISTS (
+        SELECT 1 FROM task_asset_links parent_link
+        JOIN assets parent ON parent.id=parent_link.asset_id
+        JOIN target t ON true
+        WHERE parent_link.task_id=auth.task_id AND parent.id<>p_asset_id
+          AND t.type IN ('service','endpoint')
+          AND parent.type IN ('root_domain','subdomain','ip')
+          AND lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))<>''
+          AND (t.host=lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))
+               OR (parent.type<>'ip' AND t.host LIKE '%.'||lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))))
+          AND parent_link.approval_state='revoked'
+      ) THEN 'revoked'
+      WHEN own.approval_state='pending' THEN 'pending'
+      WHEN EXISTS (
+        SELECT 1 FROM task_asset_links parent_link
+        JOIN assets parent ON parent.id=parent_link.asset_id
+        JOIN target t ON true
+        WHERE parent_link.task_id=auth.task_id AND parent.id<>p_asset_id
+          AND t.type IN ('service','endpoint')
+          AND parent.type IN ('root_domain','subdomain','ip')
+          AND lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))<>''
+          AND (t.host=lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))
+               OR (parent.type<>'ip' AND t.host LIKE '%.'||lower(trim(trailing '.' FROM COALESCE(NULLIF(parent.domain,''),NULLIF(parent.ip,''),'')))))
+          AND parent_link.approval_state='pending'
+      ) THEN 'pending'
+      ELSE 'approved'
+    END AS state
+    FROM auth_tasks auth
+    JOIN task_asset_links own ON own.task_id=auth.task_id AND own.asset_id=p_asset_id
+)
+SELECT CASE
+  WHEN task_asset_blocked(p_task_id,p_asset_id) THEN 'blocked'
+  ELSE COALESCE((
+    SELECT state FROM candidate_states
+    ORDER BY CASE state WHEN 'approved' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END
+    LIMIT 1
+  ), 'revoked')
+END;
+$$ LANGUAGE SQL STABLE;
+
 DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_asset_links;
 CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -571,9 +766,18 @@ CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
 -- Keep provenance rows synchronized when existing asset upsert paths append or
 -- remove task ids. Detailed callers overwrite the generic source after upsert.
 CREATE OR REPLACE FUNCTION sync_task_asset_links() RETURNS trigger AS $$
+DECLARE
+    agent_discovery boolean := COALESCE(current_setting('artex.agent_discovery', true), '') = 'on';
 BEGIN
-    INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
-    SELECT task.id, NEW.id, 'system', '任务执行期间自动关联'
+    INSERT INTO task_asset_links(
+        task_id, asset_id, source, source_summary, approval_state, approval_reason
+    )
+    SELECT task.id,
+           NEW.id,
+           CASE WHEN agent_discovery THEN 'agent' ELSE 'system' END,
+           CASE WHEN agent_discovery THEN 'Agent 通过 insert_assets 登记' ELSE '任务执行期间自动关联' END,
+           CASE WHEN agent_discovery THEN 'pending' ELSE 'approved' END,
+           CASE WHEN agent_discovery THEN 'Agent 发现，等待用户审批' ELSE '' END
     FROM unnest(NEW.task_ids) AS requested(task_id)
     JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
     ON CONFLICT (task_id, asset_id) DO NOTHING;
@@ -596,6 +800,11 @@ FROM assets asset
 CROSS JOIN LATERAL unnest(asset.task_ids) AS requested(task_id)
 JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
 ON CONFLICT (task_id, asset_id) DO NOTHING;
+
+-- New approval fields are conservative for legacy associations: existing links
+-- were explicitly usable before approval was introduced.
+UPDATE task_asset_links SET approval_state='approved'
+WHERE approval_state IS NULL OR approval_state='';
 
 -- Backfill the task-local tested flag for existing installations. Facts and
 -- findings already anchored to an asset are durable evidence that an agent

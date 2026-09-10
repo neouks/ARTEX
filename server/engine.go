@@ -13,6 +13,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -573,6 +574,26 @@ func (e *Engine) KillWork(intentID int64) error {
 	return nil
 }
 
+// CancelWorkersForAssets stops only workers anchored to revoked/deleted assets
+// in the current task. Shared assets in other tasks are intentionally ignored.
+func (e *Engine) CancelWorkersForAssets(taskID int64, assetIDs []int64) {
+	if e.m == nil || e.m.assets == nil || taskID <= 0 || len(assetIDs) == 0 {
+		return
+	}
+	ids, err := e.m.assets.RunningIntentIDsForAssets(taskID, assetIDs)
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		e.workMu.Lock()
+		run := e.work[id]
+		e.workMu.Unlock()
+		if run != nil {
+			run.cancel(agent.AssetAuthorizationChangedCause(assetIDs))
+		}
+	}
+}
+
 // Broadcaster exposes the engine's live activity pub/sub (used by the SSE handler).
 func (e *Engine) Broadcaster() *Broadcaster { return e.bc }
 
@@ -854,7 +875,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		observedRevision, observedRevisionErr := t.Store.BlackboardRevision()
 		e.BeginLLMCall(t.ID)
 		planCtx := agent.WithRunInfo(ectx, agent.RunInfo{Trigger: src})
-		met, reason, err := planner.Plan(planCtx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		met, reason, err := planner.Plan(planCtx, taskIDInt, e.m.assets, t.Guard, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
 		if err == nil && observedRevisionErr == nil {
 			e.plannerRevision.Store(t.ID, observedRevision)
@@ -983,8 +1004,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		emit(a)
 	}
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, fmt.Sprintf("%s · #%d", name, iid), taskEmit)
-	hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	baseHooks := guard.AssetPolicyHooksWithGuard(t.Guard, e.m.assets, wTaskID)
+	hooks := steerHooks{inner: baseHooks, drain: func() (string, bool) { return e.drainSteer(iid) }}
 	e.BeginLLMCall(t.ID)
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
@@ -1093,12 +1115,27 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		e.touch(t.ID)
 		return true
 	}
-	// killed by the planner: mark stopped (don't write back results, don't auto-reclaim).
+	// A per-work cancellation (planner kill or an authorization change) stops the
+	// intent without writing back or auto-reclaiming it. Asset authorization
+	// changes are also persisted as an explicit system activity so the UI/audit
+	// trail explains why the otherwise healthy Worker disappeared immediately.
 	if killed {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d planner 停止落库失败: %v", name, t.ID, intent.ID, err)
+			log.Printf("[worker %s] task %s 意图 #%d 停止落库失败: %v", name, t.ID, intent.ID, err)
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped)", name, t.ID, intent.ID)
+		code, short, detail, hasCause := agent.AbortReason(workCtx)
+		if hasCause && code == "asset_authorization_changed" {
+			taskEmit(db.Activity{
+				Kind:    "text",
+				IsError: true,
+				Summary: short,
+				Detail:  detail,
+			})
+		}
+		if !hasCause {
+			short = "未能取得取消原因"
+		}
+		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped): %s", name, t.ID, intent.ID, short)
 		e.touch(t.ID)
 		t.Notify()
 		return true

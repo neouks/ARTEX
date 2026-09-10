@@ -37,6 +37,7 @@ target AS (
        ))
   )
   JOIN context_tasks ctx ON ctx.task_id=ts.task_id
+	WHERE task_asset_effectively_approved($1,a.id)
 	UNION
 	SELECT a.id, a.type,
 	       COALESCE(a.url, a.domain, a.ip, a.app_name, a.root_domain, '') AS label
@@ -44,17 +45,19 @@ target AS (
 	JOIN exploration_anchors ea ON ea.asset_id=a.id
 	JOIN exploration_nodes en ON en.id=ea.node_id
 	JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
+	WHERE task_asset_effectively_approved($1,a.id)
 ),
 tested AS (
   SELECT DISTINCT link.asset_id
   FROM task_asset_links link
   JOIN context_tasks ctx ON ctx.task_id=link.task_id
-  WHERE link.tested
+  WHERE link.tested AND task_asset_effectively_approved($1,link.asset_id)
   UNION
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id=ea.node_id AND en.kind IN ('fact','finding')
   JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
+  WHERE task_asset_effectively_approved($1,ea.asset_id)
 )`
 
 // ListTaskScopeWithSources returns the current task's scope followed by the
@@ -66,6 +69,19 @@ SELECT ts.id, ts.task_id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''
 FROM task_scope ts
 JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 LEFT JOIN companies c ON c.id=ts.company_id
+WHERE ts.source NOT IN ('auto','agent') OR EXISTS (
+  SELECT 1 FROM assets a
+  WHERE task_asset_effectively_approved($1,a.id) AND (
+       (ts.kind='company'     AND a.company_id=ts.company_id)
+    OR (ts.kind='root_domain' AND (a.root_domain=ts.domain OR a.domain=ts.domain))
+    OR (ts.kind='subdomain'   AND a.domain=ts.domain)
+    OR (ts.kind IN ('ip','cidr') AND ts.net >>= try_inet(a.ip))
+    OR (ts.kind='icp' AND (
+         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g'))=ts.value
+         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g'))=ts.value
+       ))
+  )
+)
 ORDER BY CASE WHEN ts.task_id=$1 THEN 0 ELSE 1 END, ts.id`, taskID)
 	if err != nil {
 		return nil, err
@@ -170,14 +186,16 @@ ORDER BY target.id LIMIT $`+limitPosition+` OFFSET $`+offsetPosition, pageArgs..
 func (s *AssetStore) HostsByTaskWithSources(taskID int64) ([]string, error) {
 	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`,
 context_assets AS (
-  SELECT DISTINCT a.id
-  FROM assets a
-  WHERE EXISTS (SELECT 1 FROM context_tasks ctx WHERE ctx.task_id=ANY(a.task_ids))
+	  SELECT DISTINCT a.id
+	  FROM assets a
+	  WHERE EXISTS (SELECT 1 FROM context_tasks ctx WHERE ctx.task_id=ANY(a.task_ids))
+	    AND task_asset_effectively_approved($1,a.id)
   UNION
   SELECT ea.asset_id
-  FROM exploration_anchors ea
-  JOIN exploration_nodes en ON en.id=ea.node_id
-  JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
+	  FROM exploration_anchors ea
+	  JOIN exploration_nodes en ON en.id=ea.node_id
+	  JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
+	  WHERE task_asset_effectively_approved($1,ea.asset_id)
   UNION
   SELECT DISTINCT a.id
   FROM assets a
@@ -190,9 +208,10 @@ context_assets AS (
          lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
        ))
-  )
-  JOIN context_tasks ctx ON ctx.task_id=ts.task_id
-)
+	  )
+	  JOIN context_tasks ctx ON ctx.task_id=ts.task_id
+	  WHERE task_asset_effectively_approved($1,a.id)
+	)
 SELECT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,'')
 FROM assets a JOIN context_assets ctx ON ctx.id=a.id`, taskID)
 	if err != nil {

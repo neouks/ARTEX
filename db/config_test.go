@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // TestPoolProfilesOrder pins the failover chain query: keyless profiles can't
@@ -30,10 +32,13 @@ func TestPoolProfilesOrder(t *testing.T) {
 		t.Cleanup(func() { d.Exec(`DELETE FROM llm_profiles WHERE id=$1`, id) })
 		return id
 	}
-	lo := mk("t-pool-lo", 1, false, "k1")
-	hi := mk("t-pool-hi", 9, false, "k2")
-	mk("t-pool-excluded", 99, true, "k3") // excluded despite the top priority
-	mk("t-pool-nokey", 50, false, "")     // no key → cannot serve anything
+	prefix := fmt.Sprintf("t-pool-%d", time.Now().UnixNano())
+	loName, hiName := prefix+"-lo", prefix+"-hi"
+	excludedName, noKeyName := prefix+"-excluded", prefix+"-nokey"
+	lo := mk(loName, 1, false, "k1")
+	hi := mk(hiName, 9, false, "k2")
+	mk(excludedName, 99, true, "k3") // excluded despite the top priority
+	mk(noKeyName, 50, false, "")     // no key → cannot serve anything
 
 	chain, err := d.PoolProfiles()
 	if err != nil {
@@ -42,11 +47,11 @@ func TestPoolProfilesOrder(t *testing.T) {
 	var got []int64
 	for _, p := range chain {
 		switch p.Name {
-		case "t-pool-lo", "t-pool-hi":
+		case loName, hiName:
 			got = append(got, p.ID)
-		case "t-pool-excluded":
+		case excludedName:
 			t.Fatal("pool_exclude profile entered the failover chain")
-		case "t-pool-nokey":
+		case noKeyName:
 			t.Fatal("keyless profile entered the failover chain")
 		}
 	}

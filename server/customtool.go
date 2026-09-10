@@ -19,7 +19,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -343,6 +345,9 @@ func (s *Server) runCommandTool(ctx context.Context, execRaw json.RawMessage, pa
 	}
 	profile := shellProfileForToolContext(tc)
 	cmd, paramEnv := renderCommandTemplate(spec.Command, params, profile)
+	if reason := s.customToolAssetPolicy(ctx, "custom_command", map[string]any{"command": cmd, "params": params}); reason != "" {
+		return actool.Errorf(reason), nil
+	}
 	if profile.Mode == "cmd" {
 		// cmd expands %VAR% before it understands quoting. Inject template values
 		// during delayed expansion instead, after metacharacters have been parsed.
@@ -375,6 +380,9 @@ func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.Raw
 	_ = json.Unmarshal(execRaw, &spec)
 	if strings.TrimSpace(spec.Code) == "" {
 		return actool.Errorf("script code 为空"), nil
+	}
+	if reason := s.customToolAssetPolicy(ctx, key, map[string]any{"code": spec.Code, "params": params}); reason != "" {
+		return actool.Errorf(reason), nil
 	}
 	interp := s.pythonInterpreter()
 	if interp == "" {
@@ -450,6 +458,9 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	if strings.TrimSpace(rawURL) == "" {
 		return actool.Errorf("http url 为空"), nil
 	}
+	if reason := s.customToolAssetPolicy(ctx, "custom_http", map[string]any{"url": rawURL, "params": params}); reason != "" {
+		return actool.Errorf(reason), nil
+	}
 	var bodyReader io.Reader
 	if spec.Body != "" {
 		bodyReader = strings.NewReader(renderTemplate(spec.Body, params, identity))
@@ -463,8 +474,16 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	for k, v := range spec.Headers {
 		req.Header.Set(k, renderTemplate(v, params, identity))
 	}
-	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000)}
-	if tr := s.httpProxyTransport(spec); tr != nil {
+	client := &http.Client{
+		Timeout: timeoutOr(spec.TimeoutMs, 30000),
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if reason := s.customToolAssetPolicy(ctx, "custom_http", map[string]any{"url": req.URL.String()}); reason != "" {
+				return fmt.Errorf("%s", reason)
+			}
+			return nil
+		},
+	}
+	if tr := s.httpProxyTransport(ctx, spec); tr != nil {
 		client.Transport = tr
 	}
 	resp, err := client.Do(req)
@@ -478,14 +497,44 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	return actool.Text(clipOutput(string(b), nil)), nil
 }
 
+// customToolAssetPolicy evaluates the fully rendered execution spec. The outer
+// Agent hook only sees model-supplied parameters, so a fixed host embedded in a
+// custom command/script/HTTP template must be checked again here before any
+// process starts or request is sent.
+func (s *Server) customToolAssetPolicy(ctx context.Context, toolName string, value any) string {
+	runInfo := agent.RunInfoFrom(ctx)
+	if runInfo.TaskID <= 0 || s == nil || s.m == nil || s.m.assets == nil {
+		return ""
+	}
+	input, err := json.Marshal(value)
+	if err != nil {
+		return "任务资产执行被阻止：无法解析自定义工具目标"
+	}
+	var taskGuard *guard.Guard
+	if task, ok := s.m.Task(fmt.Sprint(runInfo.TaskID)); ok {
+		taskGuard = task.Guard
+	}
+	hooks := guard.AssetPolicyHooksWithGuard(taskGuard, s.m.assets, runInfo.TaskID)
+	blocked, reason, _ := hooks.PreToolUse(ctx, toolName, input)
+	if blocked {
+		return reason
+	}
+	return ""
+}
+
 // httpProxyTransport builds a Transport for the http tool's proxy config, or nil
 // (direct). use_recording_proxy routes through the recording proxy + trusts its CA.
-func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
+func (s *Server) httpProxyTransport(ctx context.Context, spec httpExec) *http.Transport {
 	proxyStr := strings.TrimSpace(spec.Proxy)
 	var caFile string
 	if spec.UseRecordingProxy {
-		if addr := s.m.ProxyAddr(); addr != "" {
-			proxyStr = "http://" + addr
+		runInfo := agent.RunInfoFrom(ctx)
+		if runInfo.TaskID > 0 {
+			proxyStr = s.m.TaskProxyAddr()
+			caFile = s.m.TaskProxyCACert()
+			proxyStr = agent.TaskProxyAddr(proxyStr, caFile, runInfo.TaskID)
+		} else if addr := s.m.ProxyAddr(); addr != "" {
+			proxyStr = addr
 			caFile = s.m.ProxyCACert()
 		}
 	}

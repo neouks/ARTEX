@@ -48,6 +48,49 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 	return out
 }
 
+func visibleNodeIDs(groups ...[]*db.Node) map[int64]struct{} {
+	visible := make(map[int64]struct{})
+	for _, nodes := range groups {
+		for _, node := range nodes {
+			if node != nil {
+				visible[node.ID] = struct{}{}
+			}
+		}
+	}
+	return visible
+}
+
+// restrictNodeRelations removes every edge endpoint that was filtered out by
+// task-asset authorization. Without this, graph_overview could hide a pending
+// node's payload while still exposing its numeric id through parents/yields.
+func restrictNodeRelations(relations map[int64][]int64, visible map[int64]struct{}) map[int64][]int64 {
+	filtered := make(map[int64][]int64, len(relations))
+	for from, targets := range relations {
+		if _, ok := visible[from]; !ok {
+			continue
+		}
+		for _, target := range targets {
+			if _, ok := visible[target]; ok {
+				filtered[from] = append(filtered[from], target)
+			}
+		}
+	}
+	return filtered
+}
+
+func restrictNodeOrigins(origins map[int64]int64, visible map[int64]struct{}) map[int64]int64 {
+	filtered := make(map[int64]int64, len(origins))
+	for nodeID, originID := range origins {
+		if _, ok := visible[nodeID]; !ok {
+			continue
+		}
+		if _, ok := visible[originID]; ok {
+			filtered[nodeID] = originID
+		}
+	}
+	return filtered
+}
+
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
@@ -362,6 +405,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
 	// goals summary folded in so the planner needn't call list_goals each round.
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
+	goals = t.filterAuthorizedNodesForStore(goals, t.ts, t.taskID)
 	gsum := make([]map[string]any, 0, len(goals))
 	for _, g := range goals {
 		var p map[string]any
@@ -372,6 +416,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// hints: 人类/主 agent 通过 add_hint 挂上图的战略提示；folded in so the
 	// planner reads them every round when generating intents (否则只写不读).
 	hints, _ := t.ts.ListByKind(db.KindHint, 50)
+	hints = t.filterAuthorizedNodesForStore(hints, t.ts, t.taskID)
 	hsum := make([]map[string]any, 0, len(hints))
 	for _, h := range hints {
 		var p map[string]any
@@ -397,26 +442,31 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	fr, _ := t.ts.Frontier(100)
-	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
+	fr = t.filterAuthorizedIntents(fr)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
+	all = t.filterAuthorizedIntents(all)
 	var running, recentDone []*db.Node
+	doneTotal := 0
 	for _, n := range all {
 		switch n.State {
 		case "running":
 			running = append(running, n)
 		case "done", "blocked", "exhausted":
+			doneTotal++
 			if len(recentDone) < 15 {
 				recentDone = append(recentDone, n)
 			}
 		}
 	}
-	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
-	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
 	// 平行命名——后者只是它的最新窗口（≤15）截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
-	if dt, err := t.ts.CountFinishedIntents(); err == nil {
-		out["done_intents_total"] = dt
+	if t.as == nil || t.taskID <= 0 {
+		if total, err := t.ts.CountFinishedIntents(); err == nil {
+			out["done_intents_total"] = total
+		}
+	} else {
+		out["done_intents_total"] = doneTotal
 	}
 	out["frontier_open"] = len(fr)
 	// findings (confirmed vulns) and facts (worker exploration results) are
@@ -425,8 +475,17 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// via node_detail(id).
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings"] = len(vulnNodes)                   // 确认漏洞数（目标判定看它）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	vulnNodes = t.filterAuthorizedNodesForStore(vulnNodes, t.ts, t.taskID)
+	factNodes = t.filterAuthorizedNodesForStore(factNodes, t.ts, t.taskID)
+	visible := visibleNodeIDs(goals, hints, fr, all, vulnNodes, factNodes)
+	parentsOf = restrictNodeRelations(parentsOf, visible)
+	yieldsOf = restrictNodeRelations(yieldsOf, visible)
+	factFrom = restrictNodeOrigins(factFrom, visible)
+	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
+	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
+	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	out["findings"] = len(vulnNodes) // 确认漏洞数（目标判定看它）
+	out["facts"] = len(factNodes)    // 探索事实/结论数（含否定结论）
 	recentFacts := make([]map[string]any, 0, 20)
 	for _, n := range factNodes {
 		if len(recentFacts) >= 20 {
@@ -548,6 +607,80 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	return out
+}
+
+func (t *ToolSet) filterAuthorizedIntents(nodes []*db.Node) []*db.Node {
+	return t.filterAuthorizedNodesForStore(nodes, t.ts, t.taskID)
+}
+
+func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.ExplorationStore, ownerTaskID int64) []*db.Node {
+	if t.as == nil || t.taskID <= 0 || store == nil {
+		return nodes
+	}
+	out := make([]*db.Node, 0, len(nodes))
+	for _, n := range nodes {
+		ids, err := store.LineageAnchorAssetIDs(n.ID)
+		if err != nil {
+			continue
+		}
+		if len(ids) == 0 {
+			ids = intentAssetIDs(n)
+		}
+		if len(ids) == 0 {
+			out = append(out, n)
+			continue
+		}
+		if err := t.as.ValidateTaskAssetsApproved(ownerTaskID, ids); err != nil {
+			continue
+		}
+		// Inherited nodes must also remain usable in the current task context;
+		// a current-task deletion tombstone is an explicit local opt-out.
+		if ownerTaskID != t.taskID {
+			if err := t.as.ValidateTaskAssetsApproved(t.taskID, ids); err != nil {
+				continue
+			}
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func (t *ToolSet) nodeAuthorized(n *db.Node) bool {
+	if n == nil || t.as == nil || t.taskID <= 0 {
+		return n != nil
+	}
+	if !n.Inherited {
+		return len(t.filterAuthorizedNodesForStore([]*db.Node{n}, t.ts, t.taskID)) == 1
+	}
+	sources, err := t.ts.DirectSourceStores()
+	if err != nil {
+		return false
+	}
+	for _, source := range sources {
+		if source.Task.TaskID == n.SourceTaskID {
+			return len(t.filterAuthorizedNodesForStore([]*db.Node{n}, source.Store, source.Task.TaskID)) == 1
+		}
+	}
+	return false
+}
+
+func (t *ToolSet) nodeLineageAssetIDs(n *db.Node) ([]int64, error) {
+	if n == nil || t.ts == nil {
+		return nil, nil
+	}
+	if !n.Inherited {
+		return t.ts.LineageAnchorAssetIDs(n.ID)
+	}
+	sources, err := t.ts.DirectSourceStores()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range sources {
+		if source.Task.TaskID == n.SourceTaskID {
+			return source.Store.LineageAnchorAssetIDs(n.ID)
+		}
+	}
+	return nil, nil
 }
 
 func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
@@ -695,6 +828,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 
 		goals, _ := ts.ListByKind(db.KindGoal, relatedOverviewMaxGoalsPerSource)
+		goals = t.filterAuthorizedNodesForStore(goals, ts, source.Task.TaskID)
 		goalSummary := make([]map[string]any, 0, len(goals))
 		for _, goal := range goals {
 			var payload map[string]any
@@ -706,6 +840,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		item["goals"] = goalSummary
 
 		hints, _ := ts.ListByKind(db.KindHint, relatedOverviewMaxHintsPerSource)
+		hints = t.filterAuthorizedNodesForStore(hints, ts, source.Task.TaskID)
 		hintSummary := make([]map[string]any, 0, len(hints))
 		for _, hint := range hints {
 			var payload map[string]any
@@ -719,13 +854,18 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		facts, _ := ts.ListByKind(db.KindFact, relatedOverviewMaxFactsPerSource)
 		findings, _ := ts.ListByKind(db.KindFinding, relatedOverviewMaxFindingsPerTask)
 		intentNodes, _ := ts.ListByKind(db.KindIntent, 300)
+		facts = t.filterAuthorizedNodesForStore(facts, ts, source.Task.TaskID)
+		findings = t.filterAuthorizedNodesForStore(findings, ts, source.Task.TaskID)
+		intentNodes = t.filterAuthorizedNodesForStore(intentNodes, ts, source.Task.TaskID)
+		visible := visibleNodeIDs(goals, hints, facts, findings, intentNodes)
+		factFrom = restrictNodeOrigins(factFrom, visible)
 		terminalIntent := make(map[int64]bool, len(intentNodes))
 		for _, intent := range intentNodes {
 			terminalIntent[intent.ID] = inheritedIntentSummaryState(intent.State)
 		}
 		item["facts"] = len(facts)
 		item["findings"] = len(findings)
-		if statsErr == nil {
+		if statsErr == nil && t.as == nil {
 			item["facts"] = stats[db.KindFact]
 			item["findings"] = stats[db.KindFinding]
 			if stats[db.KindGoal] > len(goals) || stats[db.KindHint] > len(hints) ||
@@ -758,10 +898,16 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		item["recent_facts"] = recentFacts
 
 		recentDone := recentTerminalIntents(ts, relatedOverviewMaxIntentsPerTask)
+		recentDone = t.filterAuthorizedNodesForStore(recentDone, ts, source.Task.TaskID)
 		for _, intent := range recentDone {
 			intent.Inherited = true
 			intent.SourceTaskID = source.Task.TaskID
 		}
+		for id := range visibleNodeIDs(recentDone) {
+			visible[id] = struct{}{}
+		}
+		parentsOf = restrictNodeRelations(parentsOf, visible)
+		yieldsOf = restrictNodeRelations(yieldsOf, visible)
 		intentResults := compactIntents(recentDone, parentsOf, yieldsOf)
 		for i, intent := range recentDone {
 			intentResults[i]["summary"] = budget.take(intentResults[i]["summary"], 400)
@@ -786,7 +932,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			}
 		}
 		item["recent_intent_results"] = intentResults
-		if statsErr == nil {
+		if statsErr == nil && t.as == nil {
 			item["node_stats"] = stats
 		}
 
@@ -882,6 +1028,9 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 			}
 			out := make([]map[string]any, 0, len(f))
 			for _, n := range f {
+				if !t.nodeAuthorized(n) {
+					continue
+				}
 				m := compactFinding(n)
 				if n.Inherited {
 					m["task_id"] = n.SourceTaskID
@@ -929,11 +1078,21 @@ func (t *ToolSet) listFacts() actool.CoreTool {
 			}
 			out := make([]map[string]any, 0, len(f))
 			for _, n := range f {
-				out = append(out, compactFact(n))
+				if t.nodeAuthorized(n) {
+					out = append(out, compactFact(n))
+				}
 			}
-			res := map[string]any{"facts": out, "total": total, "has_more": hasMore}
-			if hasMore && len(f) > 0 {
-				res["next_before"] = f[len(f)-1].ID // 传回它取下一页(更旧的)
+			visibleTotal := total
+			if t.as != nil && visibleTotal > len(out) {
+				// Do not disclose a hidden pending/revoked population through the
+				// count. Pagination remains conservative and may under-count older
+				// authorized rows, but never exposes unauthorized metadata.
+				visibleTotal = len(out)
+			}
+			visibleHasMore := hasMore && len(out) > 0
+			res := map[string]any{"facts": out, "total": visibleTotal, "has_more": visibleHasMore}
+			if visibleHasMore {
+				res["next_before"] = out[len(out)-1]["id"] // 传回它取下一页(更旧的)
 			}
 			return jsonResult(res)
 		})
@@ -974,6 +1133,9 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if n == nil {
 				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
 			}
+			if !t.nodeAuthorized(n) {
+				return actool.Errorf("该节点关联的任务资产未获授权或已被封禁"), nil
+			}
 			return jsonResult(n) // full payload incl. detail / evidence
 		})
 }
@@ -1006,6 +1168,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
 	parents := pidList(it.ParentIDs)
+	parentNodes := make([]*db.Node, 0, len(parents))
 	for _, pidv := range parents {
 		n, err := t.ts.GetNodeWithSources(pidv)
 		if err != nil || n == nil {
@@ -1014,12 +1177,40 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 		if n.Kind != db.KindFact && n.Kind != db.KindFinding {
 			return 0, false, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
+		if !t.nodeAuthorized(n) {
+			return 0, false, fmt.Errorf("parent_id %d 关联的任务资产未获授权或已被封禁", pidv)
+		}
+		parentNodes = append(parentNodes, n)
 	}
 	priority := it.Priority
 	if priority == 0 {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
+	seenAnchors := make(map[int64]bool, len(anchors))
+	for _, assetID := range anchors {
+		seenAnchors[assetID] = true
+	}
+	// A derived intent inherits its evidence's asset authorization even when the
+	// model omits asset_ids. Besides closing a visibility gap, this guarantees a
+	// later revoke/delete selects and immediately cancels the derived Worker.
+	for _, parentNode := range parentNodes {
+		lineageIDs, lineageErr := t.nodeLineageAssetIDs(parentNode)
+		if lineageErr != nil {
+			return 0, false, fmt.Errorf("读取父节点资产失败：%w", lineageErr)
+		}
+		for _, assetID := range lineageIDs {
+			if !seenAnchors[assetID] {
+				seenAnchors[assetID] = true
+				anchors = append(anchors, assetID)
+			}
+		}
+	}
+	if t.as != nil && t.taskID > 0 {
+		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+			return 0, false, fmt.Errorf("意图资产未获授权：%w", err)
+		}
+	}
 	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
@@ -1123,6 +1314,7 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
 			g, _ := t.ts.ListByKind(db.KindGoal, 100)
+			g = t.filterAuthorizedNodesForStore(g, t.ts, t.taskID)
 			return jsonResult(g)
 		})
 }
@@ -1152,6 +1344,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			evidenceNode, err := t.ts.GetNodeWithSources(ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
+			}
+			if !t.nodeAuthorized(evidenceNode) {
+				return actool.Errorf("evidence_id 关联的任务资产未获授权或已被封禁"), nil
 			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
@@ -1215,6 +1410,14 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 					anchors = append(anchors, p)
 				}
 			}
+			if len(anchors) == 0 {
+				anchors = t.ownerAssetIDs()
+			}
+			if t.as != nil && t.taskID > 0 {
+				if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+					return actool.Errorf("漏洞资产未获授权：" + err.Error()), nil
+				}
+			}
 			var id int64
 			if t.ts != nil {
 				intent := pid(a.IntentID)
@@ -1222,6 +1425,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 					node, err := t.ts.GetNode(intent)
 					if err != nil || node == nil || node.Kind != db.KindIntent {
 						return actool.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）"), nil
+					}
+					if !t.nodeAuthorized(node) {
+						return actool.Errorf("intent_id 关联的任务资产未获授权或已被封禁"), nil
 					}
 				}
 				var err error
@@ -1249,11 +1455,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
 			}
 			if t.as != nil && t.taskID > 0 {
-				marked := anchors
-				if len(marked) == 0 {
-					marked = t.ownerAssetIDs()
-				}
-				_ = t.as.MarkTaskAssetsTested(t.taskID, marked, t.worker)
+				_ = t.as.MarkTaskAssetsTested(t.taskID, anchors, t.worker)
 			}
 			t.writes.Findings++
 			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
@@ -1300,9 +1502,21 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		if err != nil || node == nil || node.Kind != db.KindIntent {
 			return 0, fmt.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
+		if !t.nodeAuthorized(node) {
+			return 0, fmt.Errorf("intent_id 关联的任务资产未获授权或已被封禁")
+		}
+	}
+	anchors := pidList(it.AssetIDs)
+	if len(anchors) == 0 {
+		anchors = t.ownerAssetIDs()
+	}
+	if t.as != nil && t.taskID > 0 {
+		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+			return 0, fmt.Errorf("事实资产未获授权：%w", err)
+		}
 	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, anchors)
 	if err != nil {
 		return 0, err
 	}
@@ -1310,10 +1524,6 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
 	if t.as != nil && t.taskID > 0 {
-		anchors := pidList(it.AssetIDs)
-		if len(anchors) == 0 {
-			anchors = t.ownerAssetIDs()
-		}
 		_ = t.as.MarkTaskAssetsTested(t.taskID, anchors, t.worker)
 	}
 	t.writes.Facts++
@@ -1408,6 +1618,11 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	for _, raw := range it.AssetIDs {
 		if tid := pid(raw); tid > 0 {
 			anchors = append(anchors, tid)
+		}
+	}
+	if t.as != nil && t.taskID > 0 {
+		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+			return 0, fmt.Errorf("提示资产未获授权：%w", err)
 		}
 	}
 	id, err := t.ts.AddNode(db.KindHint, map[string]any{"text": it.Text}, 0, "active", "human", anchors)
@@ -1657,6 +1872,9 @@ func (t *ToolSet) killWorkTool() actool.CoreTool {
 			if err != nil || node == nil || node.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）"), nil
 			}
+			if !t.nodeAuthorized(node) {
+				return actool.Errorf("该意图关联的任务资产未获授权或已被封禁"), nil
+			}
 			if err := t.killWork(id); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1691,6 +1909,9 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 			if err != nil || node == nil || node.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）"), nil
 			}
+			if !t.nodeAuthorized(node) {
+				return actool.Errorf("该意图关联的任务资产未获授权或已被封禁"), nil
+			}
 			if strings.TrimSpace(a.Message) == "" {
 				return actool.Errorf("message 必填"), nil
 			}
@@ -1720,6 +1941,9 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			}
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
+			}
+			if !t.nodeAuthorized(intentNode) {
+				return actool.Errorf("该 work 关联的任务资产未获授权或已被封禁"), nil
 			}
 			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
 			if err != nil {
@@ -1814,6 +2038,9 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 			}
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
+			}
+			if !t.nodeAuthorized(intentNode) {
+				return actool.Errorf("该 work 关联的任务资产未获授权或已被封禁"), nil
 			}
 			// ③ detail drill-down by step ids, thinking excluded by the store.
 			if len(a.StepIDs) > 0 {
@@ -1921,6 +2148,10 @@ func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
 				if acts[i].NodeID != nil {
 					intent = *acts[i].NodeID
 				}
+				intentNode, _ := t.ts.GetNodeWithSources(intent)
+				if !t.nodeAuthorized(intentNode) {
+					continue
+				}
 				hit := map[string]any{
 					"intent_id": intent, "step_id": acts[i].ID, "worker": acts[i].Worker,
 					"kind": acts[i].Kind, "tool": acts[i].Tool, "is_error": acts[i].IsError,
@@ -1967,6 +2198,9 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 			q := strings.ToLower(strings.TrimSpace(a.Q))
 			out := make([]map[string]any, 0, limit)
 			for _, n := range all {
+				if !t.nodeAuthorized(n) {
+					continue
+				}
 				if n.Inherited && n.State == "running" {
 					continue
 				}

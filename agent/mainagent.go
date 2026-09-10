@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -104,7 +105,7 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 // non-nil, receives each execution step (thinking / tool_use / tool_result /
 // text / result) so the main-agent session shows its work — exactly like the
 // worker/planner sessions — not just the final answer.
-func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
+func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -126,6 +127,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	runProxyAddr := TaskProxyAddr(m.proxyAddr, m.proxyCACert, taskID)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,
@@ -135,7 +137,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
 		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   m.proxyAddr,
+		WebFetchProxy:   runProxyAddr,
 		WebFetchCACert:  m.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
@@ -144,7 +146,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		BraveSearchAPIKey:  m.webSearch.BraveKey,
 		TavilySearchAPIKey: m.webSearch.TavilyKey,
 		WebSearchProxy:     m.webSearch.Proxy,
-		BashEnv:            proxyEnv(m.proxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:            proxyEnv(runProxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		ShellProfile:       runProfile,
 		WorkingDir:         mainDir, // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:      cmdOutDir(mainDir),
@@ -155,6 +157,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, t
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	// Task-bound main-agent sessions share the same last-mile policy as
+	// Planner/Worker. Independent chat has no task id and remains unrestricted.
+	if as != nil {
+		opts.Hooks = guard.AssetPolicyHooksWithGuard(g, as, taskID)
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
 		opts.Transcript = m.tx

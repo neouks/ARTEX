@@ -253,9 +253,48 @@ export interface Asset {
   task_source?: string;
   task_source_summary?: string;
   task_source_node_id?: number;
+  task_source_task_id?: number;
+  task_inherited?: boolean;
+  task_read_only?: boolean;
   tested?: boolean;
   tested_at?: string;
   tested_by?: string;
+  approval_state?: "approved" | "pending" | "revoked";
+  approved_at?: string;
+  approved_by?: string;
+  approval_reason?: string;
+  blocked?: boolean;
+  block_direct?: boolean;
+  blocked_at?: string;
+  block_reason?: string;
+}
+
+export interface TaskAssetApproval {
+  asset_id: number;
+  asset_type: NewAssetType | string;
+  name: string;
+  source: string;
+  source_summary: string;
+  source_node_id?: number;
+  source_task_id: number;
+  inherited: boolean;
+  read_only: boolean;
+  created_at: string;
+  approval_state: "approved" | "pending" | "revoked";
+  approved_at?: string;
+  approved_by?: string;
+  approval_reason?: string;
+  blocked: boolean;
+  blocked_at?: string;
+  block_reason?: string;
+  blocked_by?: string;
+}
+
+export interface TaskAssetApprovalMutation {
+  ok: boolean;
+  asset_ids: number[];
+  approval_state: "approved" | "revoked";
+  items: TaskAssetApproval[];
 }
 
 export interface IntentAsset {

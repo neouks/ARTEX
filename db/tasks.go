@@ -280,7 +280,8 @@ WHERE id=ANY($2::bigint[])`, taskID, assetIDs); err != nil {
 SELECT $1,id,'direct','任务创建时直接选择'
 FROM assets WHERE id=ANY($2::bigint[])
 ON CONFLICT (task_id,asset_id) DO UPDATE
-SET source='direct', source_summary=EXCLUDED.source_summary, source_node_id=NULL`, taskID, assetIDs); err != nil {
+SET source='direct', source_summary=EXCLUDED.source_summary, source_node_id=NULL,
+    approval_state='approved', approved_at=now(), approved_by='user', approval_reason='任务创建时直接选择'`, taskID, assetIDs); err != nil {
 		return err
 	}
 	rows, err := tx.Query(`SELECT id,type,COALESCE(domain,''),COALESCE(url,''),COALESCE(ip,'')
@@ -393,7 +394,8 @@ WHERE asset.company_id=ANY($2::bigint[])
 ON CONFLICT (task_id, asset_id) DO UPDATE
 SET source=EXCLUDED.source,
     source_summary=EXCLUDED.source_summary,
-    source_node_id=NULL`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
+    source_node_id=NULL,
+    approval_state='approved', approved_at=now(), approved_by='user', approval_reason='任务创建时关联企业'`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
 		return err
 	}
 	return nil

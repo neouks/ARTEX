@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 func names(tools []actool.CoreTool) map[string]actool.CoreTool {
@@ -36,8 +36,8 @@ func TestWireTools(t *testing.T) {
 	t.Cleanup(func() { agent.ToolResolve = nil })
 	// Prevent interactive-shell Bash decoration: if the worker agent has
 	// interactive_shell=true in the DB, ToolResolve would append a note to
-	// Bash's description. Disable that for this test so the undecorated
-	// pass-through assertion holds regardless of DB state.
+	// Bash's description. Disable that for this test; shell-kind custom tools
+	// are intentionally still allowed to append their environment hints.
 	t.Setenv("AGENT_CORE_DISABLE_INTERACTIVE_SHELL", "1")
 
 	// Seeding populated the catalog.
@@ -61,8 +61,11 @@ func TestWireTools(t *testing.T) {
 	// non-catalog rows, so future user-defined custom tools survive too.
 	if bash, ok := worker["Bash"]; !ok {
 		t.Error("worker lost Bash (should pass through)")
-	} else if bash.Description() != actool.NewBash().Description() {
-		t.Error("Bash should pass through undecorated, but description changed")
+	} else {
+		want := actool.NewBash().Description() + shellToolNote(mustToolRows(t, pg), "worker")
+		if bash.Description() != want {
+			t.Errorf("Bash description = %q, want catalog shell hints appended", bash.Description())
+		}
 	}
 	// planner is not bound to record_fact → resolving a base that contains it drops it.
 	planner := names(agent.ToolResolve(ctx, "planner", base))
@@ -101,6 +104,15 @@ func TestWireTools(t *testing.T) {
 	if conf["default"] != "inferred" {
 		t.Errorf("confidence.default = %v, want inferred", conf["default"])
 	}
+}
+
+func mustToolRows(t *testing.T, pg *db.DB) []*db.Tool {
+	t.Helper()
+	rows, err := pg.ListTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }
 
 func mustJSON(v any) json.RawMessage {

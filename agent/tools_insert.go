@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -181,9 +182,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			taskID := t.taskID
 
 			type result struct {
-				Index int    `json:"index"`
-				ID    int64  `json:"id"`
-				Type  string `json:"type"`
+				Index         int    `json:"index"`
+				ID            int64  `json:"id"`
+				Type          string `json:"type"`
+				ApprovalState string `json:"approval_state,omitempty"`
+				Blocked       bool   `json:"blocked,omitempty"`
 			}
 			type errEntry struct {
 				Index int    `json:"index"`
@@ -201,37 +204,41 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				switch typ {
 				case "root_domain":
 					id, err = t.as.UpsertRootDomain(db.UpsertRootDomainReq{
-						Domain: item.Domain,
-						ICP:    item.ICP,
-						TaskID: taskID,
+						Domain:          item.Domain,
+						ICP:             item.ICP,
+						TaskID:          taskID,
+						AgentDiscovered: taskID > 0,
 					})
 
 				case "ip":
 					id, err = t.as.UpsertIP(db.UpsertIPReq{
-						IP:           item.IP,
-						BoundDomains: item.BoundDomains,
-						OpenPorts:    item.OpenPorts,
-						TaskID:       taskID,
+						IP:              item.IP,
+						BoundDomains:    item.BoundDomains,
+						OpenPorts:       item.OpenPorts,
+						TaskID:          taskID,
+						AgentDiscovered: taskID > 0,
 					})
 
 				case "subdomain":
 					id, err = t.as.UpsertSubdomain(db.UpsertSubdomainReq{
-						Domain:      item.Domain,
-						RecordType:  item.RecordType,
-						RecordValue: item.RecordValue,
-						ICP:         item.ICP,
-						TaskID:      taskID,
+						Domain:          item.Domain,
+						RecordType:      item.RecordType,
+						RecordValue:     item.RecordValue,
+						ICP:             item.ICP,
+						TaskID:          taskID,
+						AgentDiscovered: taskID > 0,
 					})
 
 				case "app":
 					id, err = t.as.UpsertApp(db.UpsertAppReq{
-						Name:        item.AppName,
-						BundleID:    item.BundleID,
-						Category:    item.Category,
-						Description: item.Description,
-						ICP:         item.AppICP,
-						CompanyID:   item.CompanyID,
-						TaskID:      taskID,
+						Name:            item.AppName,
+						BundleID:        item.BundleID,
+						Category:        item.Category,
+						Description:     item.Description,
+						ICP:             item.AppICP,
+						CompanyID:       item.CompanyID,
+						TaskID:          taskID,
+						AgentDiscovered: taskID > 0,
 					})
 
 				case "service":
@@ -243,34 +250,37 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 							svcIP = item.IP
 						}
 						id, err = t.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
-							URL:           item.URL,
-							Technologies:  item.Technologies,
-							StatusCode:    item.StatusCode,
-							ContentLength: item.ContentLength,
-							PageTitle:     item.PageTitle,
-							FaviconMMH3:   item.FaviconMMH3,
-							Auth:          item.Auth,
-							IP:            svcIP,
-							TaskID:        taskID,
+							URL:             item.URL,
+							Technologies:    item.Technologies,
+							StatusCode:      item.StatusCode,
+							ContentLength:   item.ContentLength,
+							PageTitle:       item.PageTitle,
+							FaviconMMH3:     item.FaviconMMH3,
+							Auth:            item.Auth,
+							IP:              svcIP,
+							TaskID:          taskID,
+							AgentDiscovered: taskID > 0,
 						})
 					} else {
 						id, err = t.as.UpsertOtherService(db.UpsertOtherServiceReq{
-							Domain:      item.Domain,
-							IP:          item.IP,
-							Port:        item.Port,
-							ServiceName: item.ServiceName,
-							Auth:        item.Auth,
-							TaskID:      taskID,
+							Domain:          item.Domain,
+							IP:              item.IP,
+							Port:            item.Port,
+							ServiceName:     item.ServiceName,
+							Auth:            item.Auth,
+							TaskID:          taskID,
+							AgentDiscovered: taskID > 0,
 						})
 					}
 
 				case "endpoint":
 					id, err = t.as.UpsertEndpoint(db.UpsertEndpointReq{
-						URL:    item.URL,
-						Method: item.Method,
-						Params: item.Params,
-						IP:     item.ServiceIP,
-						TaskID: taskID,
+						URL:             item.URL,
+						Method:          item.Method,
+						Params:          item.Params,
+						IP:              item.ServiceIP,
+						TaskID:          taskID,
+						AgentDiscovered: taskID > 0,
 					})
 
 				default:
@@ -282,7 +292,19 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					errs = append(errs, errEntry{Index: i, Error: err.Error()})
 					continue
 				}
-				results = append(results, result{Index: i, ID: id, Type: typ})
+				approvalState := "approved"
+				if taskID > 0 {
+					approvalState, err = t.as.RegisterAgentDiscoveredAsset(taskID, id, t.worker)
+					if err != nil {
+						if errors.Is(err, db.ErrTaskAssetBlocked) || errors.Is(err, db.ErrTaskAssetNotApproved) {
+							results = append(results, result{Index: i, ID: id, Type: typ, ApprovalState: "blocked", Blocked: true})
+							continue
+						}
+						errs = append(errs, errEntry{Index: i, Error: err.Error()})
+						continue
+					}
+				}
+				results = append(results, result{Index: i, ID: id, Type: typ, ApprovalState: approvalState})
 				t.writes.Assets++
 				t.anchorOwner(id)
 				if taskID > 0 {
@@ -535,12 +557,28 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			case len(a.IDs) > 0:
 				assets, err = t.as.GetByIDs(a.IDs)
 			case a.DSL != "":
-				assets, err = t.as.QueryDSL(a.DSL, a.Type, a.Limit, a.Offset)
+				if t.taskID > 0 {
+					// Apply authorization before LIMIT/OFFSET. Filtering a global page
+					// afterwards can return a short/empty page even when later approved
+					// matches exist, and needlessly reads disallowed rows into the task
+					// agent's process.
+					assets, err = t.as.QueryDSLByTaskApproval(
+						t.taskID, a.DSL, a.Type, "all", db.ApprovalApproved, a.Limit, a.Offset,
+					)
+				} else {
+					assets, err = t.as.QueryDSL(a.DSL, a.Type, a.Limit, a.Offset)
+				}
 			default:
 				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部资产，请提供查询条件"), nil
 			}
 			if err != nil {
 				return actool.Errorf("DSL 错误: " + err.Error()), nil
+			}
+			if t.taskID > 0 && a.DSL == "" {
+				assets, err = t.as.FilterApprovedAssets(t.taskID, assets)
+				if err != nil {
+					return actool.Errorf("查询资产授权状态失败: " + err.Error()), nil
+				}
 			}
 			return jsonResult(map[string]any{
 				"count":  len(assets),

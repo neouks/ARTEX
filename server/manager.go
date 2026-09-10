@@ -409,6 +409,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			}
 		}
 		if tr != nil {
+			tr.SetAssetPolicyStore(m.assets)
 			m.traffic = tr
 			go func() {
 				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA)", proxyAddr, tr.ProxyAddr())
@@ -421,6 +422,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Asset auto-completion engine (§5): HTTP probes routed through the recording
 	// proxy (via m.ProxyAddr, which honors the traffic-capture toggle).
 	m.trafficOn = pg.GetBool(settingTrafficCapture, false)
+	if m.traffic != nil {
+		m.traffic.SetRecordingEnabled(m.trafficOn)
+	}
 	// LLM 录制开关（默认关）。录制器每次调用时读取此标志。
 	m.llmRecOn = pg.GetBool(settingLLMRecord, false)
 	// Load persisted web-search config (default: off, ddgs).
@@ -474,6 +478,9 @@ func (m *Manager) SetTrafficEnabled(on bool) error {
 	m.mu.Lock()
 	m.trafficOn = on
 	m.mu.Unlock()
+	if m.traffic != nil {
+		m.traffic.SetRecordingEnabled(on)
+	}
 	// Inject (on) or strip (off) the recording proxy + CA on the Playwright MCP so
 	// Playwright routes through the MITM. Must run after the flag flip above, since
 	// ProxyAddr/ProxyCACert honor it. putSettings rebuilds agents next (applyLLM),
@@ -755,6 +762,25 @@ func (m *Manager) ProxyCACert() string {
 		return ""
 	}
 	return m.traffic.CACertPath()
+}
+
+// TaskProxyAddr keeps task-bound HTTP traffic behind ARTEX's local policy proxy
+// even when traffic persistence is disabled. Independent chats continue to use
+// ProxyAddr and therefore have no task asset policy.
+func (m *Manager) TaskProxyAddr() string {
+	if m.traffic != nil {
+		return m.traffic.ProxyAddr()
+	}
+	return m.ProxyAddr()
+}
+
+// TaskProxyCACert is the CA required by TaskProxyAddr's local MITM. It is
+// intentionally independent from the traffic-capture toggle.
+func (m *Manager) TaskProxyCACert() string {
+	if m.traffic != nil {
+		return m.traffic.CACertPath()
+	}
+	return m.ProxyCACert()
 }
 
 // GlobalProxy returns the configured global egress proxy URL (empty = direct).

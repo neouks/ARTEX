@@ -596,7 +596,12 @@ func TestQueryByTask(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
 
-	const taskID = int64(99999)
+	task, err := d.CreateTask(fmt.Sprintf("query-by-task-%d", time.Now().UnixNano()), "test", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	taskID := task.ID
 	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "taskquery.net", TaskID: taskID})
 	if err != nil {
 		t.Fatal(err)
@@ -645,7 +650,12 @@ func TestQueryByTaskPaging(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
 
-	const taskID = int64(99998)
+	task, err := d.CreateTask(fmt.Sprintf("query-by-task-paging-%d", time.Now().UnixNano()), "test", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	taskID := task.ID
 	const n = 60
 	for i := 0; i < n; i++ {
 		id, err := av2.UpsertRootDomain(UpsertRootDomainReq{
@@ -905,7 +915,12 @@ func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 	defer d.Close()
 
 	stamp := time.Now().UnixNano()
-	taskID := stamp
+	task, err := d.CreateTask(fmt.Sprintf("stable-page-task-%d", stamp), "test", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	taskID := task.ID
 	marker := fmt.Sprintf("stable-page-%d", stamp)
 	sharedSeen := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
 	ids := make([]int64, 0, 5)

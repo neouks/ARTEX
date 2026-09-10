@@ -368,6 +368,42 @@ ORDER BY anchor.asset_id`, nodeID, s.expID)
 	return ids, rows.Err()
 }
 
+// LineageAnchorAssetIDs returns assets anchored to the node or any of its
+// upstream exploration ancestors. This prevents a derived intent/fact with no
+// direct anchor from outliving the authorization of the asset that produced
+// its parent evidence.
+func (s *ExplorationStore) LineageAnchorAssetIDs(nodeID int64) ([]int64, error) {
+	if s == nil || s.db == nil || nodeID <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+WITH RECURSIVE lineage(id) AS (
+  SELECT id FROM exploration_nodes WHERE id=$1 AND exploration_id=$2
+  UNION
+  SELECT edge.src_id
+  FROM exploration_edges edge
+  JOIN lineage child ON child.id=edge.dst_id
+  WHERE edge.exploration_id=$2
+)
+SELECT DISTINCT anchor.asset_id
+FROM lineage
+JOIN exploration_anchors anchor ON anchor.node_id=lineage.id
+ORDER BY anchor.asset_id`, nodeID, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
 	_, err := s.db.Exec(`
@@ -1202,7 +1238,15 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'
+	  AND NOT EXISTS (
+	    SELECT 1
+	    FROM exploration_anchors ea
+	    JOIN tasks task_ctx ON task_ctx.exploration_id=exploration_nodes.exploration_id
+	                         AND task_ctx.deleted_at IS NULL
+	    WHERE ea.node_id=exploration_nodes.id
+	      AND NOT task_asset_effectively_approved(task_ctx.id, ea.asset_id)
+	  )`, owner, id, s.expID)
 	if err != nil {
 		return false, err
 	}

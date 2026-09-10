@@ -59,11 +59,22 @@ type Asset struct {
 	TaskSource        string         `json:"task_source,omitempty"`
 	TaskSourceSummary string         `json:"task_source_summary,omitempty"`
 	TaskSourceNodeID  *int64         `json:"task_source_node_id,omitempty"`
+	TaskSourceTaskID  int64          `json:"task_source_task_id,omitempty"`
+	TaskInherited     bool           `json:"task_inherited,omitempty"`
+	TaskReadOnly      bool           `json:"task_read_only,omitempty"`
 	// Task-local test state. These fields are populated only by task-scoped
 	// asset queries; global asset listings omit them entirely.
-	Tested   *bool      `json:"tested,omitempty"`
-	TestedAt *time.Time `json:"tested_at,omitempty"`
-	TestedBy string     `json:"tested_by,omitempty"`
+	Tested         *bool      `json:"tested,omitempty"`
+	TestedAt       *time.Time `json:"tested_at,omitempty"`
+	TestedBy       string     `json:"tested_by,omitempty"`
+	ApprovalState  string     `json:"approval_state,omitempty"`
+	ApprovedAt     *time.Time `json:"approved_at,omitempty"`
+	ApprovedBy     string     `json:"approved_by,omitempty"`
+	ApprovalReason string     `json:"approval_reason,omitempty"`
+	Blocked        bool       `json:"blocked,omitempty"`
+	BlockDirect    bool       `json:"block_direct,omitempty"`
+	BlockedAt      *time.Time `json:"blocked_at,omitempty"`
+	BlockReason    string     `json:"block_reason,omitempty"`
 }
 
 // AuthItem is one entry in the auth array.
@@ -128,6 +139,19 @@ func (s *AssetStore) withCompanyScopeMutation(fn func(*AssetStore) (int64, error
 		return 0, err
 	}
 	return id, nil
+}
+
+// enableAgentDiscoveryMode marks the current asset-write transaction so the
+// task-link trigger creates new associations as pending from the outset. This
+// closes the window between an asset upsert and RegisterAgentDiscoveredAsset
+// where a concurrently claiming worker could otherwise observe an approved
+// link. set_config(..., true) keeps the marker local to this transaction.
+func (s *AssetStore) enableAgentDiscoveryMode() error {
+	if s.tx == nil {
+		return errors.New("agent discovery mode requires an asset transaction")
+	}
+	_, err := s.tx.Exec(`SELECT set_config('artex.agent_discovery', 'on', true)`)
+	return err
 }
 
 func (s *AssetStore) resolveCompanyWithICP(rootDomain, ipStr, icp string) (*int64, error) {
@@ -252,9 +276,10 @@ func nullableInt(v int) interface{} {
 
 // UpsertRootDomainReq is the input for UpsertRootDomain.
 type UpsertRootDomainReq struct {
-	Domain string
-	ICP    string
-	TaskID int64
+	Domain          string
+	ICP             string
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertRootDomain idempotently inserts or merges a root domain asset.
@@ -267,6 +292,11 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertRootDomain(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 	companyID, err := s.resolveCompanyWithICP(domain, "", req.ICP)
 	if err != nil {
@@ -334,10 +364,11 @@ func ValidateAssetIP(value string) error {
 
 // UpsertIPReq is the input for UpsertIP.
 type UpsertIPReq struct {
-	IP           string
-	BoundDomains []string
-	OpenPorts    []PortService
-	TaskID       int64
+	IP              string
+	BoundDomains    []string
+	OpenPorts       []PortService
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertIP idempotently inserts or merges an IP asset.
@@ -352,6 +383,11 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertIP(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 	cseg := calcCSegment(req.IP)
 	companyID, err := s.resolveCompanyWithICP("", req.IP, "")
@@ -447,11 +483,12 @@ WHERE type = 'ip' AND ip = $2`, domain, ipStr)
 
 // UpsertSubdomainReq is the input for UpsertSubdomain.
 type UpsertSubdomainReq struct {
-	Domain      string
-	RecordType  string
-	RecordValue []string
-	ICP         string
-	TaskID      int64
+	Domain          string
+	RecordType      string
+	RecordValue     []string
+	ICP             string
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertSubdomain idempotently inserts or merges a subdomain asset and triggers
@@ -465,6 +502,11 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertSubdomain(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 
 	rootDomain, _ := RootDomain(domain)
@@ -561,13 +603,14 @@ RETURNING id`, domain, rootDomain, recordType, recordValueArr, ipVal, csegVal, i
 
 // UpsertAppReq is the input for UpsertApp.
 type UpsertAppReq struct {
-	Name        string
-	BundleID    string
-	Category    string
-	Description string
-	ICP         string
-	CompanyID   *int64 // explicit override; nil = exact ICP auto-attribution when available
-	TaskID      int64
+	Name            string
+	BundleID        string
+	Category        string
+	Description     string
+	ICP             string
+	CompanyID       *int64 // explicit override; nil = exact ICP auto-attribution when available
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertApp idempotently inserts or merges an app asset.
@@ -579,6 +622,11 @@ func (s *AssetStore) UpsertApp(req UpsertAppReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertApp(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 
 	var taskIDs string
@@ -673,15 +721,16 @@ RETURNING id`, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, t
 
 // UpsertHTTPServiceReq is the input for UpsertHTTPService.
 type UpsertHTTPServiceReq struct {
-	URL           string
-	Technologies  []string
-	StatusCode    *int
-	ContentLength *int64
-	PageTitle     string
-	FaviconMMH3   string
-	Auth          []map[string]any
-	IP            string // optional, from async DNS
-	TaskID        int64
+	URL             string
+	Technologies    []string
+	StatusCode      *int
+	ContentLength   *int64
+	PageTitle       string
+	FaviconMMH3     string
+	Auth            []map[string]any
+	IP              string // optional, from async DNS
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertHTTPService inserts or merges an HTTP service asset. Domain, port,
@@ -697,6 +746,11 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertHTTPService(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 	normURL := normalizeURL(req.URL)
 	domain, port, serviceName := parseURL(normURL)
@@ -814,12 +868,13 @@ RETURNING id`,
 
 // UpsertOtherServiceReq is the input for UpsertOtherService.
 type UpsertOtherServiceReq struct {
-	Domain      string // domain or ip required
-	IP          string
-	Port        int
-	ServiceName string
-	Auth        []map[string]any
-	TaskID      int64
+	Domain          string // domain or ip required
+	IP              string
+	Port            int
+	ServiceName     string
+	Auth            []map[string]any
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertOtherService inserts or merges a non-HTTP service asset.
@@ -840,6 +895,11 @@ func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertOtherService(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 	// normalize service_name (lowercase) so the (domain,ip,port,service_name)
 	// dedup key doesn't split "SSH" and "ssh" into separate rows.
@@ -957,11 +1017,12 @@ func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) {
 
 // UpsertEndpointReq is the input for UpsertEndpoint.
 type UpsertEndpointReq struct {
-	URL    string
-	Method string
-	Params []map[string]any
-	IP     string // optional
-	TaskID int64
+	URL             string
+	Method          string
+	Params          []map[string]any
+	IP              string // optional
+	TaskID          int64
+	AgentDiscovered bool
 }
 
 // UpsertEndpoint inserts or merges an endpoint asset. Domain, port, root_domain
@@ -980,6 +1041,11 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertEndpoint(req)
 		})
+	}
+	if req.AgentDiscovered {
+		if err := s.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
 	}
 	method := strings.ToUpper(req.Method)
 	normURL := normalizeURL(req.URL)
@@ -1159,14 +1225,87 @@ func pageClause(args *[]any, limit, offset int) string {
 	return q
 }
 
+// taskAssetContextAssociationSQL is the canonical user-facing task asset set:
+// current-task links, direct source-task links that have not been shadowed by a
+// current link, and tombstones whose global asset row still exists. Agent-facing
+// queries apply the stricter effective-approved predicate separately.
+func taskAssetContextAssociationSQL(assetAlias, taskArg string) string {
+	return fmt.Sprintf(`(
+EXISTS (SELECT 1 FROM task_asset_links current_link
+        WHERE current_link.task_id=%[2]s AND current_link.asset_id=%[1]s.id)
+OR (
+  NOT EXISTS (SELECT 1 FROM task_asset_links current_link
+              WHERE current_link.task_id=%[2]s AND current_link.asset_id=%[1]s.id)
+  AND EXISTS (
+    SELECT 1 FROM task_relations relation
+    JOIN task_asset_links source_link ON source_link.task_id=relation.source_task_id
+    WHERE relation.task_id=%[2]s AND source_link.asset_id=%[1]s.id
+  )
+)
+OR EXISTS (SELECT 1 FROM task_asset_blocks block
+           WHERE block.task_id=%[2]s AND block.asset_id=%[1]s.id)
+)`, assetAlias, taskArg)
+}
+
+// taskAssetSelectedLinkBoolSQL compares one field on the task-local link, or on
+// the best direct-source link when there is no local override. Approved sources
+// win over pending/revoked ones so a task with multiple sources is represented
+// by the source that can actually authorize execution.
+func taskAssetSelectedLinkBoolSQL(assetAlias, taskArg, column, valueArg string) string {
+	return fmt.Sprintf(`COALESCE(
+  (SELECT current_link.%[3]s FROM task_asset_links current_link
+   WHERE current_link.task_id=%[2]s AND current_link.asset_id=%[1]s.id LIMIT 1),
+  (SELECT source_link.%[3]s
+   FROM task_relations relation
+   JOIN task_asset_links source_link ON source_link.task_id=relation.source_task_id
+   WHERE relation.task_id=%[2]s AND source_link.asset_id=%[1]s.id
+   ORDER BY CASE source_link.approval_state WHEN 'approved' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+            relation.source_task_id
+   LIMIT 1)
+)=%[4]s`, assetAlias, taskArg, column, valueArg)
+}
+
+// taskAssetBlockedSQL includes both an exact tombstone and descendants of a
+// blocked root-domain/subdomain/IP. Host-bearing derived rows always populate
+// domain or ip during upsert, so this is the SQL counterpart of AssetKey's
+// host inheritance check.
+func taskAssetBlockedSQL(assetAlias, taskArg string) string {
+	return fmt.Sprintf(`EXISTS (
+  SELECT 1 FROM task_asset_blocks block
+  WHERE block.task_id=%[2]s AND (
+    block.asset_id=%[1]s.id OR block.asset_key=CASE %[1]s.type
+      WHEN 'root_domain' THEN 'root_domain:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.domain,'')))
+      WHEN 'subdomain' THEN 'subdomain:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.domain,'')))
+      WHEN 'ip' THEN 'ip:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.ip,'')))
+      WHEN 'service' THEN CASE WHEN COALESCE(%[1]s.url,'')<>'' THEN 'service:'||%[1]s.url
+        ELSE 'service:'||lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),'')))||':'||COALESCE(%[1]s.port,0)::text||':'||lower(trim(COALESCE(%[1]s.service_name,''))) END
+      WHEN 'endpoint' THEN 'endpoint:'||COALESCE(%[1]s.url,'')||':'||upper(trim(COALESCE(%[1]s.method,'')))
+      WHEN 'app' THEN 'app:'||lower(trim(COALESCE(NULLIF(%[1]s.bundle_id,''),%[1]s.app_name,'')))
+      ELSE %[1]s.type||':'||%[1]s.id::text END OR (
+      block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>'' AND (
+        lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),'')))=block.host_key
+        OR (block.asset_type IN ('root_domain','subdomain')
+          AND lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),''))) LIKE '%%.'||block.host_key)
+      )
+    )
+  )
+)`, assetAlias, taskArg)
+}
+
 // QueryByTask returns assets rows that have a given task_id in task_ids.
 func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([]*Asset, error) {
-	return s.QueryByTaskTested(taskID, typ, "all", limit, offset)
+	return s.QueryByTaskApproval(taskID, typ, "all", "all", limit, offset)
 }
 
 // QueryByTaskTested is the task asset page query with an optional task-local
 // tested filter: all, true, or false.
 func (s *AssetStore) QueryByTaskTested(taskID int64, typ, tested string, limit, offset int) ([]*Asset, error) {
+	return s.QueryByTaskApproval(taskID, typ, tested, "all", limit, offset)
+}
+
+// QueryByTaskApproval is the task asset page query with tested and approval
+// filters. Approval metadata is hydrated into the task-scoped DTO only.
+func (s *AssetStore) QueryByTaskApproval(taskID int64, typ, tested, approval string, limit, offset int) ([]*Asset, error) {
 	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
@@ -1177,7 +1316,7 @@ func (s *AssetStore) QueryByTaskTested(taskID int64, typ, tested string, limit, 
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
        COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
-FROM assets WHERE $1 = ANY(task_ids)`
+FROM assets WHERE ` + taskAssetContextAssociationSQL("assets", "$1")
 	args := []any{taskID}
 	if typ != "" {
 		args = append(args, typ)
@@ -1185,7 +1324,15 @@ FROM assets WHERE $1 = ANY(task_ids)`
 	}
 	if tested == "true" || tested == "false" {
 		args = append(args, tested == "true")
-		q += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM task_asset_links link WHERE link.task_id=$1 AND link.asset_id=assets.id AND link.tested=$%d)`, len(args))
+		q += fmt.Sprintf(` AND %s`, taskAssetSelectedLinkBoolSQL("assets", "$1", "tested", fmt.Sprintf("$%d", len(args))))
+	}
+	if approval == ApprovalApproved {
+		q += ` AND task_asset_effectively_approved($1,assets.id)`
+	} else if approval == ApprovalPending || approval == ApprovalRevoked {
+		args = append(args, approval)
+		q += fmt.Sprintf(` AND task_asset_effective_approval_state($1,assets.id)=$%d`, len(args))
+	} else if approval == "blocked" {
+		q += ` AND ` + taskAssetBlockedSQL("assets", "$1")
 	}
 	q += pageClause(&args, limit, offset)
 	rows, err := s.db.Query(q, args...)
@@ -1208,7 +1355,11 @@ func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
 }
 
 func (s *AssetStore) CountByTaskTested(taskID int64, typ, tested string) (int, error) {
-	q := `SELECT count(*) FROM assets WHERE $1 = ANY(task_ids)`
+	return s.CountByTaskApproval(taskID, typ, tested, "all")
+}
+
+func (s *AssetStore) CountByTaskApproval(taskID int64, typ, tested, approval string) (int, error) {
+	q := `SELECT count(*) FROM assets WHERE ` + taskAssetContextAssociationSQL("assets", "$1")
 	args := []any{taskID}
 	if typ != "" {
 		args = append(args, typ)
@@ -1216,7 +1367,15 @@ func (s *AssetStore) CountByTaskTested(taskID int64, typ, tested string) (int, e
 	}
 	if tested == "true" || tested == "false" {
 		args = append(args, tested == "true")
-		q += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM task_asset_links link WHERE link.task_id=$1 AND link.asset_id=assets.id AND link.tested=$%d)`, len(args))
+		q += fmt.Sprintf(` AND %s`, taskAssetSelectedLinkBoolSQL("assets", "$1", "tested", fmt.Sprintf("$%d", len(args))))
+	}
+	if approval == ApprovalApproved {
+		q += ` AND task_asset_effectively_approved($1,assets.id)`
+	} else if approval == ApprovalPending || approval == ApprovalRevoked {
+		args = append(args, approval)
+		q += fmt.Sprintf(` AND task_asset_effective_approval_state($1,assets.id)=$%d`, len(args))
+	} else if approval == "blocked" {
+		q += ` AND ` + taskAssetBlockedSQL("assets", "$1")
 	}
 	var n int
 	err := s.db.QueryRow(q, args...).Scan(&n)
@@ -1224,7 +1383,7 @@ func (s *AssetStore) CountByTaskTested(taskID int64, typ, tested string) (int, e
 }
 
 func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE $1 = ANY(task_ids) GROUP BY type`, taskID)
+	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE `+taskAssetContextAssociationSQL("assets", "$1")+` GROUP BY type`, taskID)
 	if err != nil {
 		return nil, err
 	}

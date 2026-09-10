@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -329,7 +330,7 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // and/or finding(s) reported (may be several — the engine debounces a burst; empty
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
-func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
 	tsx := NewToolSet(ts, "planner")
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -376,6 +377,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
 	}
+	runProxyAddr := TaskProxyAddr(p.proxyAddr, p.proxyCACert, taskID)
 	opts := agentcore.Options{
 		Provider:               p.prov,
 		SystemPrompt:           system,
@@ -387,7 +389,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		DisableBackgroundTasks: true,
 		EnableTaskManager:      toolsNeedTaskManager(tools),
 		EnableWebFetch:         true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:          p.proxyAddr,
+		WebFetchProxy:          runProxyAddr,
 		WebFetchCACert:         p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
@@ -396,7 +398,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		BraveSearchAPIKey:  p.webSearch.BraveKey,
 		TavilySearchAPIKey: p.webSearch.TavilyKey,
 		WebSearchProxy:     p.webSearch.Proxy,
-		BashEnv:            proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:            proxyEnv(runProxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		ShellProfile:       runProfile,
 		WorkingDir:         taskDir, // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:      cmdOutDir(taskDir),
@@ -411,6 +413,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	// Planner tools are task-bound too. Apply the same last-mile asset policy
+	// used by Workers so stale planner state cannot target revoked/tombstoned assets.
+	if as != nil {
+		opts.Hooks = guard.AssetPolicyHooksWithGuard(g, as, taskID)
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

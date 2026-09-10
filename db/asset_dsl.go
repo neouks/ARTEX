@@ -520,3 +520,83 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 	defer rows.Close()
 	return scanAssets(rows)
 }
+
+// CountDSLByTaskApproval is the task-scoped DSL count. Unlike the global DSL
+// helpers it never exposes assets outside the selected task, and the approved
+// filter uses the effective parent/source-aware authorization predicate.
+func (s *AssetStore) CountDSLByTaskApproval(taskID int64, dsl, typ, tested, approval string) (int, error) {
+	where, args, err := buildTaskDSLWhere(taskID, dsl, typ, tested, approval)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&count)
+	return count, err
+}
+
+// QueryDSLByTaskApproval is the paginated task-scoped counterpart of QueryDSL.
+func (s *AssetStore) QueryDSLByTaskApproval(taskID int64, dsl, typ, tested, approval string, limit, offset int) ([]*Asset, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where, args, err := buildTaskDSLWhere(taskID, dsl, typ, tested, approval)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, limit, offset)
+	query := assetSelectCols + " WHERE " + where +
+		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets, err := scanAssets(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+		return nil, err
+	}
+	return assets, nil
+}
+
+func buildTaskDSLWhere(taskID int64, dsl, typ, tested, approval string) (string, []any, error) {
+	node, err := ParseDSL(dsl)
+	if err != nil {
+		return "", nil, err
+	}
+	where, args, err := buildDSLWhere(node)
+	if err != nil {
+		return "", nil, err
+	}
+	if typ != "" {
+		args = append(args, typ)
+		where += fmt.Sprintf(" AND type=$%d", len(args))
+	}
+	args = append(args, taskID)
+	taskArg := len(args)
+	taskRef := fmt.Sprintf("$%d", taskArg)
+	association := taskAssetContextAssociationSQL("assets", taskRef)
+	if approval == "blocked" {
+		association = taskAssetBlockedSQL("assets", taskRef)
+	}
+	where = "(" + where + ") AND (" + association + ")"
+	if tested == "true" || tested == "false" {
+		args = append(args, tested == "true")
+		where += " AND " + taskAssetSelectedLinkBoolSQL("assets", taskRef, "tested", fmt.Sprintf("$%d", len(args)))
+	}
+	switch approval {
+	case ApprovalApproved:
+		where += fmt.Sprintf(" AND task_asset_effectively_approved($%d,assets.id)", taskArg)
+	case ApprovalPending, ApprovalRevoked:
+		args = append(args, approval)
+		where += fmt.Sprintf(" AND task_asset_effective_approval_state(%s,assets.id)=$%d", taskRef, len(args))
+	case "blocked":
+		// association already limits the query to current-task tombstones.
+	}
+	return where, args, nil
+}

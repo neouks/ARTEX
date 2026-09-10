@@ -214,10 +214,110 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 	default:
 		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
 	}
-	if err := s.upsertTaskScope(ts); err != nil {
+	if source != "manual" {
+		return ts, s.upsertTaskScope(ts)
+	}
+
+	// An operator-authored scope is an explicit authorization boundary. Persist
+	// the scope and restore all matching existing assets atomically, including
+	// assets detached earlier in this task. Keyword scope deliberately remains a
+	// discovery hint and never claims assets by their display names.
+	if s.tx != nil {
+		if err := s.upsertTaskScope(ts); err != nil {
+			return ts, err
+		}
+		return ts, s.authorizeScopeAssetsInTx(s.tx, ts)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
 		return ts, err
 	}
-	return ts, nil
+	defer tx.Rollback() //nolint:errcheck
+	scoped := &AssetStore{db: s.db, company: s.company, tx: tx}
+	if err := scoped.upsertTaskScope(ts); err != nil {
+		return ts, err
+	}
+	if err := scoped.authorizeScopeAssetsInTx(tx, ts); err != nil {
+		return ts, err
+	}
+	return ts, tx.Commit()
+}
+
+func (s *AssetStore) authorizeScopeAssetsInTx(tx *sql.Tx, scope TaskScope) error {
+	if scope.TaskID <= 0 {
+		return nil
+	}
+	var where string
+	var arg any
+	switch scope.Kind {
+	case "company":
+		if scope.CompanyID == nil || *scope.CompanyID <= 0 {
+			return nil
+		}
+		where, arg = "a.company_id=$1", *scope.CompanyID
+	case "root_domain":
+		where, arg = "a.domain=$1 OR a.domain LIKE '%.'||$1 OR a.root_domain=$1", scope.Domain
+	case "subdomain":
+		where, arg = "a.domain=$1", scope.Domain
+	case "ip", "cidr":
+		where, arg = "try_inet(a.ip) IS NOT NULL AND $1::cidr >>= try_inet(a.ip)", scope.Net
+	case "icp":
+		where, arg = `(lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g'))=$1
+OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g'))=$1)`, scope.Value
+	default:
+		return nil
+	}
+	rows, err := tx.Query("SELECT a.id,a.type,COALESCE(a.domain,''),COALESCE(a.root_domain,''),COALESCE(a.ip,''),COALESCE(a.url,''),COALESCE(a.method,''),COALESCE(a.service_name,''),COALESCE(a.port,0) FROM assets a WHERE ("+where+")", arg)
+	if err != nil {
+		return err
+	}
+	var assets []*Asset
+	for rows.Next() {
+		var a Asset
+		if err := rows.Scan(&a.ID, &a.Type, &a.Domain, &a.RootDomain, &a.IP, &a.URL, &a.Method, &a.ServiceName, &a.Port); err != nil {
+			rows.Close()
+			return err
+		}
+		assets = append(assets, &a)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	summary := manualTaskScopeSummary
+	reason := strings.TrimSpace(scope.Reason)
+	if reason == "" {
+		reason = "手动范围登记"
+	}
+	for _, a := range assets {
+		if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, scope.TaskID, a.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO task_asset_links(task_id,asset_id,source,source_summary,approval_state,approved_at,approved_by,approval_reason)
+VALUES ($1,$2,'manual',$3,'approved',now(),'user',$4)
+ON CONFLICT(task_id,asset_id) DO UPDATE SET source='manual',source_summary=EXCLUDED.source_summary,source_node_id=NULL,
+approval_state='approved',approved_at=now(),approved_by='user',approval_reason=EXCLUDED.approval_reason`, scope.TaskID, a.ID, summary, reason); err != nil {
+			return err
+		}
+		key, _ := AssetKey(a)
+		if _, err := tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND (asset_id=$2 OR asset_key=$3)`, scope.TaskID, a.ID, key); err != nil {
+			return err
+		}
+	}
+
+	// Scope identities also clear tombstones whose global asset row no longer
+	// exists. Otherwise deleting and recreating that global row would leave an
+	// operator's explicit re-authorization ineffective.
+	switch scope.Kind {
+	case "root_domain":
+		_, err = tx.Exec(`DELETE FROM task_asset_blocks
+WHERE task_id=$1 AND host_key<>'' AND (host_key=$2 OR host_key LIKE '%.'||$2)`, scope.TaskID, scope.Domain)
+	case "subdomain":
+		_, err = tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND host_key=$2`, scope.TaskID, scope.Domain)
+	case "ip", "cidr":
+		_, err = tx.Exec(`DELETE FROM task_asset_blocks
+WHERE task_id=$1 AND try_inet(host_key) IS NOT NULL AND $2::cidr >>= try_inet(host_key)`, scope.TaskID, scope.Net)
+	}
+	return err
 }
 
 // DeleteTaskScope removes a single scope row by id, scoped to the given task.
@@ -315,16 +415,18 @@ target AS (
          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
        ))
   )
+  AND task_asset_effectively_approved($1,a.id)
 ),
 tested AS (
   SELECT DISTINCT link.asset_id
   FROM task_asset_links link
-  WHERE link.task_id = $1 AND link.tested
+  WHERE link.task_id = $1 AND link.tested AND task_asset_effectively_approved($1,link.asset_id)
   UNION
   SELECT DISTINCT ea.asset_id
   FROM exploration_anchors ea
   JOIN exploration_nodes en ON en.id = ea.node_id
   WHERE en.exploration_id = $2 AND en.kind IN ('fact','finding')
+    AND task_asset_effectively_approved($1,ea.asset_id)
 )`
 
 // TaskCoverage computes rough per-type coverage for a task. taskID indexes

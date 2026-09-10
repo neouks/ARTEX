@@ -47,12 +47,12 @@ import type {
   LLMRecordDetail,
   LLMRecordItem,
   LLMTask,
+  MCPCall,
   MCPImportResult,
   MCPServer,
   MCPTestResult,
   MCPTool,
   MCPUsageStat,
-  MCPCall,
   MissingSkill,
   ModelTokenStat,
   PromptVar,
@@ -68,6 +68,8 @@ import type {
   Task,
   TaskArchive,
   TaskArchivePage,
+  TaskAssetApproval,
+  TaskAssetApprovalMutation,
   TaskAssetMutation,
   TaskAssetScopeMutation,
   TaskCategory,
@@ -432,9 +434,9 @@ export const api = {
   deleteAssets: (ids: number[]) =>
     http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
   // task-scoped view of the same endpoint — server-side paginated like `assets`
-  taskAssets: (taskId: string, type = "", limit = 50, offset = 0, tested = "all") =>
+  taskAssets: (taskId: string, type = "", limit = 50, offset = 0, tested = "all", approval = "all") =>
     get<{ count: number; total: number; assets: Asset[] }>(
-      `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&tested=${encodeURIComponent(tested)}&limit=${limit}&offset=${offset}`,
+      `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&tested=${encodeURIComponent(tested)}&approval_state=${encodeURIComponent(approval)}&limit=${limit}&offset=${offset}`,
     ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
   attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
     post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
@@ -444,6 +446,12 @@ export const api = {
   registerTaskAssetScopes: (taskId: string, scope: CompanyScopeRule[]) =>
     post<TaskAssetScopeMutation>(`/tasks/${taskId}/assets`, { scope }),
   detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
+  taskAssetApprovals: (taskId: string) =>
+    get<{ items: TaskAssetApproval[] }>(`/tasks/${taskId}/asset-approvals`).then((r) => r?.items ?? []),
+  approveTaskAssets: (taskId: string, assetIds: number[], reason = "") =>
+    post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/approve`, { asset_ids: assetIds, reason }),
+  revokeTaskAssets: (taskId: string, assetIds: number[], reason = "") =>
+    post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/revoke`, { asset_ids: assetIds, reason }),
   taskIntentAssets: (taskId: string) =>
     get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
 

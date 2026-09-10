@@ -258,7 +258,7 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
 	fctx = agent.WithRunInfo(fctx, agent.RunInfo{Trigger: "task_timeout"})
-	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
+	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Guard, t.Store, t.Goal, t.drainTriggers(), emit)
 	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)

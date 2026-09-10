@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,18 @@ func TestSettleDrainAndGoalMetCausesAreDistinct(t *testing.T) {
 		if code, _, _, _ := agent.AbortReason(ctx); code != tc.code {
 			t.Fatalf("code=%q, want %q", code, tc.code)
 		}
+	}
+}
+
+func TestAssetAuthorizationChangedCauseIsAuditable(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(agent.AssetAuthorizationChangedCause([]int64{7, 11}))
+	code, short, detail, ok := agent.AbortReason(ctx)
+	if !ok || code != "asset_authorization_changed" {
+		t.Fatalf("code=%q ok=%v, want asset_authorization_changed", code, ok)
+	}
+	if short == "" || !strings.Contains(detail, "7 11") {
+		t.Fatalf("short=%q detail=%q, want asset ids in auditable cause", short, detail)
 	}
 }
 

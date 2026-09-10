@@ -170,6 +170,17 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil {
 		t.Fatal(err)
 	}
+	blockedAssetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: fmt.Sprintf("archive-blocked-%d.example", task.ID), TaskID: task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = d.Assets().DeleteByIDs([]int64{assetID, blockedAssetID}) }()
+	if err := d.Assets().RevokeTaskAssets(task.ID, []int64{assetID}, "archive-test", "preserve revoked approval"); err != nil {
+		t.Fatal(err)
+	}
+	if detached, err := d.Assets().DetachAssetFromTask(task.ID, blockedAssetID); err != nil || !detached {
+		t.Fatalf("prepare archived tombstone detached=%v err=%v", detached, err)
+	}
 	store := d.Exploration(task.ExplorationID)
 	nodeID, err := store.AddNode(KindFact, map[string]any{"summary": "archived fact", "asset_ids": []int64{assetID}}, 1, "confirmed", "worker", nil)
 	if err != nil {
@@ -219,7 +230,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if rawRowCount(snapshot.Tables["llm_records"]) != 0 {
 		t.Fatal("streamed LLM records were also retained in manifest memory")
 	}
-	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
+	if snapshot.DataCounts["assets"] != 2 || snapshot.DataCounts["task_asset_blocks"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
@@ -296,6 +307,16 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if nodes < 2 || assets != 1 || usage != 1 {
 		t.Fatalf("restore incomplete nodes=%d assets=%d usage=%d", nodes, assets, usage)
+	}
+	var restoredApproval string
+	if err := d.QueryRow(`SELECT approval_state FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, task.ID, assetID).Scan(&restoredApproval); err != nil {
+		t.Fatal(err)
+	}
+	if restoredApproval != ApprovalRevoked {
+		t.Fatalf("restored approval=%q, want revoked", restoredApproval)
+	}
+	if err := d.Assets().ValidateTaskAssetsApproved(task.ID, []int64{blockedAssetID}); !errors.Is(err, ErrTaskAssetBlocked) {
+		t.Fatalf("restored tombstone validation=%v, want ErrTaskAssetBlocked", err)
 	}
 	var restoredRawRequest, restoredRawResponse string
 	if err := d.QueryRow(`SELECT COALESCE(raw_request,''),COALESCE(raw_response,'') FROM llm_records WHERE task_id=$1`, fmt.Sprint(task.ID)).

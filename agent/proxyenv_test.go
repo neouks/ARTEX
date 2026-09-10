@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -47,5 +48,22 @@ func TestProxyEnvInjectsCAWhenRecording(t *testing.T) {
 		if !has(want) {
 			t.Errorf("proxyEnv with CA missing %s: %v", want, env)
 		}
+	}
+}
+
+func TestTaskProxyAddrTagsOnlyRecordingProxy(t *testing.T) {
+	got := TaskProxyAddr("http://127.0.0.1:8788", "/data/ca.pem", 42)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.User == nil || parsed.User.Username() != "artex-task-42" {
+		t.Fatalf("tagged proxy=%q", got)
+	}
+	if password, ok := parsed.User.Password(); !ok || len(password) != 64 {
+		t.Fatalf("tagged proxy password missing: %q", got)
+	}
+	if direct := TaskProxyAddr("http://egress.example:8080", "", 42); direct != "http://egress.example:8080" {
+		t.Fatalf("global proxy unexpectedly changed: %q", direct)
 	}
 }

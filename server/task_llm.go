@@ -546,7 +546,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
-	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
+	wk.SetTrafficRecording(s.m.TrafficEnabled())
 	wk.SetShellProfile(shellProfile)
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
@@ -557,7 +558,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
-	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
 	pl.SetShellProfile(shellProfile)
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
@@ -565,7 +566,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)
-	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	main.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
 	main.SetShellProfile(shellProfile)
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏

@@ -339,6 +339,11 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "tested 必须是 all、true 或 false")
 		return
 	}
+	approval := q.Get("approval_state")
+	if approval != "" && approval != "all" && approval != "blocked" && approval != db.ApprovalApproved && approval != db.ApprovalPending && approval != db.ApprovalRevoked {
+		writeErr(w, http.StatusBadRequest, "approval_state 必须是 all、approved、pending、revoked 或 blocked")
+		return
+	}
 
 	assets := []*db.Asset{}
 	var err error
@@ -346,18 +351,25 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	// beyond the last row can return an empty page without an expensive scan.
 	total := 0
 
+	taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 	if dsl := q.Get("dsl"); dsl != "" {
 		if err := db.ValidateDSL(dsl); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		total, err = as.CountDSL(dsl, typ)
-		if err == nil && offset < total {
-			assets, err = as.QueryDSL(dsl, typ, limit, offset)
+		if taskID > 0 {
+			total, err = as.CountDSLByTaskApproval(taskID, dsl, typ, tested, approval)
+			if err == nil && offset < total {
+				assets, err = as.QueryDSLByTaskApproval(taskID, dsl, typ, tested, approval, limit, offset)
+			}
+		} else {
+			total, err = as.CountDSL(dsl, typ)
+			if err == nil && offset < total {
+				assets, err = as.QueryDSL(dsl, typ, limit, offset)
+			}
 		}
 	} else {
 		companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64)
-		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 		switch {
 		case companyID > 0:
 			total, err = as.CountByCompany(companyID, typ)
@@ -365,9 +377,9 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 				assets, err = as.QueryByCompany(companyID, typ, limit, offset)
 			}
 		case taskID > 0:
-			total, err = as.CountByTaskTested(taskID, typ, tested)
+			total, err = as.CountByTaskApproval(taskID, typ, tested, approval)
 			if err == nil && offset < total {
-				assets, err = as.QueryByTaskTested(taskID, typ, tested, limit, offset)
+				assets, err = as.QueryByTaskApproval(taskID, typ, tested, approval, limit, offset)
 			}
 		default:
 			if typ == "" {
