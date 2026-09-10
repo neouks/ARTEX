@@ -28,6 +28,26 @@ type DeferredInfo struct {
 // until a user assigns a skill/MCP to the agent in the UI.
 var ToolAugment func(ctx context.Context, agentKey string) (extra []actool.CoreTool, def DeferredInfo, cleanup func())
 
+type taskToolSetContextKey struct{}
+
+// WithTaskToolSet preserves the run's stores, authorization scope and callbacks
+// when the DB catalog injects additional domain tools not present in the base.
+func WithTaskToolSet(ctx context.Context, ts *ToolSet) context.Context {
+	return context.WithValue(ctx, taskToolSetContextKey{}, ts)
+}
+
+func TaskDomainToolsFrom(ctx context.Context) map[string]actool.CoreTool {
+	ts, _ := ctx.Value(taskToolSetContextKey{}).(*ToolSet)
+	if ts == nil || ts.ts == nil {
+		return nil
+	}
+	out := make(map[string]actool.CoreTool)
+	for _, tool := range ts.AllDomainTools() {
+		out[tool.Name()] = tool
+	}
+	return out
+}
+
 // AugmentTools returns base plus the agent's visible skill/MCP tools, the
 // DeferredInfo, and a cleanup func the caller must defer (closes MCP clients).
 // Built-in base tools are kept as-is — never filtered (内置工具留代码层，不做可见性过滤).

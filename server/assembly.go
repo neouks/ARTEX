@@ -279,7 +279,14 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// and therefore never includes ToolSet-backed domain tools. Per-task instances
 		// in the base always win: inList is built from the original incoming list so a
 		// worker's own upsert_asset is never shadowed by the server-level registry copy.
-		if len(domainReg) > 0 {
+		injectionReg := domainReg
+		if taskReg := agent.TaskDomainToolsFrom(ctx); taskReg != nil {
+			injectionReg = taskReg
+		} else if runInfo.TaskID > 0 || runInfo.ExplorationID > 0 {
+			// Never silently replace a missing task scope with global asset access.
+			injectionReg = nil
+		}
+		if len(injectionReg) > 0 {
 			inList := make(map[string]bool, len(tools))
 			for _, t := range tools {
 				inList[t.Name()] = true
@@ -288,7 +295,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				if row.Kind == "shell" || !row.Enabled || !contains(row.Agents, agentKey) || inList[row.Key] {
 					continue
 				}
-				inst, ok := domainReg[row.Key]
+				inst, ok := injectionReg[row.Key]
 				if !ok {
 					continue // not a domain tool; custom/host tools are injected via hostTools()
 				}
@@ -385,7 +392,12 @@ func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
 	serverTS.SetAssetStore(as, as.Companies())
 	reg := make(map[string]actool.CoreTool)
 	for _, t := range serverTS.AllDomainTools() {
-		reg[t.Name()] = t
+		// Only these tools explicitly support standalone/global operation. Other
+		// domain tools close over an ExplorationStore and need a per-run ToolSet.
+		switch t.Name() {
+		case "list_assets", "list_companies", "insert_assets", "report_finding", "add_company_scope":
+			reg[t.Name()] = t
+		}
 	}
 	return reg
 }

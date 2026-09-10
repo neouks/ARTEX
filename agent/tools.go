@@ -415,6 +415,9 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 		"(探索链路图)探索态势蒸馏摘要：资产计数、无接口的站点、frontier、发现、hints(人类/主 agent 的战略提示，生成意图时须纳入)。Planner 每轮已预取；仅在需要刷新时调用。",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
+			if t == nil || t.ts == nil {
+				return actool.Errorf("graph_overview 需要任务探索上下文，当前工具未绑定任务"), nil
+			}
 			return jsonResult(t.graphOverviewData())
 		})
 }
@@ -424,6 +427,9 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // the model needn't spend a turn calling the tool — every plan round starts with
 // an empty context and always needs this first).
 func (t *ToolSet) graphOverviewData() map[string]any {
+	if t == nil || t.ts == nil {
+		return map[string]any{"error": "graph_overview 需要任务探索上下文，当前工具未绑定任务"}
+	}
 	out := map[string]any{}
 	// goals summary folded in so the planner needn't call list_goals each round.
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)

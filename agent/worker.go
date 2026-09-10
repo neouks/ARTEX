@@ -388,6 +388,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 不把它的 schema 重复发送给每一次 completion。
 	base = append(base, workerLocalTools(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, AgentKey: "worker"})
+	ctx = WithTaskToolSet(ctx, tsx)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
