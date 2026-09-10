@@ -5,12 +5,33 @@ import (
 	"testing"
 )
 
+func TestAllAgentPromptsRequireChinese(t *testing.T) {
+	previous := PromptOverride
+	t.Cleanup(func() { PromptOverride = previous })
+	defaults := BuiltinPromptSeeds()
+	defaults["reporter"] = ReporterDefaultPrompt
+	defaults["custom-agent"] = DefaultAssistantPrompt
+	for _, override := range []string{"", "Reply in English only.", "{{.UnknownField}}"} {
+		PromptOverride = func(string) (string, bool) { return override, override != "" }
+		for key, body := range defaults {
+			out := renderSystem(key, body, PlannerVars{Goal: "测试目标"})
+			if !strings.HasSuffix(out, chineseLanguagePrompt) || strings.Count(out, chineseLanguagePrompt) != 1 {
+				t.Fatalf("%s missing or duplicate language rule with override %q", key, override)
+			}
+		}
+	}
+	// Even the raw-default fallback must retain the policy.
+	if got := renderSystem("custom-agent", "{{.UnknownField}}", struct{}{}); got != withChineseLanguage("{{.UnknownField}}") {
+		t.Fatalf("raw fallback lost language rule: %q", got)
+	}
+}
+
 func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	t.Cleanup(func() { PromptOverride = nil })
 
 	// no override → built-in default
 	PromptOverride = nil
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "g"}); got != "DEFAULT" {
+	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "g"}); got != withChineseLanguage("DEFAULT") {
 		t.Fatalf("no override should give default, got %q", got)
 	}
 
@@ -21,13 +42,13 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		}
 		return "", false
 	}
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "拿下X", Scope: "*.x.com"}); got != "目标:拿下X 范围:*.x.com" {
+	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "拿下X", Scope: "*.x.com"}); got != withChineseLanguage("目标:拿下X 范围:*.x.com") {
 		t.Fatalf("override render: %q", got)
 	}
 
 	// override referencing a non-catalog var → execution error → fallback to default
 	PromptOverride = func(k string) (string, bool) { return "{{.NotInCatalog}}", true }
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "x"}); got != "DEFAULT" {
+	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "x"}); got != withChineseLanguage("DEFAULT") {
 		t.Fatalf("bad var should fall back to default, got %q", got)
 	}
 
