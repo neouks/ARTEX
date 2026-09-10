@@ -87,6 +87,7 @@ func shellPrompt(profile ShellProfile) string {
 		}
 	} else if mode == "powershell" || mode == "pwsh" {
 		syntax += " Use PowerShell pipelines, variables, here-strings, Get-ChildItem/Get-Content, and 2>$null; POSIX paths, utilities, heredocs, and single-quote escaping are not portable."
+		syntax += " Use curl.exe for curl flags (-s/-i/-X/-H); never rely on the Windows PowerShell curl alias (Invoke-WebRequest). Prefer | Select-Object -First 100 to head. For Python containing regex, quotes, or multiple lines, use Write to save a UTF-8 .py file in the working directory and run python ./script.py; do not embed it in python -c with Bash-style backslash-escaped quotes. PowerShell uses the backtick, not backslash, for escaping double quotes. Quote paths with spaces and use Set-Location -LiteralPath for directory changes."
 	} else if mode == "cmd" {
 		syntax += " Use cmd.exe operators (&, &&, ||), dir/type, 2>nul, and %VAR% expansion; PowerShell/POSIX syntax is not portable."
 	}
@@ -198,8 +199,8 @@ func runBashSync(ctx context.Context, tc *ToolContext, command string, timeout t
 	if tc != nil {
 		workDir = tc.WorkingDir
 	}
-	shell, flags := shellCmd(shellProfile(tc), workDir)
-	cmd := exec.CommandContext(cctx, shell, append(flags, command)...)
+	shell, args := shellCommand(shellProfile(tc), workDir, command)
+	cmd := exec.CommandContext(cctx, shell, args...)
 	if tc != nil {
 		cmd.Dir = tc.WorkingDir
 		if env := withEnv(tc.Env); env != nil {

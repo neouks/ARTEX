@@ -239,8 +239,8 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Task, error) {
 	if !profile.valid() {
 		profile = m.profile
 	}
-	shell, flags := shellCmd(profile, spec.WorkingDir)
-	cmd := exec.CommandContext(m.rootCtx, shell, append(flags, spec.Command)...)
+	shell, args := shellCommand(profile, spec.WorkingDir, spec.Command)
+	cmd := exec.CommandContext(m.rootCtx, shell, args...)
 	cmd.Dir = spec.WorkingDir
 	if env := withEnv(spec.Env); env != nil {
 		cmd.Env = env
