@@ -295,6 +295,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 func restoreExplorationStub(tx *sql.Tx, raw json.RawMessage, expID int64) error {
 	_, err := tx.Exec(`UPDATE explorations current SET
  description=archived.description,goal=archived.goal,status=archived.status,
+ round_no=COALESCE(archived.round_no,0),
  created_at=archived.created_at,updated_at=archived.updated_at
 FROM json_populate_record(NULL::explorations,$2::json) archived
 WHERE current.id=$1 AND archived.id=$1`, expID, string(firstArchiveRow(raw)))

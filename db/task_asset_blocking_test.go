@@ -213,11 +213,26 @@ func TestManualAssetBlockArchiveCompatibility(t *testing.T) {
 	if _, err := d.ClaimTaskArchiveJob(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	store := d.Exploration(task.ExplorationID)
+	member, err := store.AddNode(KindFact, map[string]any{"summary": "archived cold member"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.AddDigest(map[string]any{"body": "archived cold body"}, []int64{member})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE explorations SET round_no=42 WHERE id=$1`, task.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := d.SnapshotTaskArchive(task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/manual-block-test.tar.zst", "test", 100, 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE explorations SET round_no=0 WHERE id=$1`, task.ExplorationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.QueueTaskArchiveRestore(archive.ID); err != nil {
@@ -228,6 +243,12 @@ func TestManualAssetBlockArchiveCompatibility(t *testing.T) {
 	}
 	if _, err := d.RestoreTaskArchive(archive.ID, snapshot, 0); err != nil {
 		t.Fatal(err)
+	}
+	if round, err := store.RoundNo(); err != nil || round != 42 {
+		t.Fatalf("restored round=%d err=%v", round, err)
+	}
+	if members, err := store.DigestMembers(digest); err != nil || len(members) != 1 || members[0] != member {
+		t.Fatalf("restored digest members=%v err=%v", members, err)
 	}
 	var state, kind string
 	if err := d.QueryRow(`SELECT l.approval_state,b.block_kind FROM task_asset_links l JOIN task_asset_blocks b

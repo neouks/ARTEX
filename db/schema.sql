@@ -161,6 +161,10 @@ CREATE TABLE IF NOT EXISTS explorations (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- cold-digest (§2.3): per-task planner round counter — bumped once each time the
+-- planner wakes and processes a round. Drives the ≥R cold-node debounce (measured in
+-- this exploration's own rounds, not global node ids or wall-clock).
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS round_no BIGINT NOT NULL DEFAULT 0;
 DROP TRIGGER IF EXISTS trg_exp_upd ON explorations;
 CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -178,24 +182,46 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
-        (kind='hint'    AND state IN ('active','consumed'))
+        (kind='hint'    AND state IN ('active','consumed')) OR
+        (kind='digest'  AND state IN ('active','superseded'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+-- cold-digest (§2.3/§5.3): content_version bumps on any change that could alter a
+-- digest body (summary/state/confidence); cold_since_round stamps the planner round
+-- a node most recently went from "has a live downstream branch" to none (NULL = hot).
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
+-- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exploration_nodes'::regclass
+          AND conname='ck_node_kind'
+          AND pg_get_constraintdef(oid) NOT LIKE '%digest%'
+    ) THEN
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
+    END IF;
+END $$;
+-- ck_node_state: recreate when it lacks the 'paused' (older) or 'digest' (this rev) branches.
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='exploration_nodes'::regclass
           AND conname='ck_node_state'
-          AND pg_get_constraintdef(oid) NOT LIKE '%paused%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%superseded%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
@@ -204,7 +230,8 @@ BEGIN
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
-            (kind='hint'    AND state IN ('active','consumed'))
+            (kind='hint'    AND state IN ('active','consumed')) OR
+            (kind='digest'  AND state IN ('active','superseded'))
         );
     END IF;
 END $$;
@@ -219,13 +246,29 @@ CREATE TABLE IF NOT EXISTS exploration_edges (
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
     src_id         BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
     dst_id         BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
-    rel            TEXT NOT NULL CHECK (rel IN ('spawns','derived_from','yields','proves')),
+    rel            TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (exploration_id, src_id, rel, dst_id),
-    CONSTRAINT ck_edge_noself CHECK (src_id <> dst_id)
+    CONSTRAINT ck_edge_noself CHECK (src_id <> dst_id),
+    CONSTRAINT ck_edge_rel CHECK (rel IN ('spawns','derived_from','yields','proves','covers'))
 );
 CREATE INDEX IF NOT EXISTS idx_expedges_src ON exploration_edges(src_id, rel);
 CREATE INDEX IF NOT EXISTS idx_expedges_dst ON exploration_edges(dst_id, rel);
+-- cold-digest (§1): the 'covers' relation (digest→member) postdates shipped installs,
+-- whose rel CHECK is an inline auto-named constraint. Find and recreate it as ck_edge_rel.
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname FROM pg_constraint
+     WHERE conrelid='exploration_edges'::regclass AND contype='c'
+       AND pg_get_constraintdef(oid) LIKE '%rel%'
+       AND pg_get_constraintdef(oid) NOT LIKE '%covers%';
+    IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE exploration_edges DROP CONSTRAINT '||quote_ident(cname);
+        ALTER TABLE exploration_edges ADD CONSTRAINT ck_edge_rel
+            CHECK (rel IN ('spawns','derived_from','yields','proves','covers'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS exploration_anchors (
     node_id   BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
@@ -326,6 +369,14 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- 自定义会话头：非空时每次请求带一个该名字的 HTTP 头，头值=当前运行的 session id
     -- (chat 会话/worker 意图)。用于某些按 session-id 头做提示缓存/粘性路由的网关。''=不发送。
     session_header_key TEXT NOT NULL DEFAULT '',
+    -- 重试覆盖：次数 0=用全局默认/-1=关闭/>0=该值；间隔 0=用默认指数退避/>0=固定毫秒。
+    -- 三组分别对应建连重试、空响应重试、同 provider 安全窗口重试，详见下方 ALTER 处注释。
+    retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,
+    retry_connect_interval_ms INTEGER NOT NULL DEFAULT 0,
+    retry_empty_attempts      INTEGER NOT NULL DEFAULT 0,
+    retry_empty_interval_ms   INTEGER NOT NULL DEFAULT 0,
+    retry_stream_attempts     INTEGER NOT NULL DEFAULT 0,
+    retry_stream_interval_ms  INTEGER NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -357,6 +408,24 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+
+-- 单配置的重试覆盖（见 docs/LLM重试设计.md）。三组各自一对「次数 + 固定间隔」，
+-- 语义统一：次数 0=沿用全局默认、-1=关闭该层重试、>0=用该值；间隔 0=沿用该层的
+-- 默认指数退避、>0=改用这个固定毫秒数。全部默认 0，所以旧库/旧配置行为不变。
+--   connect = 建连重试（SDK doStream：连接重置/超时/429/5xx，流开始前）
+--   empty   = 空响应重试（SDK：完成但没有任何 content block，仅 openai 格式）
+--   stream  = 同 provider 安全窗口重试（本项目 task_llm：未交付输出前的断流重放）
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_connect_attempts    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_connect_interval_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_empty_attempts      INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_empty_interval_ms   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_stream_attempts     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS retry_stream_interval_ms  INTEGER NOT NULL DEFAULT 0;
+-- 同 format：先删再建，保证每次启动幂等。次数下限 -1(关闭)，间隔不能为负。
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_retry_check;
+ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_retry_check CHECK (
+    retry_connect_attempts >= -1 AND retry_empty_attempts >= -1 AND retry_stream_attempts >= -1
+    AND retry_connect_interval_ms >= 0 AND retry_empty_interval_ms >= 0 AND retry_stream_interval_ms >= 0);
 
 -- 思考开关字段 thinking_type，从旧的单一 reasoning_effort 语义一次性拆分而来。
 -- schema.sql 每次启动都执行，故迁移必须只跑一次：仅当该列尚不存在时才回填，

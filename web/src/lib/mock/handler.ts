@@ -17,6 +17,7 @@ import type {
   CompanyScopeRule,
   Conversation,
   IntentAsset,
+  LLMRetryPolicy,
   MCPServer,
   ScopeRow,
   Task,
@@ -40,6 +41,13 @@ const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 const mockTasks = structuredClone(D.tasks);
 const mockFindings = structuredClone(D.findings);
 const mockLLMRecords = structuredClone(D.llmRecords);
+let mockRetryPolicy: LLMRetryPolicy = {
+  connect: { attempts: 0, interval_ms: 0 },
+  empty: { attempts: 0, interval_ms: 0 },
+  stream: { attempts: 0, interval_ms: 0 },
+  breaker: { attempts: 0, interval_ms: 0 },
+  intent: { attempts: 0, interval_ms: 0 },
+};
 const mockTaskTemplates = structuredClone(D.taskTemplates);
 const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
@@ -2403,6 +2411,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/llm" && m === "POST") return { ok: true };
   if (path === "/llm/test")
     return { ok: true, latency_ms: 128, model: String(b.model ?? "claude-opus-4-8"), reply: "OK" };
+  if (path === "/llm/retry-policy") {
+    if (m === "POST") {
+      const next = structuredClone(mockRetryPolicy);
+      for (const key of Object.keys(next) as (keyof LLMRetryPolicy)[]) {
+        const rule = (b[key] ?? {}) as { attempts?: number; interval_ms?: number };
+        next[key] = {
+          attempts: Math.max(-1, Math.min(20, Math.trunc(Number(rule.attempts) || 0))),
+          interval_ms: Math.max(0, Math.min(3_600_000, Math.trunc(Number(rule.interval_ms) || 0))),
+        };
+      }
+      mockRetryPolicy = next;
+    }
+    return structuredClone(mockRetryPolicy);
+  }
   if (path === "/llm/profiles" && m === "GET") return { profiles: D.llmProfiles };
   if (path === "/llm/profiles" && m === "POST") return { id: Number(b.id) || 3 };
   if (path === "/llm/profiles/active") return { ok: true };
