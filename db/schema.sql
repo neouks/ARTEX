@@ -571,7 +571,7 @@ UPDATE task_asset_links SET approval_state='approved' WHERE approval_state IS NU
 ALTER TABLE task_asset_links ALTER COLUMN approval_state SET DEFAULT 'approved';
 ALTER TABLE task_asset_links ALTER COLUMN approval_state SET NOT NULL;
 ALTER TABLE task_asset_links DROP CONSTRAINT IF EXISTS task_asset_links_approval_state_check;
-ALTER TABLE task_asset_links ADD CONSTRAINT task_asset_links_approval_state_check CHECK (approval_state IN ('approved','pending','revoked'));
+ALTER TABLE task_asset_links ADD CONSTRAINT task_asset_links_approval_state_check CHECK (approval_state IN ('approved','pending','revoked','blocked'));
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approved_by TEXT;
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS approval_reason TEXT;
@@ -598,6 +598,8 @@ CREATE TABLE IF NOT EXISTS task_asset_blocks (
     blocked_by TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, asset_key)
 );
+ALTER TABLE task_asset_blocks ADD COLUMN IF NOT EXISTS block_kind TEXT NOT NULL DEFAULT 'deleted'
+    CHECK (block_kind IN ('manual','deleted'));
 CREATE INDEX IF NOT EXISTS idx_task_asset_blocks_host ON task_asset_blocks(task_id, host_key);
 CREATE INDEX IF NOT EXISTS idx_task_asset_blocks_asset ON task_asset_blocks(asset_id);
 
@@ -694,7 +696,7 @@ SELECT CASE
     WHEN task_asset_blocked(p_task_id,p_asset_id) THEN 'blocked'
     ELSE COALESCE((SELECT CASE
         WHEN (t.a).type NOT IN ('service','endpoint') THEN t.approval_state
-        WHEN EXISTS (SELECT 1 FROM parent_states WHERE blocked) THEN 'blocked'
+        WHEN EXISTS (SELECT 1 FROM parent_states WHERE blocked OR approval_state='blocked') THEN 'blocked'
         WHEN EXISTS (SELECT 1 FROM parent_states WHERE approval_state='revoked') THEN 'revoked'
         WHEN NOT EXISTS (SELECT 1 FROM parent_states)
           OR EXISTS (SELECT 1 FROM parent_states WHERE approval_state='pending') THEN 'pending'

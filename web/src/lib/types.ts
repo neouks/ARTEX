@@ -259,12 +259,13 @@ export interface Asset {
   tested?: boolean;
   tested_at?: string;
   tested_by?: string;
-  approval_state?: "approved" | "pending" | "revoked";
+  approval_state?: "approved" | "pending" | "revoked" | "blocked";
   approved_at?: string;
   approved_by?: string;
   approval_reason?: string;
   blocked?: boolean;
   block_direct?: boolean;
+  block_kind?: "manual" | "deleted";
   blocked_at?: string;
   block_reason?: string;
 }
@@ -280,7 +281,7 @@ export interface TaskAssetApproval {
   inherited: boolean;
   read_only: boolean;
   created_at: string;
-  approval_state: "approved" | "pending" | "revoked";
+  approval_state: "approved" | "pending" | "revoked" | "blocked";
   approved_at?: string;
   approved_by?: string;
   approval_reason?: string;
@@ -288,12 +289,14 @@ export interface TaskAssetApproval {
   blocked_at?: string;
   block_reason?: string;
   blocked_by?: string;
+  block_kind?: "manual" | "deleted";
+  block_direct?: boolean;
 }
 
 export interface TaskAssetApprovalMutation {
   ok: boolean;
   asset_ids: number[];
-  approval_state: "approved" | "revoked";
+  approval_state: "approved" | "revoked" | "blocked";
   items: TaskAssetApproval[];
 }
 

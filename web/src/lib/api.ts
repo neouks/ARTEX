@@ -452,6 +452,8 @@ export const api = {
     post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/approve`, { asset_ids: assetIds, reason }),
   revokeTaskAssets: (taskId: string, assetIds: number[], reason = "") =>
     post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/revoke`, { asset_ids: assetIds, reason }),
+  blockTaskAssets: (taskId: string, assetIds: number[], reason = "") =>
+    post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/block`, { asset_ids: assetIds, reason }),
   taskIntentAssets: (taskId: string) =>
     get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
 

@@ -411,6 +411,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const [removeTarget, setRemoveTarget] = React.useState<Asset | null>(null);
   const [removing, setRemoving] = React.useState(false);
   const [approvalTarget, setApprovalTarget] = React.useState<Asset | null>(null);
+  const approvalConfirmLabel = approvalTarget?.blocked ? "批准并恢复测试资格" : "确认撤回";
   const [changingApproval, setChangingApproval] = React.useState(false);
 
   React.useEffect(() => {
@@ -475,7 +476,13 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const removeButton = (asset: Asset) => {
     const derived = asset.type === "service" || asset.type === "endpoint";
     let approvalAction: React.ReactNode = null;
-    if (asset.blocked && asset.block_direct) {
+    if (asset.blocked && asset.block_direct && asset.block_kind === "manual" && !asset.task_read_only && !derived) {
+      approvalAction = (
+        <Button size="xs" variant="outline" disabled={changingApproval} onClick={() => setApprovalTarget(asset)}>
+          批准
+        </Button>
+      );
+    } else if (asset.blocked && asset.block_direct) {
       approvalAction = (
         <Button size="xs" variant="outline" disabled={changingApproval} onClick={() => void restoreAsset(asset)}>
           {changingApproval ? <Spinner data-icon="inline-start" /> : null}
@@ -505,7 +512,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     return (
       <div className="flex items-center gap-1">
         {approvalAction}
-        {!asset.blocked || !asset.block_direct ? (
+        {!asset.blocked || !asset.block_direct || asset.block_kind === "manual" ? (
           <Button
             variant="ghost"
             size="icon-sm"
@@ -828,24 +835,30 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>撤回资产测试授权？</AlertDialogTitle>
+            <AlertDialogTitle>
+              {approvalTarget?.blocked ? "批准并解除主动封禁？" : "撤回资产测试授权？"}
+            </AlertDialogTitle>
             <AlertDialogDescription className="[overflow-wrap:anywhere]">
-              {approvalTarget ? `将撤回“${assetLabel(approvalTarget)}”的测试授权。` : ""}
-              当前任务中命中该资产的运行中 Worker 会立即停止，后续测试也会被阻止。
+              {approvalTarget?.blocked
+                ? `将批准“${assetLabel(approvalTarget)}”并解除自身主动封禁，恢复测试资格；父资产封禁不会解除。`
+                : `将撤回“${approvalTarget ? assetLabel(approvalTarget) : ""}”的测试授权。当前任务中命中该资产的运行中 Worker 会立即停止，后续测试也会被阻止。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={changingApproval}>取消</AlertDialogCancel>
             <AlertDialogAction
-              variant="destructive"
+              variant={approvalTarget?.blocked ? "default" : "destructive"}
               disabled={changingApproval || !approvalTarget}
               onClick={(event) => {
                 event.preventDefault();
-                if (approvalTarget) void changeApproval(approvalTarget, false).then(() => setApprovalTarget(null));
+                if (approvalTarget)
+                  void changeApproval(approvalTarget, Boolean(approvalTarget.blocked)).then(() =>
+                    setApprovalTarget(null),
+                  );
               }}
             >
               {changingApproval ? <Spinner data-icon="inline-start" /> : null}
-              {changingApproval ? "撤回中" : "确认撤回"}
+              {changingApproval ? "处理中" : approvalConfirmLabel}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

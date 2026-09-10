@@ -765,6 +765,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
 	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-approvals", s.listTaskAssetApprovals)
+	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/block", func(w http.ResponseWriter, r *http.Request) { s.mutateTaskAssetApprovals(w, r, "block") })
 	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/approve", func(w http.ResponseWriter, r *http.Request) { s.updateTaskAssetApprovals(w, r, true) })
 	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/revoke", func(w http.ResponseWriter, r *http.Request) { s.updateTaskAssetApprovals(w, r, false) })
 

@@ -43,6 +43,14 @@ func (s *Server) listTaskAssetApprovals(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) updateTaskAssetApprovals(w http.ResponseWriter, r *http.Request, approve bool) {
+	operation := "revoke"
+	if approve {
+		operation = "approve"
+	}
+	s.mutateTaskAssetApprovals(w, r, operation)
+}
+
+func (s *Server) mutateTaskAssetApprovals(w http.ResponseWriter, r *http.Request, operation string) {
 	task, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
 		writeErr(w, http.StatusNotFound, "task not found")
@@ -60,8 +68,10 @@ func (s *Server) updateTaskAssetApprovals(w http.ResponseWriter, r *http.Request
 	id, _ := parseTaskID(task.ID)
 	actor := taskAssetActor(r)
 	var err error
-	if approve {
+	if operation == "approve" {
 		err = s.m.Assets().ApproveTaskAssets(id, req.AssetIDs, actor, req.Reason)
+	} else if operation == "block" {
+		err = s.m.Assets().BlockTaskAssets(id, req.AssetIDs, actor, req.Reason)
 	} else {
 		err = s.m.Assets().RevokeTaskAssets(id, req.AssetIDs, actor, req.Reason)
 	}
@@ -69,7 +79,7 @@ func (s *Server) updateTaskAssetApprovals(w http.ResponseWriter, r *http.Request
 		writeTaskAssetError(w, err)
 		return
 	}
-	if !approve {
+	if operation != "approve" {
 		s.engine.CancelWorkersForAssets(id, req.AssetIDs)
 	}
 	task.Notify()
@@ -91,7 +101,7 @@ func (s *Server) updateTaskAssetApprovals(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
 		"asset_ids":      req.AssetIDs,
-		"approval_state": map[bool]string{true: db.ApprovalApproved, false: db.ApprovalRevoked}[approve],
+		"approval_state": map[string]string{"approve": db.ApprovalApproved, "revoke": db.ApprovalRevoked, "block": db.ApprovalBlocked}[operation],
 		"items":          items,
 	})
 }

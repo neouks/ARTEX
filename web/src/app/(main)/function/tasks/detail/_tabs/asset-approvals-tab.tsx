@@ -37,18 +37,26 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   app: "应用",
 };
 
+function canSelectApproval(item: TaskAssetApproval) {
+  return (
+    !item.read_only &&
+    item.asset_id > 0 &&
+    (!item.blocked || (item.block_kind === "manual" && item.block_direct === true))
+  );
+}
+
 function approvalLabel(item: TaskAssetApproval) {
   if (item.blocked) return "已封禁";
-  if (item.approval_state === "pending") return "待审批";
+  if (item.approval_state === "pending") return "未审批";
   if (item.approval_state === "revoked") return "已撤回";
-  return "已批准";
+  return "已审批";
 }
 
 function ApprovalBadge({ item }: { item: TaskAssetApproval }) {
   if (item.blocked) return <Badge variant="destructive">已封禁</Badge>;
-  if (item.approval_state === "pending") return <Badge variant="outline">待审批</Badge>;
+  if (item.approval_state === "pending") return <Badge variant="outline">未审批</Badge>;
   if (item.approval_state === "revoked") return <Badge variant="secondary">已撤回</Badge>;
-  return <Badge>已批准</Badge>;
+  return <Badge>已审批</Badge>;
 }
 
 function formatTime(value?: string) {
@@ -65,6 +73,8 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
   const [error, setError] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [revokeIDs, setRevokeIDs] = React.useState<number[]>([]);
+  const [blockIDs, setBlockIDs] = React.useState<number[]>([]);
+  const [approveIDs, setApproveIDs] = React.useState<number[]>([]);
   const [excludeItem, setExcludeItem] = React.useState<TaskAssetApproval | null>(null);
 
   const load = React.useCallback(async () => {
@@ -74,9 +84,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
       );
       setItems(next);
       setError("");
-      const validIDs = new Set(
-        next.filter((item) => !item.blocked && !item.read_only && item.asset_id > 0).map((item) => item.asset_id),
-      );
+      const validIDs = new Set(next.filter((item) => canSelectApproval(item)).map((item) => item.asset_id));
       setSelected((current) => new Set([...current].filter((id) => validIDs.has(id))));
     } catch (reason) {
       setError(String((reason as Error)?.message ?? reason));
@@ -107,9 +115,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
       }),
     [filter, items],
   );
-  const selectableIDs = visible
-    .filter((item) => !item.blocked && !item.read_only && item.asset_id > 0)
-    .map((item) => item.asset_id);
+  const selectableIDs = visible.filter((item) => canSelectApproval(item)).map((item) => item.asset_id);
   const selectedVisible = selectableIDs.filter((id) => selected.has(id));
   const allSelected = selectableIDs.length > 0 && selectedVisible.length === selectableIDs.length;
   let selectionState: boolean | "indeterminate" = false;
@@ -121,15 +127,22 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
     void load();
   }, [load]);
 
-  const mutate = async (ids: number[], approve: boolean) => {
+  const mutate = async (ids: number[], operation: "approve" | "revoke" | "block") => {
     if (ids.length === 0) return;
     setSaving(true);
     try {
-      if (approve) await api.approveTaskAssets(taskId, ids, "用户在资产审批面板批准");
+      if (operation === "approve") await api.approveTaskAssets(taskId, ids, "用户在资产审批面板批准");
+      else if (operation === "block") await api.blockTaskAssets(taskId, ids, "用户封禁测试授权");
       else await api.revokeTaskAssets(taskId, ids, "用户在资产审批面板撤回批准");
-      toast.success(approve ? `已批准 ${ids.length} 项资产` : `已撤回 ${ids.length} 项资产，相关 Worker 已停止`);
+      toast.success(
+        operation === "approve"
+          ? `已批准 ${ids.length} 项资产`
+          : `已${operation === "block" ? "封禁" : "撤回"} ${ids.length} 项资产，相关 Worker 已停止`,
+      );
       setSelected(new Set());
       setRevokeIDs([]);
+      setBlockIDs([]);
+      setApproveIDs([]);
       refresh();
     } catch (reason) {
       toast.error(`审批操作失败：${String((reason as Error)?.message ?? reason)}`);
@@ -137,6 +150,17 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
       setSaving(false);
     }
   };
+
+  const requestApproval = (ids: number[]) => {
+    if (items.some((item) => ids.includes(item.asset_id) && item.blocked)) setApproveIDs(ids);
+    else void mutate(ids, "approve");
+  };
+  const selectedForRevoke = visible
+    .filter((item) => selectedVisible.includes(item.asset_id) && !item.blocked && item.approval_state === "approved")
+    .map((item) => item.asset_id);
+  const selectedForBlock = visible
+    .filter((item) => selectedVisible.includes(item.asset_id) && !item.blocked)
+    .map((item) => item.asset_id);
 
   const excludeInherited = async (item: TaskAssetApproval) => {
     setSaving(true);
@@ -164,6 +188,20 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
   let confirmLabel = "确认撤回";
   if (saving) confirmLabel = "处理中";
   else if (excludeItem) confirmLabel = "确认排除";
+  else if (blockIDs.length) confirmLabel = "确认封禁";
+  else if (approveIDs.length) confirmLabel = "批准并恢复测试资格";
+  let confirmTitle = "撤回资产测试授权？";
+  let confirmDescription = `将撤回 ${revokeIDs.length} 项资产。系统会立即阻止新的 Planner/Worker 操作，并停止当前任务中命中这些资产的运行中 Worker。`;
+  if (excludeItem) {
+    confirmTitle = "从当前任务排除来源资产？";
+    confirmDescription = `系统会为“${excludeItem.name}”建立当前任务墓碑，并立即停止相关 Worker；来源任务及其他任务不受影响。`;
+  } else if (blockIDs.length) {
+    confirmTitle = "封禁资产测试授权？";
+    confirmDescription = `将封禁 ${blockIDs.length} 项资产并立即停止相关 Worker。资产及测试历史会保留，可在之后批准恢复。`;
+  } else if (approveIDs.length) {
+    confirmTitle = "批准并解除主动封禁？";
+    confirmDescription = `将批准 ${approveIDs.length} 项资产并解除其自身主动封禁，恢复测试资格；父资产封禁不会被解除。`;
+  }
 
   let body: React.ReactNode;
   if (!loaded) {
@@ -207,14 +245,13 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
             <TableHead>状态</TableHead>
             <TableHead>发现来源</TableHead>
             <TableHead>登记 / 审批时间</TableHead>
-            <TableHead>操作人</TableHead>
             <TableHead className="text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {visible.map((item, index) => {
             const rowKey = `${item.source_task_id}-${item.asset_id}-${item.name}-${item.blocked_at ?? index}`;
-            const selectable = !item.blocked && !item.read_only && item.asset_id > 0;
+            const selectable = canSelectApproval(item);
             let action: React.ReactNode;
             if (item.inherited && !item.blocked) {
               action = (
@@ -234,7 +271,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
               );
             } else {
               action = (
-                <Button size="xs" onClick={() => void mutate([item.asset_id], true)} disabled={saving}>
+                <Button size="xs" onClick={() => requestApproval([item.asset_id])} disabled={saving}>
                   批准
                 </Button>
               );
@@ -282,8 +319,21 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                     <span className="text-muted-foreground">{formatTime(item.blocked_at ?? item.approved_at)}</span>
                   </div>
                 </TableCell>
-                <TableCell className="text-xs">{item.blocked_by || item.approved_by || "—"}</TableCell>
-                <TableCell className="text-right">{action}</TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    {action}
+                    {selectable && !item.blocked ? (
+                      <Button
+                        size="xs"
+                        variant="destructive"
+                        disabled={saving}
+                        onClick={() => setBlockIDs([item.asset_id])}
+                      >
+                        封禁
+                      </Button>
+                    ) : null}
+                  </div>
+                </TableCell>
               </TableRow>
             );
           })}
@@ -302,15 +352,21 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Select value={filter} onValueChange={(value) => setFilter(value as ApprovalFilter)}>
-            <SelectTrigger size="sm" className="w-36">
+          <Select
+            value={filter}
+            onValueChange={(value) => {
+              setFilter(value as ApprovalFilter);
+              setSelected(new Set());
+            }}
+          >
+            <SelectTrigger size="sm" className="w-36" aria-label="按审批状态筛选资产">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
                 <SelectItem value="all">全部 {items.length}</SelectItem>
-                <SelectItem value="pending">待审批 {counts.pending}</SelectItem>
-                <SelectItem value="approved">已批准 {counts.approved}</SelectItem>
+                <SelectItem value="approved">已审批 {counts.approved}</SelectItem>
+                <SelectItem value="pending">未审批 {counts.pending}</SelectItem>
                 <SelectItem value="revoked">已撤回 {counts.revoked}</SelectItem>
                 <SelectItem value="blocked">已封禁 {counts.blocked}</SelectItem>
               </SelectGroup>
@@ -330,16 +386,30 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
       <Separator />
 
-      {selected.size > 0 ? (
+      {selectedVisible.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground text-xs">已选 {selected.size} 项</span>
-          <Button size="sm" onClick={() => void mutate([...selected], true)} disabled={saving}>
+          <span className="text-muted-foreground text-xs">已选 {selectedVisible.length} 项</span>
+          <Button size="sm" onClick={() => requestApproval(selectedVisible)} disabled={saving}>
             {saving ? <Spinner data-icon="inline-start" /> : <ShieldCheckIcon data-icon="inline-start" />}
             批准选中
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRevokeIDs([...selected])} disabled={saving}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setRevokeIDs(selectedForRevoke)}
+            disabled={saving || selectedForRevoke.length === 0}
+          >
             <ShieldXIcon data-icon="inline-start" />
             撤回选中
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => setBlockIDs(selectedForBlock)}
+            disabled={saving || selectedForBlock.length === 0}
+          >
+            <ShieldXIcon data-icon="inline-start" />
+            封禁选中
           </Button>
         </div>
       ) : null}
@@ -355,32 +425,32 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
       {body}
 
       <AlertDialog
-        open={revokeIDs.length > 0 || excludeItem !== null}
+        open={revokeIDs.length > 0 || blockIDs.length > 0 || approveIDs.length > 0 || excludeItem !== null}
         onOpenChange={(open) => {
           if (!open && !saving) {
             setRevokeIDs([]);
+            setBlockIDs([]);
+            setApproveIDs([]);
             setExcludeItem(null);
           }
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{excludeItem ? "从当前任务排除来源资产？" : "撤回资产测试授权？"}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {excludeItem
-                ? `系统会为“${excludeItem.name}”建立当前任务墓碑，并立即停止相关 Worker；来源任务及其他任务不受影响。`
-                : `将撤回 ${revokeIDs.length} 项资产。系统会立即阻止新的 Planner/Worker 操作，并停止当前任务中命中这些资产的运行中 Worker。`}
-            </AlertDialogDescription>
+            <AlertDialogTitle>{confirmTitle}</AlertDialogTitle>
+            <AlertDialogDescription>{confirmDescription}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={saving}>取消</AlertDialogCancel>
             <AlertDialogAction
-              variant="destructive"
+              variant={approveIDs.length ? "default" : "destructive"}
               disabled={saving}
               onClick={(event) => {
                 event.preventDefault();
                 if (excludeItem) void excludeInherited(excludeItem);
-                else void mutate(revokeIDs, false);
+                else if (blockIDs.length) void mutate(blockIDs, "block");
+                else if (approveIDs.length) void mutate(approveIDs, "approve");
+                else void mutate(revokeIDs, "revoke");
               }}
             >
               {saving ? <Spinner data-icon="inline-start" /> : <ShieldXIcon data-icon="inline-start" />}

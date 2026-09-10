@@ -73,6 +73,7 @@ type Asset struct {
 	ApprovalReason string     `json:"approval_reason,omitempty"`
 	Blocked        bool       `json:"blocked,omitempty"`
 	BlockDirect    bool       `json:"block_direct,omitempty"`
+	BlockKind      string     `json:"block_kind,omitempty"`
 	BlockedAt      *time.Time `json:"blocked_at,omitempty"`
 	BlockReason    string     `json:"block_reason,omitempty"`
 }

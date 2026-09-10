@@ -364,6 +364,21 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	if rawRowCount(raw) == 0 {
 		return nil
 	}
+	if table == "task_asset_blocks" {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row["block_kind"] == nil || row["block_kind"] == "" {
+				row["block_kind"] = "deleted"
+			}
+		}
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+	}
 	if table == "task_asset_links" {
 		// v1 archives predate task-local test metadata. json_populate_recordset
 		// would otherwise materialize missing NOT NULL columns as NULL and abort

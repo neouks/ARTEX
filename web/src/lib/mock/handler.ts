@@ -80,6 +80,7 @@ type MockTaskAssetSource = Pick<
 >;
 const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
 type MockTaskAssetBlock = {
+  block_kind?: "manual" | "deleted";
   blocked_at: string;
   reason: string;
   blocked_by: string;
@@ -402,9 +403,10 @@ function mockTaskAssetAuthorization(taskID: string, asset: Asset): Partial<Asset
   const blockView = mockTaskAssetBlockView(taskID, asset);
   if (blockView) {
     return {
-      approval_state: "revoked",
+      approval_state: "blocked",
       blocked: true,
       block_direct: blockView.direct,
+      block_kind: blockView.block.block_kind ?? "deleted",
       blocked_at: blockView.block.blocked_at,
       block_reason: blockView.block.reason,
     };
@@ -538,6 +540,8 @@ function mockTaskAssetApprovals(taskID: string): TaskAssetApproval[] {
         blocked: Boolean(view.blocked),
         blocked_at: view.blocked_at,
         block_reason: view.block_reason,
+        block_kind: view.block_kind,
+        block_direct: view.block_direct,
       } satisfies TaskAssetApproval;
     });
   for (const [key, block] of mockTaskAssetBlocks) {
@@ -554,8 +558,9 @@ function mockTaskAssetApprovals(taskID: string): TaskAssetApproval[] {
       inherited: false,
       read_only: true,
       created_at: block.blocked_at,
-      approval_state: "revoked",
+      approval_state: "blocked",
       blocked: true,
+      block_kind: block.block_kind ?? "deleted",
       blocked_at: block.blocked_at,
       block_reason: block.reason,
       blocked_by: block.blocked_by,
@@ -1864,17 +1869,37 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     ];
     if (ids.length === 0 || ids.length > 100) throw new Error("asset_ids 必须包含 1-100 个正整数");
     const approve = seg[3] === "approve";
-    if (seg[3] !== "approve" && seg[3] !== "revoke") throw new Error("未知审批操作");
+    const block = seg[3] === "block";
+    if (!["approve", "revoke", "block"].includes(seg[3])) throw new Error("未知审批操作");
     const requestedAssets = ids.map((id) => mockAssets.find((item) => item.id === id));
     if (requestedAssets.some((asset) => asset && mockDerivedAsset(asset.type))) {
       throw new Error("服务和接口无需单独审批，请操作父域名/IP");
     }
     for (const [index, asset] of requestedAssets.entries()) {
       if (!asset?.task_ids.includes(numericTaskID)) throw new Error(`资产 ${ids[index]} 未关联当前任务`);
+      const existing = mockTaskAssetBlockView(taskID, asset);
+      if (existing?.direct && existing.block.block_kind !== "manual") throw new Error("删除封禁资产请先重新关联");
+      if (!approve && !block && existing) throw new Error("封禁资产需先批准或重新关联，不能直接撤回");
     }
     const now = new Date().toISOString();
     for (const asset of requestedAssets) {
       if (!asset) continue;
+      if (block) {
+        const key = mockTaskAssetSourceKey(taskID, asset.id);
+        if (!mockTaskAssetBlocks.has(key))
+          mockTaskAssetBlocks.set(key, {
+            block_kind: "manual",
+            blocked_at: now,
+            blocked_by: "user",
+            reason: String(b.reason || "用户封禁测试授权"),
+            asset_type: asset.type,
+            asset_key: mockTaskAssetKey(asset),
+            host_key: mockTaskAssetHostName(asset),
+            name: mockAssetLabel(asset),
+          });
+        setMockTaskAssetSource(taskID, asset.id, { approval_state: "blocked" });
+        continue;
+      }
       setMockTaskAssetSource(taskID, asset.id, {
         approval_state: approve ? "approved" : "revoked",
         approved_at: now,
@@ -1886,7 +1911,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const result: TaskAssetApprovalMutation = {
       ok: true,
       asset_ids: ids,
-      approval_state: approve ? "approved" : "revoked",
+      approval_state: ({ approve: "approved", block: "blocked", revoke: "revoked" } as const)[
+        seg[3] as "approve" | "block" | "revoke"
+      ],
       items: mockTaskAssetApprovals(taskID).filter((item) => ids.includes(item.asset_id)),
     };
     return result;

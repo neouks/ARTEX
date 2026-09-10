@@ -48,12 +48,10 @@ func TestTaskAssetApprovalsRejectDerivedAssetsAtomically(t *testing.T) {
 	manager := &Manager{pg: pg, assets: assets, tasks: map[string]*Task{task.ID: task}}
 	s := &Server{m: manager, engine: &Engine{m: manager}}
 
-	for _, approve := range []bool{true, false} {
+	for _, operation := range []string{"approve", "revoke", "block"} {
 		initialState := db.ApprovalApproved
-		operation := "revoke"
-		if approve {
+		if operation == "approve" {
 			initialState = db.ApprovalPending
-			operation = "approve"
 		}
 		for _, derivedID := range []int64{serviceID, endpointID} {
 			for _, mixed := range []bool{false, true} {
@@ -72,7 +70,7 @@ func TestTaskAssetApprovalsRejectDerivedAssetsAtomically(t *testing.T) {
 					r := httptest.NewRequest(http.MethodPost, "/api/tasks/"+task.ID+"/asset-approvals/"+operation, bytes.NewReader(body))
 					r.SetPathValue("id", task.ID)
 					w := httptest.NewRecorder()
-					s.updateTaskAssetApprovals(w, r, approve)
+					s.mutateTaskAssetApprovals(w, r, operation)
 					if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "服务和接口无需单独审批，请操作父域名/IP") {
 						t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 					}
