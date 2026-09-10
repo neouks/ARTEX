@@ -32,8 +32,8 @@ func TestBuildTaskDSLWhereKeepsPlaceholderOrderAndAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(blockedWhere, "task_asset_blocks") || strings.Contains(blockedWhere, "task_relations") {
-		t.Fatalf("blocked where is not tombstone-only: %s", blockedWhere)
+	if !strings.Contains(blockedWhere, "task_asset_effective_approval_state($2,assets.id)='blocked'") {
+		t.Fatalf("blocked where does not use effective tombstones: %s", blockedWhere)
 	}
 }
 

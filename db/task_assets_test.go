@@ -224,16 +224,15 @@ func TestTaskAssetApprovalInheritanceAndTombstone(t *testing.T) {
 	if !assetListContains(pendingAssets, rootID) || !assetListContains(pendingAssets, serviceID) {
 		t.Fatalf("pending filter omitted effective child state: %+v", pendingAssets)
 	}
-	if err := assets.ApproveTaskAssets(task.ID, []int64{serviceID}, "operator", "child only"); !errors.Is(err, ErrTaskAssetNotApproved) {
-		t.Fatalf("child-only approval=%v, want ErrTaskAssetNotApproved", err)
+	if err := assets.ApproveTaskAssets(task.ID, []int64{serviceID}, "operator", "child only"); !errors.Is(err, ErrTaskAssetInvalid) {
+		t.Fatalf("child-only approval=%v, want ErrTaskAssetInvalid", err)
 	}
 
 	if err := assets.ApproveTaskAssets(task.ID, []int64{rootID}, "operator", "approved for test"); err != nil {
 		t.Fatal(err)
 	}
-	// Approval changes cascade without requiring the Agent to rediscover the
-	// service. This closes the race where a stale child row could bypass or miss
-	// its parent's current decision.
+	// Services read their parent's current decision without rediscovery or a
+	// separate child approval.
 	if err := assets.ValidateTaskAssetsApproved(task.ID, []int64{serviceID}); err != nil {
 		t.Fatalf("service after parent approval=%v", err)
 	}
@@ -553,14 +552,16 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var inheritedApproval *TaskAssetApproval
+	var parentID int64
 	for i := range approvals {
 		if approvals[i].AssetID == assetID {
-			inheritedApproval = &approvals[i]
-			break
+			t.Fatal("derived asset appeared in approval panel")
+		}
+		if approvals[i].AssetType == "subdomain" && approvals[i].Inherited && approvals[i].ReadOnly && approvals[i].SourceTaskID == source.ID {
+			parentID = approvals[i].AssetID
 		}
 	}
-	if inheritedApproval == nil || !inheritedApproval.Inherited || !inheritedApproval.ReadOnly || inheritedApproval.SourceTaskID != source.ID {
+	if parentID == 0 {
 		t.Fatalf("inherited approval rows=%+v err=%v", approvals, err)
 	}
 	currentIntentID, err := d.Exploration(current.ExplorationID).AddIntent(map[string]any{"summary": "current inherited worker"}, 5, []int64{assetID}, "planner")
@@ -577,13 +578,13 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	if err := d.Exploration(current.ExplorationID).SetNodeState(currentIntentID, "stopped"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Assets().RevokeTaskAssets(source.ID, []int64{assetID}, "operator", "source withdrawal"); err != nil {
+	if err := d.Assets().RevokeTaskAssets(source.ID, []int64{parentID}, "operator", "source withdrawal"); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Assets().ValidateTaskAssetsApproved(current.ID, []int64{assetID}); !errors.Is(err, ErrTaskAssetNotApproved) {
 		t.Fatalf("revoked source authorization=%v, want ErrTaskAssetNotApproved", err)
 	}
-	if err := d.Assets().ApproveTaskAssets(source.ID, []int64{assetID}, "operator", "source restore"); err != nil {
+	if err := d.Assets().ApproveTaskAssets(source.ID, []int64{parentID}, "operator", "source restore"); err != nil {
 		t.Fatal(err)
 	}
 	if detached, err := d.Assets().DetachAssetFromTask(current.ID, assetID); err != nil || !detached {

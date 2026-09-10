@@ -610,6 +610,12 @@ RETURNING id`, domainB, companyB).Scan(&companyAssetB); err != nil {
 		if asset.TaskSource != taskCompanyAssetSource || asset.TaskSourceSummary != "任务创建时关联企业："+companyName {
 			t.Errorf("asset %d provenance=%q/%q", assetID, asset.TaskSource, asset.TaskSourceSummary)
 		}
+		if asset.ApprovalState != ApprovalApproved || asset.ApprovedBy != "user" || asset.ApprovedAt == nil {
+			t.Errorf("user-provided asset %d not approved: %+v", assetID, asset)
+		}
+		if err := d.Assets().ValidateTaskAssetsApproved(task.ID, []int64{assetID}); err != nil {
+			t.Errorf("user-provided asset %d not executable: %v", assetID, err)
+		}
 	}
 	var existingAssociation bool
 	if err := d.QueryRow(`SELECT $1=ANY(task_ids) FROM assets WHERE id=$2`, existingTask.ID, companyAssetA).Scan(&existingAssociation); err != nil {

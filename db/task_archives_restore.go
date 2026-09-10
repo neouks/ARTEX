@@ -261,6 +261,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	// Older archives may contain independent service/endpoint revocations. Use
+	// the same ordered conversion as startup after both links and blocks exist.
+	if _, err := tx.Exec(`SELECT normalize_derived_task_asset_approvals($1)`, taskID); err != nil {
+		return nil, fmt.Errorf("restore derived asset approvals: %w", err)
+	}
 	if streamedLLMRecords != "" {
 		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
 		if err != nil {

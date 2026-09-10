@@ -25,6 +25,7 @@ import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { taskAssetSourceLabel } from "@/lib/task-assets";
 import type { TaskAssetApproval } from "@/lib/types";
 
 type ApprovalFilter = "all" | "pending" | "approved" | "revoked" | "blocked";
@@ -34,8 +35,6 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   subdomain: "子域名",
   ip: "IP",
   app: "应用",
-  service: "服务",
-  endpoint: "接口",
 };
 
 function approvalLabel(item: TaskAssetApproval) {
@@ -70,7 +69,9 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
   const load = React.useCallback(async () => {
     try {
-      const next = await api.taskAssetApprovals(taskId);
+      const next = (await api.taskAssetApprovals(taskId)).filter(
+        (item) => item.asset_type !== "service" && item.asset_type !== "endpoint",
+      );
       setItems(next);
       setError("");
       const validIDs = new Set(
@@ -268,7 +269,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                 </TableCell>
                 <TableCell className="max-w-xs whitespace-normal [overflow-wrap:anywhere]">
                   <div className="flex flex-col gap-0.5 text-xs">
-                    <span>{item.source || "—"}</span>
+                    <span>{item.source ? taskAssetSourceLabel(item.source) : "—"}</span>
                     <span className="text-muted-foreground">{item.source_summary || "—"}</span>
                     {item.inherited ? (
                       <span className="text-muted-foreground">来源任务 #{item.source_task_id} · 状态只读</span>
@@ -297,7 +298,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
         <div className="min-w-0">
           <h2 className="font-medium text-sm">资产审批</h2>
           <p className="text-muted-foreground text-xs">
-            待审批资产不会进入 Planner、Worker 或任务 Agent 的可测试上下文。
+            待审批资产不会进入可测试范围。服务和接口继承父域名/IP 的授权，无需单独审批，可在测试资产页查看。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

@@ -133,6 +133,7 @@ function Chips({ items, mono }: { items: string[]; mono?: boolean }) {
 function SourceCell({ asset }: { asset: Asset }) {
   const source = firstText([asset.task_source], "legacy");
   const summary = firstText([asset.task_source_summary], "由历史任务资产关联迁移，暂无更详细来源说明");
+  const derived = asset.type === "service" || asset.type === "endpoint";
   let approvalBadge: React.ReactNode;
   if (asset.blocked) {
     approvalBadge = (
@@ -148,19 +149,19 @@ function SourceCell({ asset }: { asset: Asset }) {
   } else if (asset.approval_state === "pending") {
     approvalBadge = (
       <Badge variant="outline" className="shrink-0">
-        待审批
+        {derived ? "父资产待审批" : "待审批"}
       </Badge>
     );
   } else if (asset.approval_state === "revoked") {
     approvalBadge = (
       <Badge variant="secondary" className="shrink-0">
-        已撤回
+        {derived ? "父资产已撤回" : "已撤回"}
       </Badge>
     );
   } else {
     approvalBadge = (
       <Badge variant="default" className="shrink-0">
-        已批准
+        {derived ? "继承父资产授权" : "已批准"}
       </Badge>
     );
   }
@@ -472,6 +473,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   };
 
   const removeButton = (asset: Asset) => {
+    const derived = asset.type === "service" || asset.type === "endpoint";
     let approvalAction: React.ReactNode = null;
     if (asset.blocked && asset.block_direct) {
       approvalAction = (
@@ -482,7 +484,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       );
     } else if (asset.blocked) {
       approvalAction = <span className="text-muted-foreground text-xs">由父资产封禁</span>;
-    } else if (!asset.task_read_only && asset.approval_state === "pending") {
+    } else if (!derived && !asset.task_read_only && asset.approval_state === "pending") {
       approvalAction = (
         <Button
           size="xs"
@@ -493,7 +495,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           批准
         </Button>
       );
-    } else if (!asset.task_read_only && asset.approval_state === "approved") {
+    } else if (!derived && !asset.task_read_only && asset.approval_state === "approved") {
       approvalAction = (
         <Button size="xs" variant="ghost" disabled={changingApproval} onClick={() => setApprovalTarget(asset)}>
           撤回
@@ -503,7 +505,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     return (
       <div className="flex items-center gap-1">
         {approvalAction}
-        {!asset.blocked ? (
+        {!asset.blocked || !asset.block_direct ? (
           <Button
             variant="ghost"
             size="icon-sm"

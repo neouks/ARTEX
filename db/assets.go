@@ -841,8 +841,14 @@ RETURNING id`,
 		return 0, err
 	}
 
+	// Parent registration shares this transaction; failure rolls back the child.
+	if req.AgentDiscovered && req.TaskID > 0 && domain == "" {
+		return 0, fmt.Errorf("%w: 缺少可确认父域名/IP", ErrTaskAssetNotApproved)
+	}
 	// side effects: register root_domain + subdomain as their own assets too
-	s.linkHostAssets(domain, rootDomain, req.TaskID)
+	if err := s.linkHostAssets(domain, rootDomain, req.TaskID); err != nil {
+		return 0, err
+	}
 	if req.IP != "" {
 		var boundDomains []string
 		if domain != "" {
@@ -852,12 +858,14 @@ RETURNING id`,
 		if port > 0 {
 			openPorts = []PortService{{Port: port, Service: serviceName}}
 		}
-		_, _ = s.UpsertIP(UpsertIPReq{
+		if _, err := s.UpsertIP(UpsertIPReq{
 			IP:           req.IP,
 			BoundDomains: boundDomains,
 			OpenPorts:    openPorts,
 			TaskID:       req.TaskID,
-		})
+		}); err != nil {
+			return 0, err
+		}
 	}
 	return id, nil
 }
@@ -988,27 +996,39 @@ RETURNING id`,
 		if domain != "" {
 			boundDomains = []string{domain}
 		}
-		_, _ = s.UpsertIP(UpsertIPReq{
+		if _, err := s.UpsertIP(UpsertIPReq{
 			IP:           req.IP,
 			BoundDomains: boundDomains,
 			OpenPorts:    []PortService{{Port: req.Port, Service: serviceName}},
 			TaskID:       req.TaskID,
-		})
+		}); err != nil {
+			return 0, err
+		}
 	}
-	s.linkHostAssets(domain, rootDomain, req.TaskID)
+	if err := s.linkHostAssets(domain, rootDomain, req.TaskID); err != nil {
+		return 0, err
+	}
 	return id, nil
 }
 
-// linkHostAssets ensures a service/endpoint's host is also registered as its own
-// root_domain and (when it's a real subdomain, not the apex or an IP) subdomain
-// asset — so those asset types stay populated and can anchor task scope. Best-effort.
-func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) {
+// linkHostAssets registers parent hosts atomically with their derived asset.
+func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) error {
+	domain = normalizeTaskAssetHost(domain)
+	if ip := net.ParseIP(domain); ip != nil {
+		_, err := s.UpsertIP(UpsertIPReq{IP: ip.String(), TaskID: taskID})
+		return err
+	}
 	if rootDomain != "" {
-		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: taskID})
+		if _, err := s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: taskID}); err != nil {
+			return err
+		}
 	}
-	if domain != "" && domain != rootDomain && net.ParseIP(domain) == nil {
-		_, _ = s.UpsertSubdomain(UpsertSubdomainReq{Domain: domain, TaskID: taskID})
+	if domain != "" && domain != rootDomain {
+		if _, err := s.UpsertSubdomain(UpsertSubdomainReq{Domain: domain, TaskID: taskID}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // =====================================================================
@@ -1122,11 +1142,18 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
+	if req.AgentDiscovered && req.TaskID > 0 && domain == "" {
+		return 0, fmt.Errorf("%w: 缺少可确认父域名/IP", ErrTaskAssetNotApproved)
+	}
 	// side effects: endpoint previously registered none — register its host as
 	// root_domain + subdomain(+IP) so those asset types get populated too.
-	s.linkHostAssets(domain, rootDomain, req.TaskID)
+	if err := s.linkHostAssets(domain, rootDomain, req.TaskID); err != nil {
+		return 0, err
+	}
 	if req.IP != "" {
-		_, _ = s.UpsertIP(UpsertIPReq{IP: req.IP, TaskID: req.TaskID})
+		if _, err := s.UpsertIP(UpsertIPReq{IP: req.IP, TaskID: req.TaskID}); err != nil {
+			return 0, err
+		}
 	}
 	return id, nil
 }
@@ -1259,37 +1286,15 @@ func taskAssetSelectedLinkBoolSQL(assetAlias, taskArg, column, valueArg string) 
    FROM task_relations relation
    JOIN task_asset_links source_link ON source_link.task_id=relation.source_task_id
    WHERE relation.task_id=%[2]s AND source_link.asset_id=%[1]s.id
-   ORDER BY CASE source_link.approval_state WHEN 'approved' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+   ORDER BY CASE task_asset_owner_approval_state(source_link.task_id,source_link.asset_id) WHEN 'approved' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
             relation.source_task_id
    LIMIT 1)
 )=%[4]s`, assetAlias, taskArg, column, valueArg)
 }
 
-// taskAssetBlockedSQL includes both an exact tombstone and descendants of a
-// blocked root-domain/subdomain/IP. Host-bearing derived rows always populate
-// domain or ip during upsert, so this is the SQL counterpart of AssetKey's
-// host inheritance check.
+// taskAssetBlockedSQL follows the same owner selection and tombstones as execution.
 func taskAssetBlockedSQL(assetAlias, taskArg string) string {
-	return fmt.Sprintf(`EXISTS (
-  SELECT 1 FROM task_asset_blocks block
-  WHERE block.task_id=%[2]s AND (
-    block.asset_id=%[1]s.id OR block.asset_key=CASE %[1]s.type
-      WHEN 'root_domain' THEN 'root_domain:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.domain,'')))
-      WHEN 'subdomain' THEN 'subdomain:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.domain,'')))
-      WHEN 'ip' THEN 'ip:'||lower(trim(trailing '.' FROM COALESCE(%[1]s.ip,'')))
-      WHEN 'service' THEN CASE WHEN COALESCE(%[1]s.url,'')<>'' THEN 'service:'||%[1]s.url
-        ELSE 'service:'||lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),'')))||':'||COALESCE(%[1]s.port,0)::text||':'||lower(trim(COALESCE(%[1]s.service_name,''))) END
-      WHEN 'endpoint' THEN 'endpoint:'||COALESCE(%[1]s.url,'')||':'||upper(trim(COALESCE(%[1]s.method,'')))
-      WHEN 'app' THEN 'app:'||lower(trim(COALESCE(NULLIF(%[1]s.bundle_id,''),%[1]s.app_name,'')))
-      ELSE %[1]s.type||':'||%[1]s.id::text END OR (
-      block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>'' AND (
-        lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),'')))=block.host_key
-        OR (block.asset_type IN ('root_domain','subdomain')
-          AND lower(trim(trailing '.' FROM COALESCE(NULLIF(%[1]s.domain,''),NULLIF(%[1]s.ip,''),''))) LIKE '%%.'||block.host_key)
-      )
-    )
-  )
-)`, assetAlias, taskArg)
+	return fmt.Sprintf("task_asset_effective_approval_state(%s,%s.id)='blocked'", taskArg, assetAlias)
 }
 
 // QueryByTask returns assets rows that have a given task_id in task_ids.

@@ -334,6 +334,9 @@ FROM assets WHERE id=ANY($1::bigint[])`, assetIDs)
 		return err
 	}
 	scoped := &AssetStore{tx: tx}
+	if err := scoped.ensureManualDerivedParents(taskID, assetIDs); err != nil {
+		return err
+	}
 	for _, scope := range scopes {
 		if _, err := scoped.upsertTaskScopeResult(scope); err != nil {
 			return err
@@ -371,6 +374,9 @@ SELECT count(*) FROM inserted`, taskID, companyIDs).Scan(&inserted)
 	if inserted != len(companyIDs) {
 		return fmt.Errorf("%w: one or more companies do not exist", ErrTaskCompanyNotFound)
 	}
+	if err := seedTaskCompanyAssets(tx, taskID, companyIDs); err != nil {
+		return err
+	}
 
 	// Updating task_ids fires sync_task_asset_links, which first creates generic
 	// source rows. The provenance upsert must therefore run afterwards so the
@@ -385,8 +391,9 @@ WHERE company_id=ANY($2::bigint[])`, taskID, companyIDs); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`
-INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
-SELECT $1, asset.id, $3, '任务创建时关联企业：' || company.name
+INSERT INTO task_asset_links(task_id, asset_id, source, source_summary, approval_state, approved_at, approved_by, approval_reason)
+SELECT $1, asset.id, $3, '任务创建时关联企业：' || company.name,
+       'approved', now(), 'user', '用户提供：任务创建时关联企业'
 FROM assets asset
 JOIN companies company ON company.id=asset.company_id
 WHERE asset.company_id=ANY($2::bigint[])
@@ -398,7 +405,27 @@ SET source=EXCLUDED.source,
     approval_state='approved', approved_at=now(), approved_by='user', approval_reason='任务创建时关联企业'`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
 		return err
 	}
-	return nil
+	rows, err := tx.Query(`SELECT id FROM assets WHERE company_id=ANY($1::bigint[])`, companyIDs)
+	if err != nil {
+		return err
+	}
+	var assetIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		assetIDs = append(assetIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return (&AssetStore{tx: tx}).ensureManualDerivedParents(taskID, assetIDs)
 }
 
 func insertTaskRelations(tx *sql.Tx, taskID int64, sourceIDs []int64) error {

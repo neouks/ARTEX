@@ -79,7 +79,15 @@ type MockTaskAssetSource = Pick<
   | "block_reason"
 >;
 const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
-type MockTaskAssetBlock = { blocked_at: string; reason: string; blocked_by: string };
+type MockTaskAssetBlock = {
+  blocked_at: string;
+  reason: string;
+  blocked_by: string;
+  asset_type: string;
+  asset_key: string;
+  host_key: string;
+  name: string;
+};
 const mockTaskAssetBlocks = new Map<string, MockTaskAssetBlock>();
 let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
@@ -281,6 +289,10 @@ function setMockTaskAssetSource(taskID: string, assetID: number, source: MockTas
   const key = mockTaskAssetSourceKey(taskID, assetID);
   const previous = mockTaskAssetSources.get(key);
   mockTaskAssetSources.set(key, { ...previous, ...source, tested: previous?.tested ?? source.tested ?? false });
+  const asset = mockAssets.find((candidate) => candidate.id === assetID);
+  if (asset && ["manual", "direct", "company"].includes(source.task_source ?? "")) {
+    ensureMockManualDerivedParent(taskID, asset);
+  }
 }
 
 function mockTaskAssetOwner(
@@ -296,7 +308,7 @@ function mockTaskAssetOwner(
     const sourceID = String(sourceTaskID);
     const numericSourceID = mockTaskAssetID(sourceID);
     if (numericSourceID === undefined || !asset.task_ids.includes(numericSourceID)) return [];
-    const state = mockTaskAssetSources.get(mockTaskAssetSourceKey(sourceID, asset.id))?.approval_state ?? "approved";
+    const state = mockTaskAssetAuthorization(sourceID, asset).approval_state ?? "pending";
     return [{ taskID: sourceID, numericTaskID: numericSourceID, inherited: true, state }];
   });
   candidates.sort((left, right) => {
@@ -311,14 +323,48 @@ function mockTaskAssetOwner(
 }
 
 function mockTaskAssetHostName(asset: Asset): string {
-  const direct = (asset.domain ?? asset.ip ?? "").trim().toLowerCase().replace(/\.$/, "");
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/^\[|\]$/g, "")
+      .replace(/\.$/, "");
+  let direct = normalize(asset.domain ?? "");
+  if (!direct) direct = normalize(asset.ip ?? "");
   if (direct) return direct;
   if (!asset.url) return "";
   try {
-    return new URL(asset.url).hostname.toLowerCase().replace(/\.$/, "");
+    return normalize(new URL(asset.url).hostname);
   } catch {
     return "";
   }
+}
+
+function mockDerivedAsset(assetType: string): boolean {
+  return assetType === "service" || assetType === "endpoint";
+}
+
+function mockTaskAssetKey(asset: Asset): string {
+  const host = mockTaskAssetHostName(asset);
+  let url = asset.url ?? "";
+  try {
+    const parsed = new URL(url);
+    url = parsed.toString();
+    if (parsed.pathname === "/" && !parsed.search && !parsed.hash) url = url.replace(/\/$/, "");
+  } catch {
+    // Keep free-form values unchanged, as in the asset identity layer.
+  }
+  if (["root_domain", "subdomain", "ip"].includes(asset.type)) return `${asset.type}:${host}`;
+  if (asset.type === "service") {
+    return `service:${url || `${host}:${asset.port ?? 0}:${asset.service_name?.trim().toLowerCase() ?? ""}`}`;
+  }
+  if (asset.type === "endpoint") return `endpoint:${url}:${asset.method?.trim().toUpperCase() ?? ""}`;
+  return `${asset.type}:${asset.id}`;
+}
+
+function mockTaskAssetHostWithin(host: string, parentHost: string, parentType: string): boolean {
+  if (!host || !parentHost) return false;
+  return host === parentHost || (parentType !== "ip" && host.endsWith(`.${parentHost}`));
 }
 
 function mockTaskAssetBlockView(
@@ -328,23 +374,115 @@ function mockTaskAssetBlockView(
   const exact = mockTaskAssetBlocks.get(mockTaskAssetSourceKey(taskID, asset.id));
   if (exact) return { block: exact, direct: true };
   const host = mockTaskAssetHostName(asset);
-  if (!host) return undefined;
+  const assetKey = mockTaskAssetKey(asset);
   for (const [key, block] of mockTaskAssetBlocks) {
-    const [blockedTask, rawAssetID] = JSON.parse(key) as [string, number];
+    const [blockedTask] = JSON.parse(key) as [string, number];
     if (blockedTask !== taskID) continue;
-    const parent = mockAssets.find((candidate) => candidate.id === rawAssetID);
-    if (!parent || !["root_domain", "subdomain", "ip"].includes(parent.type)) continue;
-    const parentHost = mockTaskAssetHostName(parent);
-    const matches = parent.type === "ip" ? host === parentHost : host === parentHost || host.endsWith(`.${parentHost}`);
-    if (matches) return { block, direct: false };
+    if (assetKey === block.asset_key) return { block, direct: true };
+    if (
+      ["root_domain", "subdomain", "ip"].includes(block.asset_type) &&
+      mockTaskAssetHostWithin(host, block.host_key, block.asset_type)
+    ) {
+      return { block, direct: false };
+    }
   }
   return undefined;
+}
+
+function clearMockTaskAssetBlock(taskID: string, asset: Asset): void {
+  const assetKey = mockTaskAssetKey(asset);
+  for (const [key, block] of mockTaskAssetBlocks) {
+    const [blockedTask, assetID] = JSON.parse(key) as [string, number];
+    if (blockedTask === taskID && (assetID === asset.id || block.asset_key === assetKey))
+      mockTaskAssetBlocks.delete(key);
+  }
+}
+
+function mockTaskAssetAuthorization(taskID: string, asset: Asset): Partial<Asset> {
+  const blockView = mockTaskAssetBlockView(taskID, asset);
+  if (blockView) {
+    return {
+      approval_state: "revoked",
+      blocked: true,
+      block_direct: blockView.direct,
+      blocked_at: blockView.block.blocked_at,
+      block_reason: blockView.block.reason,
+    };
+  }
+  if (!mockDerivedAsset(asset.type)) {
+    return {
+      approval_state: mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, asset.id))?.approval_state ?? "approved",
+    };
+  }
+  const host = mockTaskAssetHostName(asset);
+  const numericTaskID = mockTaskAssetID(taskID);
+  const parents = mockAssets.filter(
+    (parent) =>
+      numericTaskID !== undefined &&
+      parent.task_ids.includes(numericTaskID) &&
+      ["root_domain", "subdomain", "ip"].includes(parent.type) &&
+      mockTaskAssetHostWithin(host, mockTaskAssetHostName(parent), parent.type),
+  );
+  if (parents.length === 0) {
+    return { approval_state: "pending", approval_reason: "缺少可确认的父域名/IP，暂不可测试" };
+  }
+  const parentStates = parents.map((parent) => mockTaskAssetAuthorization(taskID, parent));
+  const blocked = parentStates.find((state) => state.blocked);
+  if (blocked) return { ...blocked, block_direct: false };
+  if (parentStates.some((state) => state.approval_state === "revoked")) return { approval_state: "revoked" };
+  if (parentStates.some((state) => state.approval_state !== "approved")) return { approval_state: "pending" };
+  return { approval_state: "approved" };
+}
+
+function ensureMockManualDerivedParent(taskID: string, asset: Asset): void {
+  if (!mockDerivedAsset(asset.type)) return;
+  const host = mockTaskAssetHostName(asset);
+  const numericTaskID = mockTaskAssetID(taskID);
+  if (!host || numericTaskID === undefined) return;
+  const matchingParents = mockAssets.filter(
+    (parent) =>
+      ["root_domain", "subdomain", "ip"].includes(parent.type) &&
+      mockTaskAssetHostWithin(host, mockTaskAssetHostName(parent), parent.type),
+  );
+  if (matchingParents.some((parent) => parent.task_ids.includes(numericTaskID))) return;
+  for (const [key, block] of mockTaskAssetBlocks) {
+    const [blockedTask] = JSON.parse(key) as [string, number];
+    if (
+      blockedTask === taskID &&
+      ["root_domain", "subdomain", "ip"].includes(block.asset_type) &&
+      mockTaskAssetHostWithin(host, block.host_key, block.asset_type)
+    ) {
+      return;
+    }
+  }
+  let parent = matchingParents.find((candidate) => mockTaskAssetHostName(candidate) === host);
+  if (!parent) {
+    const isIP = host.includes(":") || /^\d+\.\d+\.\d+\.\d+$/.test(host);
+    parent = {
+      id: mockAssets.reduce((max, candidate) => Math.max(max, candidate.id), 0) + 1,
+      type: isIP ? "ip" : "subdomain",
+      task_ids: [],
+      ...(isIP ? { ip: host } : { domain: host }),
+      last_seen: new Date().toISOString(),
+    };
+    mockAssets.push(parent);
+  }
+  parent.task_ids.push(numericTaskID);
+  setMockTaskAssetSource(taskID, parent.id, {
+    task_source: "manual",
+    task_source_summary: "用户手动关联服务或接口时登记父主机",
+    approval_state: "approved",
+    approved_at: new Date().toISOString(),
+    approved_by: "user",
+    approval_reason: "手动关联",
+  });
 }
 
 function mockAssetForTask(taskID: string, asset: Asset): Asset {
   const owner = mockTaskAssetOwner(taskID, asset);
   const source = owner ? mockTaskAssetSources.get(mockTaskAssetSourceKey(owner.taskID, asset.id)) : undefined;
-  const blockView = mockTaskAssetBlockView(taskID, asset);
+  const currentBlock = mockTaskAssetBlockView(taskID, asset);
+  const authorization = mockTaskAssetAuthorization(owner && !currentBlock ? owner.taskID : taskID, asset);
   const result: Asset = source
     ? {
         ...asset,
@@ -362,15 +500,13 @@ function mockAssetForTask(taskID: string, asset: Asset): Asset {
         task_inherited: owner?.inherited,
         task_read_only: owner?.inherited,
       };
-  if (!blockView) return result;
   return {
     ...result,
-    approval_state: "revoked",
-    blocked: true,
-    block_direct: blockView.direct,
-    blocked_at: blockView.block.blocked_at,
-    block_reason: blockView.block.reason,
-    ...(source ? {} : { task_source: "deleted", task_source_summary: blockView.block.reason, task_read_only: true }),
+    ...authorization,
+    block_direct: Boolean(authorization.block_direct && currentBlock),
+    ...(!owner && authorization.blocked
+      ? { task_source: "deleted", task_source_summary: authorization.block_reason, task_read_only: true }
+      : {}),
   };
 }
 
@@ -378,7 +514,7 @@ function mockTaskAssetApprovals(taskID: string): TaskAssetApproval[] {
   const numericTaskID = mockTaskAssetID(taskID);
   if (numericTaskID === undefined) return [];
   const linked: TaskAssetApproval[] = mockAssets
-    .filter((asset) => Boolean(mockTaskAssetOwner(taskID, asset)))
+    .filter((asset) => !mockDerivedAsset(asset.type) && Boolean(mockTaskAssetOwner(taskID, asset)))
     .map((asset) => {
       const view = mockAssetForTask(taskID, asset);
       const owner = mockTaskAssetOwner(taskID, asset);
@@ -407,11 +543,11 @@ function mockTaskAssetApprovals(taskID: string): TaskAssetApproval[] {
   for (const [key, block] of mockTaskAssetBlocks) {
     const [blockedTask, rawAssetID] = JSON.parse(key) as [string, number];
     if (blockedTask !== taskID || linked.some((item) => item.asset_id === rawAssetID)) continue;
-    const asset = mockAssets.find((item) => item.id === rawAssetID);
+    if (mockDerivedAsset(block.asset_type)) continue;
     linked.push({
       asset_id: rawAssetID,
-      asset_type: asset?.type ?? "unknown",
-      name: asset ? mockAssetLabel(asset) : `asset:${rawAssetID}`,
+      asset_type: block.asset_type,
+      name: block.name,
       source: "deleted",
       source_summary: "用户从当前任务删除",
       source_task_id: numericTaskID,
@@ -1186,6 +1322,50 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const numericTaskID = nextMockTaskAssetID++;
     mockTaskAssetIDs.set(id, numericTaskID);
     const selectedCompanies = new Set(companyIDs);
+    for (const company of mockCompanies.filter((item) => selectedCompanies.has(item.id))) {
+      for (const scope of company.scope ?? []) {
+        let identity: Partial<Asset> | undefined;
+        if (scope.kind === "domain" && scope.domain) identity = { type: "root_domain", domain: scope.domain };
+        if (scope.kind === "ip" && scope.net) identity = { type: "ip", ip: scope.net.split("/")[0] };
+        if (scope.kind === "keyword" && scope.value) {
+          try {
+            const url = new URL(scope.value);
+            if (["http:", "https:"].includes(url.protocol)) {
+              identity = { type: "service", service_type: "http", url: scope.value, domain: url.hostname };
+            }
+          } catch {
+            // Free-form scope evidence stays intact without guessed targets.
+          }
+        }
+        if (!identity) continue;
+        let asset = mockAssets.find(
+          (item) =>
+            item.type === identity.type &&
+            item.domain === identity.domain &&
+            item.ip === identity.ip &&
+            item.url === identity.url,
+        );
+        if (!asset) {
+          asset = {
+            id: mockAssets.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+            type: identity.type as Asset["type"],
+            ...identity,
+            company_id: company.id,
+            task_ids: [],
+            last_seen: new Date().toISOString(),
+          };
+          mockAssets.push(asset);
+        }
+        if (!asset.task_ids.includes(numericTaskID)) asset.task_ids.push(numericTaskID);
+        setMockTaskAssetSource(id, asset.id, {
+          task_source: "company",
+          task_source_summary: `任务创建时关联企业：${company.name}`,
+          approval_state: "approved",
+          approved_at: new Date().toISOString(),
+          approved_by: "user",
+        });
+      }
+    }
     for (const asset of mockAssets) {
       if (asset.company_id === undefined || !selectedCompanies.has(asset.company_id)) continue;
       if (!asset.task_ids.includes(numericTaskID)) asset.task_ids.push(numericTaskID);
@@ -1194,6 +1374,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         task_source: "company",
         task_source_summary: `任务创建时关联企业：${company?.name ?? `#${asset.company_id}`}`,
         task_source_node_id: undefined,
+        approval_state: "approved",
+        approved_at: new Date().toISOString(),
+        approved_by: "user",
+        approval_reason: "用户提供：任务创建时关联企业",
         tested: false,
       });
     }
@@ -1205,6 +1389,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         task_source: "direct",
         task_source_summary: "任务创建时直接选择",
         task_source_node_id: undefined,
+        approval_state: "approved",
+        approved_at: new Date().toISOString(),
+        approved_by: "user",
+        approval_reason: "用户提供：任务创建时直接选择",
         tested: false,
       });
       const host =
@@ -1677,17 +1865,23 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (ids.length === 0 || ids.length > 100) throw new Error("asset_ids 必须包含 1-100 个正整数");
     const approve = seg[3] === "approve";
     if (seg[3] !== "approve" && seg[3] !== "revoke") throw new Error("未知审批操作");
+    const requestedAssets = ids.map((id) => mockAssets.find((item) => item.id === id));
+    if (requestedAssets.some((asset) => asset && mockDerivedAsset(asset.type))) {
+      throw new Error("服务和接口无需单独审批，请操作父域名/IP");
+    }
+    for (const [index, asset] of requestedAssets.entries()) {
+      if (!asset?.task_ids.includes(numericTaskID)) throw new Error(`资产 ${ids[index]} 未关联当前任务`);
+    }
     const now = new Date().toISOString();
-    for (const id of ids) {
-      const asset = mockAssets.find((item) => item.id === id);
-      if (!asset?.task_ids.includes(numericTaskID)) throw new Error(`资产 ${id} 未关联当前任务`);
-      setMockTaskAssetSource(taskID, id, {
+    for (const asset of requestedAssets) {
+      if (!asset) continue;
+      setMockTaskAssetSource(taskID, asset.id, {
         approval_state: approve ? "approved" : "revoked",
         approved_at: now,
         approved_by: "user",
         approval_reason: String(b.reason ?? ""),
       });
-      if (approve) mockTaskAssetBlocks.delete(mockTaskAssetSourceKey(taskID, id));
+      if (approve) clearMockTaskAssetBlock(taskID, asset);
     }
     const result: TaskAssetApprovalMutation = {
       ok: true,
@@ -1795,7 +1989,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           approved_by: "user",
           approval_reason: "手动范围登记",
         });
-        mockTaskAssetBlocks.delete(mockTaskAssetSourceKey(seg[1], asset.id));
+        clearMockTaskAssetBlock(seg[1], asset);
       }
       mockTaskScopes.set(seg[1], currentScopes);
       return mutation;
@@ -1822,7 +2016,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         approved_by: "user",
         approval_reason: "手动关联",
       });
-      mockTaskAssetBlocks.delete(mockTaskAssetSourceKey(seg[1], asset.id));
+      clearMockTaskAssetBlock(seg[1], asset);
     }
     return mutation;
   }
@@ -1838,6 +2032,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       blocked_at: new Date().toISOString(),
       reason: "用户从当前任务删除，禁止再次测试",
       blocked_by: "user",
+      asset_type: asset.type,
+      asset_key: mockTaskAssetKey(asset),
+      host_key: mockTaskAssetHostName(asset),
+      name: mockAssetLabel(asset),
     });
     return { detached: asset.id };
   }
