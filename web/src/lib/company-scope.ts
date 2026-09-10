@@ -1,6 +1,6 @@
 import type { CompanyScopeKind, CompanyScopeRule } from "@/lib/types";
 
-export const MAX_COMPANY_SCOPE_VALUE_LENGTH = 1024;
+export const MAX_COMPANY_SCOPE_VALUE_LENGTH = 65536;
 
 export type CompanyScopeTextIssue = {
   line: number;
@@ -125,8 +125,8 @@ export function companyScopeRuleError(rule: CompanyScopeRule): string {
     const version = ipVersion(address);
     if (version === null || !/^\d+$/.test(prefixText)) return "请输入 CIDR 网段";
     const prefix = Number(prefixText);
-    if (version === 4 && (prefix < 16 || prefix > 32)) return "IPv4 网段前缀需为 /16 至 /32";
-    if (version === 6 && (prefix < 32 || prefix > 128)) return "IPv6 网段前缀需为 /32 至 /128";
+    if (version === 4 && (prefix < 0 || prefix > 32)) return "IPv4 网段前缀需为 /0 至 /32";
+    if (version === 6 && (prefix < 0 || prefix > 128)) return "IPv6 网段前缀需为 /0 至 /128";
   }
   return "";
 }
@@ -140,10 +140,13 @@ export function classifyCompanyScopeLine(
   if (Array.from(value).length > MAX_COMPANY_SCOPE_VALUE_LENGTH) {
     return { line, error: `最多 ${MAX_COMPANY_SCOPE_VALUE_LENGTH} 个字符` };
   }
+  if (value.includes("://") || value.includes("-----BEGIN")) {
+    return { line, rule: { kind: "keyword", value } };
+  }
   if (preservedRule) {
     const rule = { kind: preservedRule.kind, value };
     const error = companyScopeRuleError(rule);
-    return error ? { line, error } : { line, rule };
+    return error ? { line, rule: { kind: "keyword", value } } : { line, rule };
   }
 
   const separator = value.lastIndexOf("/");
@@ -153,10 +156,10 @@ export function classifyCompanyScopeLine(
   ) {
     const rule: CompanyScopeRule = { kind: "cidr", value };
     const error = companyScopeRuleError(rule);
-    return error ? { line, error } : { line, rule };
+    return error ? { line, rule: { kind: "keyword", value } } : { line, rule };
   }
   if (ipVersion(value) !== null) return { line, rule: { kind: "ip", value } };
-  if (looksLikeIPAddress(value)) return { line, error: "请输入有效 IP" };
+  if (looksLikeIPAddress(value)) return { line, rule: { kind: "keyword", value } };
 
   const looksLikeDomain = value.includes("://") || (!/\s/.test(value) && value.includes("."));
   if (looksLikeDomain) {
@@ -164,7 +167,7 @@ export function classifyCompanyScopeLine(
     if (hostname && ipVersion(hostname) !== null) return { line, rule: { kind: "ip", value: hostname } };
     const rule: CompanyScopeRule = { kind: "domain", value };
     const error = companyScopeRuleError(rule);
-    return error ? { line, error } : { line, rule };
+    return error ? { line, rule: { kind: "keyword", value } } : { line, rule };
   }
   if (/icp|备案/i.test(value)) return { line, rule: { kind: "icp", value } };
   return { line, rule: { kind: "keyword", value } };
@@ -174,10 +177,26 @@ export function parseCompanyScopeText(
   value: string,
   options: { preservedRules?: CompanyScopeRule[] } = {},
 ): ParsedCompanyScopeText {
-  const nonEmpty = value
-    .split(/\r?\n/)
-    .map((raw, index) => ({ raw, line: index + 1 }))
-    .filter(({ raw }) => raw.trim());
+  const nonEmpty: Array<{ raw: string; line: number }> = [];
+  let certificate: { raw: string; line: number } | undefined;
+  for (const [index, raw] of value.split(/\r?\n/).entries()) {
+    if (certificate) {
+      certificate.raw += `\n${raw}`;
+      if (raw.includes("-----END")) {
+        nonEmpty.push(certificate);
+        certificate = undefined;
+      }
+    } else if (raw.includes("-----BEGIN")) {
+      certificate = { raw, line: index + 1 };
+      if (raw.includes("-----END")) {
+        nonEmpty.push(certificate);
+        certificate = undefined;
+      }
+    } else if (raw.trim()) {
+      nonEmpty.push({ raw, line: index + 1 });
+    }
+  }
+  if (certificate) nonEmpty.push(certificate);
   const preserved = new Map<string, CompanyScopeRule[]>();
   for (const rule of options.preservedRules ?? []) {
     const key = rule.value.trim();
@@ -199,6 +218,6 @@ export function normalizeCompanyScopeValue(rule: CompanyScopeRule): string {
   const value = rule.value.trim();
   if (rule.kind === "domain") return domainHostname(value) ?? value.toLowerCase();
   if (rule.kind === "icp") return value.toLowerCase().replace(/\s/gu, "");
-  if (rule.kind === "keyword") return value.toLowerCase().split(/\s+/u).filter(Boolean).join(" ");
+  if (rule.kind === "keyword") return value;
   return value.toLowerCase();
 }

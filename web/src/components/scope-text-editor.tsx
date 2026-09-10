@@ -13,7 +13,7 @@ const SCOPE_KIND_LABELS: Record<CompanyScopeKind, string> = {
   ip: "IP",
   cidr: "CIDR",
   icp: "ICP",
-  keyword: "关键词",
+  keyword: "原文信息",
 };
 
 export function ScopeTextEditor({
@@ -22,7 +22,7 @@ export function ScopeTextEditor({
   onValueChange,
   parsed,
   label = "资产范围",
-  description = "每行一条，自动识别域名、IP、CIDR、ICP 备案和企业关键词。",
+  description = "支持 CIDR、IP、HTTP/URL、域名、证书、ICP 等信息，无需满足固定格式。每行一条，多行 PEM 证书可直接粘贴。",
 }: {
   id: string;
   value: string;

@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,7 +96,7 @@ func TestRegisterTaskAssetScopesCreatesAssetsAndPersistsTextScope(t *testing.T) 
 	for _, scope := range scopes {
 		values[scope.Kind] = scope.Value
 	}
-	if values["icp"] != NormalizeICP(inputs[3].Value) || values["keyword"] != normalizeKeyword(inputs[4].Value) {
+	if values["icp"] != NormalizeICP(inputs[3].Value) || values["keyword"] != strings.TrimSpace(inputs[4].Value) {
 		t.Fatalf("text scope not normalized: %+v", values)
 	}
 
@@ -110,10 +111,10 @@ func TestRegisterTaskAssetScopesCreatesAssetsAndPersistsTextScope(t *testing.T) 
 	rollbackDomain := fmt.Sprintf("rollback-%d.example.test", suffix)
 	_, err = d.Assets().RegisterTaskAssetScopes(task.ID, []ScopeInput{
 		{Kind: "domain", Value: rollbackDomain},
-		{Kind: "cidr", Value: "10.0.0.0/8"},
+		{Kind: "keyword", Value: strings.Repeat("x", MaxCompanyScopeRawRunes+1)},
 	})
 	if !errors.Is(err, ErrTaskAssetInvalid) {
-		t.Fatalf("invalid CIDR error=%v", err)
+		t.Fatalf("oversized scope error=%v", err)
 	}
 	var rollbackAssets int
 	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE type='root_domain' AND domain=$1`, rollbackDomain).Scan(&rollbackAssets); err != nil {

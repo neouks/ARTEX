@@ -1196,6 +1196,7 @@ func (s *AssetStore) RegisterTaskAssetScopes(taskID int64, inputs []ScopeInput) 
 	}
 	parsed := make([]ParsedScope, 0, len(inputs))
 	for index, input := range inputs {
+		input.Manual = true
 		rule, err := ParseScopeInput(input)
 		if err != nil {
 			return mutation, fmt.Errorf("%w: 第 %d 条范围无效: %v", ErrTaskAssetInvalid, index+1, err)

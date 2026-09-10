@@ -786,7 +786,12 @@ function mockScopeRows(
       const item = candidate as { kind?: unknown; value?: unknown };
       const value = String(item.value ?? "").trim();
       if (item.kind === undefined || item.kind === "") rule = classifyCompanyScopeLine(value, index + 1).rule;
-      else if (isCompanyScopeKind(item.kind)) rule = { kind: item.kind, value };
+      else
+        rule = classifyCompanyScopeLine(
+          value,
+          index + 1,
+          isCompanyScopeKind(item.kind) ? { kind: item.kind, value } : undefined,
+        ).rule;
     }
     if (!rule || companyScopeRuleError(rule)) {
       invalid++;
@@ -1716,10 +1721,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         }
         const item = candidate as { kind?: unknown; value?: unknown };
         const value = String(item?.value ?? "").trim();
-        const rule =
-          item?.kind && isCompanyScopeKind(item.kind)
-            ? { kind: item.kind, value }
-            : classifyCompanyScopeLine(value, index + 1).rule;
+        const rule = classifyCompanyScopeLine(
+          value,
+          index + 1,
+          item?.kind && isCompanyScopeKind(item.kind) ? { kind: item.kind, value } : undefined,
+        ).rule;
         const error = rule ? companyScopeRuleError(rule) : "无法识别";
         if (!rule || error) throw new Error(`第 ${index + 1} 条范围无效：${error}`);
         return rule;

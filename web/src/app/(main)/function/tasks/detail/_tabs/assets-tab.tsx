@@ -364,7 +364,7 @@ function AddTaskAssetsSheet({
         <SheetHeader>
           <SheetTitle>新增测试资产</SheetTitle>
           <SheetDescription>
-            直接填写测试范围。域名和 IP 会创建或复用全局资产；CIDR、ICP 和关键词作为 Agent 范围上下文。
+            直接填写测试范围，支持 CIDR、IP、HTTP/URL、域名、证书、ICP 等信息；无法识别的内容保留原文。
           </SheetDescription>
         </SheetHeader>
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4">
@@ -374,7 +374,6 @@ function AddTaskAssetsSheet({
             onValueChange={setScopeText}
             parsed={parsedScope}
             label="测试资产与范围"
-            description="每行一条，自动识别域名、IP、CIDR、ICP 备案和关键词。"
           />
         </div>
         <SheetFooter>

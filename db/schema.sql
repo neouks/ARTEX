@@ -143,8 +143,10 @@ ALTER TABLE company_scope ADD CONSTRAINT ck_company_scope_payload CHECK (
 );
 CREATE INDEX IF NOT EXISTS idx_sv2_domain  ON company_scope(domain)   WHERE kind = 'domain';
 CREATE INDEX IF NOT EXISTS idx_sv2_net     ON company_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
-CREATE UNIQUE INDEX IF NOT EXISTS uq_sv2_value ON company_scope(company_id, kind, value) WHERE kind IN ('icp','keyword');
-CREATE INDEX IF NOT EXISTS idx_sv2_icp ON company_scope(value) WHERE kind = 'icp';
+DROP INDEX IF EXISTS uq_sv2_value;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sv3_value ON company_scope(company_id, kind, md5(value)) WHERE kind IN ('icp','keyword');
+DROP INDEX IF EXISTS idx_sv2_icp;
+CREATE INDEX IF NOT EXISTS idx_sv3_icp ON company_scope(md5(value)) WHERE kind = 'icp';
 CREATE INDEX IF NOT EXISTS idx_sv2_company ON company_scope(company_id);
 
 -- =====================================================================
@@ -893,8 +895,9 @@ ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
     CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword'));
 -- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
 DROP INDEX IF EXISTS uq_task_scope;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''));
+DROP INDEX IF EXISTS uq_task_scope_v2;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v3 ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), md5(COALESCE(value,'')));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';

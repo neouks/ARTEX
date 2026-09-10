@@ -57,8 +57,8 @@ const (
 	//
 	// Raw and normalized textual scope payloads are bounded by Unicode rune
 	// count so multi-byte input is treated consistently by the API and DB layer.
-	MaxCompanyScopeRawRunes   = 1024
-	MaxCompanyScopeValueRunes = 1024
+	MaxCompanyScopeRawRunes   = 65536
+	MaxCompanyScopeValueRunes = 65536
 )
 
 // CompanyScopeValidationError identifies a client-correctable scope error.
@@ -467,7 +467,7 @@ ON CONFLICT ON CONSTRAINT uq_sv2_net DO NOTHING`,
 		res, err = tx.Exec(`
 INSERT INTO company_scope(company_id, kind, value, raw, reason)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (company_id, kind, value) WHERE kind IN ('icp','keyword') DO NOTHING`,
+ON CONFLICT (company_id, kind, md5(value)) WHERE kind IN ('icp','keyword') DO NOTHING`,
 			companyID, rule.Kind, rule.Value, rule.Raw, reason)
 	default:
 		return false, fmt.Errorf("unsupported company scope kind %q", rule.Kind)

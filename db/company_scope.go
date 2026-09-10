@@ -24,8 +24,9 @@ type ParsedScope struct {
 // ScopeInput is the structured API form for a company scope rule. Empty Kind
 // uses the same automatic classification as the single-textarea UI.
 type ScopeInput struct {
-	Kind  string `json:"kind,omitempty"`
-	Value string `json:"value"`
+	Kind   string `json:"kind,omitempty"`
+	Value  string `json:"value"`
+	Manual bool   `json:"-"` // Set only by user-facing entry points.
 }
 
 // NormalizeICP removes every Unicode whitespace character and folds case. ICP
@@ -89,6 +90,24 @@ func looksLikeIPAddress(value string) bool {
 // ParseScopeInput validates an explicitly typed rule. Legacy callers can omit
 // Kind and use the same automatic classification as the single-textarea UI.
 func ParseScopeInput(input ScopeInput) (ParsedScope, error) {
+	if input.Manual {
+		input.Manual = false
+		raw := strings.TrimSpace(input.Value)
+		if raw == "" {
+			return ParsedScope{}, fmt.Errorf("范围内容不能为空")
+		}
+		if _, network, err := net.ParseCIDR(raw); err == nil {
+			return ParsedScope{Kind: "cidr", Net: network.String(), Raw: raw}, nil
+		}
+		// URLs and certificates are evidence in their own right. Do not discard
+		// paths, ports, case, or line breaks by coercing them to a host/keyword.
+		if !strings.Contains(raw, "://") && !strings.Contains(raw, "-----BEGIN") {
+			if rule, err := ParseScopeInput(input); err == nil && rule.Kind != "keyword" {
+				return rule, nil
+			}
+		}
+		return ParsedScope{Kind: "keyword", Value: raw, Raw: raw}, nil
+	}
 	kind := strings.ToLower(strings.TrimSpace(input.Kind))
 	raw := strings.TrimSpace(input.Value)
 	if kind == "" {

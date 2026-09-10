@@ -41,13 +41,14 @@ func (items *companyScopeInputs) UnmarshalJSON(data []byte) error {
 	for i, raw := range rawItems {
 		var legacy string
 		if err := json.Unmarshal(raw, &legacy); err == nil {
-			out = append(out, db.ScopeInput{Value: legacy})
+			out = append(out, db.ScopeInput{Value: legacy, Manual: true})
 			continue
 		}
 		var structured db.ScopeInput
 		if err := json.Unmarshal(raw, &structured); err != nil {
 			return fmt.Errorf("scope[%d] must be a string or {kind,value}", i)
 		}
+		structured.Manual = true
 		out = append(out, structured)
 	}
 	*items = out
