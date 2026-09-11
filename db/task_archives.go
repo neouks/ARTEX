@@ -104,6 +104,24 @@ GROUP BY relation.source_task_id`)
 	return blockers, rows.Err()
 }
 
+// TaskArchiveBlocker returns the first live direct dependent for one source
+// task. Detail pages use this scoped form instead of scanning every relation.
+func (d *DB) TaskArchiveBlocker(taskID int64) (int64, error) {
+	return d.TaskArchiveBlockerContext(context.Background(), taskID)
+}
+
+// TaskArchiveBlockerContext is the request-cancelable scoped blocker lookup.
+func (d *DB) TaskArchiveBlockerContext(ctx context.Context, taskID int64) (int64, error) {
+	var blocker int64
+	err := d.QueryRowContext(ctx, `SELECT COALESCE(MIN(child.id),0)
+FROM task_relations relation
+JOIN tasks child ON child.id=relation.task_id AND child.deleted_at IS NULL
+LEFT JOIN task_archives pending ON pending.task_id=child.id
+WHERE relation.source_task_id=$1
+  AND (pending.id IS NULL OR pending.state NOT IN ('archive_queued','archiving'))`, taskID).Scan(&blocker)
+	return blocker, err
+}
+
 type TaskArchivePage struct {
 	Items []TaskArchive `json:"items"`
 	Total int           `json:"total"`

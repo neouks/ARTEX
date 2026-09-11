@@ -285,7 +285,7 @@ func (s *AssetStore) ValidateTaskAssetsApproved(taskID int64, assetIDs []int64) 
 	if err != nil {
 		return err
 	}
-	states, err := s.taskAssetStates(taskID, ids)
+	states, err := s.TaskAssetApprovalStates(taskID, ids)
 	if err != nil {
 		return err
 	}
@@ -303,8 +303,12 @@ func (s *AssetStore) ValidateTaskAssetsApproved(taskID int64, assetIDs []int64) 
 	return nil
 }
 
-// taskAssetStates batches admission reads in one statement and one MVCC snapshot.
-func (s *AssetStore) taskAssetStates(taskID int64, ids []int64) (map[int64]string, error) {
+// TaskAssetApprovalStates batches effective authorization reads in one statement.
+// Missing ids are omitted; callers must treat a missing state as unauthorized.
+func (s *AssetStore) TaskAssetApprovalStates(taskID int64, ids []int64) (map[int64]string, error) {
+	if len(ids) == 0 {
+		return map[int64]string{}, nil
+	}
 	rows, err := s.query(`SELECT id,task_asset_effective_approval_state($1,id)
 FROM assets WHERE id=ANY($2::bigint[])`, taskID, ids)
 	if err != nil {
@@ -334,7 +338,7 @@ func (s *AssetStore) FilterApprovedAssets(taskID int64, assets []*Asset) ([]*Ass
 	for _, asset := range assets {
 		ids = append(ids, asset.ID)
 	}
-	states, err := s.taskAssetStates(taskID, ids)
+	states, err := s.TaskAssetApprovalStates(taskID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -493,22 +497,22 @@ func (s *AssetStore) markAgentSideEffectParentsPending(taskID int64, discovered 
 			ips[ip] = true
 		}
 	}
-	rows, err := s.query(`SELECT a.id,a.type,COALESCE(a.domain,''),COALESCE(a.ip,''),
-l.source,l.approval_state,COALESCE(l.approved_by,''),COALESCE(l.approval_reason,'')
+	rows, err := s.query(`SELECT a.id,COALESCE(a.domain,''),COALESCE(a.ip,''),l.source
 FROM task_asset_links l JOIN assets a ON a.id=l.asset_id
-WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')`, taskID)
+WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')
+AND l.approval_state='approved' AND COALESCE(l.approved_by,'')='' AND COALESCE(l.approval_reason,'')=''`, taskID)
 	if err != nil {
 		return err
 	}
 	var pendingIDs []int64
 	for rows.Next() {
 		var id int64
-		var typ, domain, ip, source, state, approvedBy, approvalReason string
-		if err := rows.Scan(&id, &typ, &domain, &ip, &source, &state, &approvedBy, &approvalReason); err != nil {
+		var domain, ip, source string
+		if err := rows.Scan(&id, &domain, &ip, &source); err != nil {
 			rows.Close()
 			return err
 		}
-		if state != ApprovalApproved || operatorApprovedTaskAssetSource(source) || approvedBy != "" || approvalReason != "" {
+		if operatorApprovedTaskAssetSource(source) {
 			continue
 		}
 		host := normalizeTaskAssetHost(domain)
@@ -519,7 +523,10 @@ WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')`, taskID)
 		if matched {
 			pendingIDs = append(pendingIDs, id)
 		}
-		_ = typ
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -585,7 +592,7 @@ func (s *AssetStore) RegisterAgentDiscoveredAsset(taskID, assetID int64, agentKe
 	if existingState == ApprovalRevoked {
 		return ApprovalRevoked, fmt.Errorf("%w: 资产已被用户撤回授权", ErrTaskAssetNotApproved)
 	}
-	if asset.Type == "subdomain" || asset.Type == "service" || asset.Type == "endpoint" {
+	if asset.Type == "subdomain" {
 		if err := s.markAgentSideEffectParentsPending(taskID, asset); err != nil {
 			return "", err
 		}
@@ -610,12 +617,15 @@ WHERE task_id=$1 AND asset_id=$2 AND approval_state NOT IN ('revoked','blocked')
 	}
 	// Side-effect root/IP rows created while inserting a subdomain must receive
 	// the same pending state; otherwise they would be an approval bypass.
-	if asset.Type == "subdomain" || asset.Type == "service" || asset.Type == "endpoint" {
-		_, _ = s.db.Exec(`UPDATE task_asset_links l SET approval_state='pending', approved_at=NULL, approved_by=NULL, approval_reason='Agent 发现，等待用户审批'
+	if asset.Type == "subdomain" {
+		_, err := s.db.Exec(`UPDATE task_asset_links l SET approval_state='pending', approved_at=NULL, approved_by=NULL, approval_reason='Agent 发现，等待用户审批'
 FROM assets a WHERE l.task_id=$1 AND l.asset_id=a.id AND l.approval_state='approved'
 	  AND COALESCE(l.approved_by,'')='' AND COALESCE(l.approval_reason,'')=''
 	  AND l.source NOT IN ('manual','direct','company','api','task','legacy') AND a.type IN ('root_domain','subdomain','ip')
   AND (a.domain=$2 OR ($3<>'' AND a.ip=$3) OR ($4<>'' AND (a.domain=$4 OR a.root_domain=$4)))`, taskID, asset.RootDomain, asset.IP, host)
+		if err != nil {
+			return "", err
+		}
 	}
 	if err := s.queryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
 		return "", err
@@ -768,13 +778,6 @@ WHERE l.task_id=$1 AND l.asset_id=ANY($2::bigint[]) FOR UPDATE OF l`, taskID, id
 		return nil, ErrTaskAssetAssetNotFound
 	}
 	return assets, nil
-}
-
-func (s *AssetStore) AuthorizeTaskAsset(taskID, assetID int64, actor, reason string) error {
-	return s.ApproveTaskAssets(taskID, []int64{assetID}, actor, reason)
-}
-func (s *AssetStore) AuthorizeTaskAssets(taskID int64, assetIDs []int64, actor, reason string) error {
-	return s.ApproveTaskAssets(taskID, assetIDs, actor, reason)
 }
 
 // RunningIntentIDsForAssets returns current-task running intents anchored to
@@ -1438,6 +1441,12 @@ FROM ranked WHERE ordinal=1`, taskID, ids)
 // task's direct sources. Inherited non-terminal intents remain hidden, matching
 // the existing source-aware session contract.
 func (s *AssetStore) IntentAssets(taskID int64) ([]IntentAsset, error) {
+	return s.IntentAssetsPage(taskID, 0, 0)
+}
+
+// IntentAssetsPage returns mappings for a newest-first page of intents. A zero
+// limit preserves the legacy unbounded behavior for internal callers.
+func (s *AssetStore) IntentAssetsPage(taskID, before int64, limit int) ([]IntentAsset, error) {
 	rows, err := s.query(`
 WITH context AS (
     SELECT task.id AS task_id, task.exploration_id, false AS inherited
@@ -1448,31 +1457,54 @@ WITH context AS (
     FROM task_relations relation
     JOIN tasks source ON source.id=relation.source_task_id AND source.deleted_at IS NULL
     WHERE relation.task_id=$1
-)
-SELECT intent.id, asset.id, asset.type,
+), visible_intents AS MATERIALIZED (
+    SELECT intent.id, context.task_id, context.inherited
+    FROM context
+    JOIN exploration_nodes intent
+      ON intent.exploration_id=context.exploration_id AND intent.kind='intent'
+    WHERE (NOT context.inherited OR intent.state IN ('done','blocked','exhausted','stopped'))
+      AND ($2 <= 0 OR intent.id < $2)
+    ORDER BY intent.id DESC
+    LIMIT NULLIF($3,0)
+), anchored AS MATERIALIZED (
+SELECT intent.id AS intent_id, asset.id AS asset_id, asset.type,
        CASE asset.type
          WHEN 'root_domain' THEN COALESCE(asset.domain,'')
          WHEN 'subdomain' THEN COALESCE(asset.domain,'')
          WHEN 'ip' THEN COALESCE(asset.ip,'')
          WHEN 'app' THEN COALESCE(asset.app_name,'')
-		 WHEN 'service' THEN COALESCE(NULLIF(asset.url,''), NULLIF(concat_ws(':', COALESCE(NULLIF(asset.domain,''), NULLIF(asset.ip,'')), asset.port::text),''), NULLIF(asset.service_name,''), '#' || asset.id::text)
+         WHEN 'service' THEN COALESCE(NULLIF(asset.url,''), NULLIF(concat_ws(':', COALESCE(NULLIF(asset.domain,''), NULLIF(asset.ip,'')), asset.port::text),''), NULLIF(asset.service_name,''), '#' || asset.id::text)
          WHEN 'endpoint' THEN COALESCE(NULLIF(asset.url,''), '#' || asset.id::text)
          ELSE '#' || asset.id::text
-       END,
-       COALESCE(link.source,'anchor'),
-       COALESCE(NULLIF(link.source_summary,''), '意图在黑板中锚定该资产'),
-       link.source_node_id, context.task_id, context.inherited
-FROM context
-JOIN exploration_nodes intent ON intent.exploration_id=context.exploration_id AND intent.kind='intent'
+       END AS label,
+       COALESCE(link.source,'anchor') AS source,
+       COALESCE(NULLIF(link.source_summary,''), '意图在黑板中锚定该资产') AS source_summary,
+       link.source_node_id AS source_node_id, intent.task_id, intent.inherited
+FROM visible_intents intent
 JOIN exploration_anchors anchor ON anchor.node_id=intent.id
 JOIN assets asset ON asset.id=anchor.asset_id
-LEFT JOIN task_asset_links link ON link.task_id=context.task_id AND link.asset_id=asset.id
-WHERE (NOT context.inherited OR intent.state IN ('done','blocked','exhausted','stopped'))
-  AND task_asset_effectively_approved($1,asset.id)
-  AND EXISTS (SELECT 1 FROM task_asset_links visible_link
-              WHERE visible_link.task_id=context.task_id AND visible_link.asset_id=asset.id
-                AND task_asset_owner_approval_state(visible_link.task_id,asset.id)='approved')
-ORDER BY context.inherited, intent.id DESC, asset.id`, taskID)
+LEFT JOIN task_asset_links link ON link.task_id=intent.task_id AND link.asset_id=asset.id
+), effective_assets AS MATERIALIZED (
+    -- An asset can anchor hundreds of intents. Evaluate current-task effective
+    -- authorization once per distinct asset instead of once per result row.
+    SELECT candidate.asset_id
+    FROM (SELECT DISTINCT asset_id FROM anchored) candidate
+    WHERE task_asset_effectively_approved($1,candidate.asset_id)
+), authorized AS MATERIALIZED (
+    -- Provenance remains visible only when the owning local/source task also
+    -- authorizes it. Evaluate that owner policy once per distinct task/asset.
+    SELECT candidate.asset_id, candidate.task_id
+    FROM (SELECT DISTINCT asset_id,task_id FROM anchored) candidate
+    JOIN task_asset_links visible_link
+      ON visible_link.task_id=candidate.task_id AND visible_link.asset_id=candidate.asset_id
+    JOIN effective_assets effective ON effective.asset_id=candidate.asset_id
+    WHERE task_asset_owner_approval_state(candidate.task_id,candidate.asset_id)='approved'
+)
+SELECT anchored.intent_id, anchored.asset_id, anchored.type, anchored.label,
+       anchored.source, anchored.source_summary, anchored.source_node_id,
+       anchored.task_id, anchored.inherited
+FROM anchored JOIN authorized USING (asset_id,task_id)
+ORDER BY anchored.inherited, anchored.intent_id DESC, anchored.asset_id`, taskID, before, limit)
 	if err != nil {
 		return nil, err
 	}

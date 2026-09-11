@@ -35,19 +35,21 @@ func (b *Broadcaster) Subscribe(task string) (<-chan db.Activity, func()) {
 		once.Do(func() {
 			b.mu.Lock()
 			if m := b.subs[task]; m != nil {
-				delete(m, ch)
+				if _, subscribed := m[ch]; subscribed {
+					delete(m, ch)
+					close(ch)
+				}
 				if len(m) == 0 {
 					delete(b.subs, task)
 				}
 			}
 			b.mu.Unlock()
-			close(ch)
 		})
 	}
 }
 
 // Publish fans an activity out to all subscribers of a task. Non-blocking: if a
-// subscriber's buffer is full the event is dropped — the client reconnects with
+// subscriber's buffer is full it is disconnected — the client reconnects with
 // its last seq cursor and catches up the gap from the DB, so liveness never
 // stalls the engine.
 func (b *Broadcaster) Publish(task string, a db.Activity) {
@@ -57,6 +59,13 @@ func (b *Broadcaster) Publish(task string, a db.Activity) {
 		select {
 		case ch <- a:
 		default:
+			// A silent drop followed by a later id would skip this event forever.
+			// Drain buffered events then reconnect from the last delivered id.
+			delete(b.subs[task], ch)
+			close(ch)
 		}
+	}
+	if len(b.subs[task]) == 0 {
+		delete(b.subs, task)
 	}
 }

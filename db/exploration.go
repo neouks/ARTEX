@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -376,32 +377,42 @@ func (s *ExplorationStore) LineageAnchorAssetIDs(nodeID int64) ([]int64, error) 
 	if s == nil || s.db == nil || nodeID <= 0 {
 		return nil, nil
 	}
+	byNode, err := s.LineageAnchorAssetIDsForNodes([]int64{nodeID})
+	return byNode[nodeID], err
+}
+
+// LineageAnchorAssetIDsForNodes traces a page in one query, keeping each root's
+// ancestry separate. UNION (not UNION ALL) terminates cyclic graphs.
+func (s *ExplorationStore) LineageAnchorAssetIDsForNodes(nodeIDs []int64) (map[int64][]int64, error) {
+	byNode := make(map[int64][]int64, len(nodeIDs))
+	if s == nil || s.db == nil || len(nodeIDs) == 0 {
+		return byNode, nil
+	}
 	rows, err := s.db.Query(`
-WITH RECURSIVE lineage(id) AS (
-  SELECT id FROM exploration_nodes WHERE id=$1 AND exploration_id=$2
+WITH RECURSIVE lineage(root_id,id) AS (
+  SELECT id,id FROM exploration_nodes WHERE id=ANY($1::bigint[]) AND exploration_id=$2
   UNION
-  SELECT edge.src_id
+  SELECT child.root_id,edge.src_id
   FROM exploration_edges edge
   JOIN lineage child ON child.id=edge.dst_id
   WHERE edge.exploration_id=$2
 )
-SELECT DISTINCT anchor.asset_id
+SELECT DISTINCT lineage.root_id,anchor.asset_id
 FROM lineage
 JOIN exploration_anchors anchor ON anchor.node_id=lineage.id
-ORDER BY anchor.asset_id`, nodeID, s.expID)
+ORDER BY lineage.root_id,anchor.asset_id`, nodeIDs, s.expID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var root, id int64
+		if err := rows.Scan(&root, &id); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		byNode[root] = append(byNode[root], id)
 	}
-	return ids, rows.Err()
+	return byNode, rows.Err()
 }
 
 // Link adds a typed exploration edge (idempotent).
@@ -1140,7 +1151,13 @@ WHERE exploration_id=$1 AND kind='intent' AND state='open')`, s.expID).Scan(&exi
 
 // ExecutionCounts avoids loading node payloads just to render task status.
 func (s *ExplorationStore) ExecutionCounts() (running, goals, met int, err error) {
-	err = s.db.QueryRow(`SELECT
+	return s.ExecutionCountsContext(context.Background())
+}
+
+// ExecutionCountsContext is the request-cancelable form used by HTTP status
+// polling. Background engine callers can keep using ExecutionCounts.
+func (s *ExplorationStore) ExecutionCountsContext(ctx context.Context) (running, goals, met int, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT
 count(*) FILTER (WHERE kind='intent' AND state='running'),
 count(*) FILTER (WHERE kind='goal'),
 count(*) FILTER (WHERE kind='goal' AND state='met')
@@ -1276,7 +1293,12 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'
 
 // Stats returns node counts grouped by kind (for dashboard).
 func (s *ExplorationStore) Stats() (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 GROUP BY kind`, s.expID)
+	return s.StatsContext(context.Background())
+}
+
+// StatsContext is the request-cancelable form of Stats.
+func (s *ExplorationStore) StatsContext(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 GROUP BY kind`, s.expID)
 	if err != nil {
 		return nil, err
 	}
@@ -1550,6 +1572,11 @@ func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
 // ActivityList returns steps after sinceID (exclusive), optionally filtered by node.
 // Returns items and the new cursor (max id seen).
 func (s *ExplorationStore) ActivityList(nodeID *int64, sinceID int64, limit int) ([]Activity, int64, error) {
+	return s.ActivityListContext(context.Background(), nodeID, sinceID, limit)
+}
+
+// ActivityListContext lets a disconnected stream cancel replay and pool waits.
+func (s *ExplorationStore) ActivityListContext(ctx context.Context, nodeID *int64, sinceID int64, limit int) ([]Activity, int64, error) {
 	if limit <= 0 {
 		limit = 300
 	}
@@ -1557,10 +1584,10 @@ func (s *ExplorationStore) ActivityList(nodeID *int64, sinceID int64, limit int)
 	var err error
 	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
 	if nodeID != nil {
-		rows, err = s.db.Query(`SELECT `+cols+`
+		rows, err = s.db.QueryContext(ctx, `SELECT `+cols+`
 FROM activity WHERE exploration_id=$1 AND node_id=$2 AND id>$3 ORDER BY id LIMIT $4`, s.expID, *nodeID, sinceID, limit)
 	} else {
-		rows, err = s.db.Query(`SELECT `+cols+`
+		rows, err = s.db.QueryContext(ctx, `SELECT `+cols+`
 FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, sinceID, limit)
 	}
 	if err != nil {

@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -37,17 +38,20 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import type { LLMProfile, Task } from "@/lib/types";
+import type { InterceptApprovalRow, LLMProfile, Stats, Task } from "@/lib/types";
 
-import { AssetApprovalsTab } from "./_tabs/asset-approvals-tab";
-import { AssetsTab } from "./_tabs/assets-tab";
-import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
-import { GraphTab } from "./_tabs/graph-tab";
-import { InterceptTab } from "./_tabs/intercept-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
-import { ReportTab } from "./_tabs/report-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
+
+// Secondary tabs (graphs, tables and report renderers) are not on the session
+// startup path. Load their code only when the corresponding tab mounts.
+const AssetApprovalsTab = dynamic(() => import("./_tabs/asset-approvals-tab").then((m) => m.AssetApprovalsTab));
+const AssetsTab = dynamic(() => import("./_tabs/assets-tab").then((m) => m.AssetsTab));
+const CoverageGraphTab = dynamic(() => import("./_tabs/coverage-graph-tab").then((m) => m.CoverageGraphTab));
+const FindingsTab = dynamic(() => import("./_tabs/findings-tab").then((m) => m.FindingsTab));
+const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTab));
+const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
+const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
+const ReportTab = dynamic(() => import("./_tabs/report-tab").then((m) => m.ReportTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
@@ -66,6 +70,19 @@ function taskProfileIDs(task: Task): string[] {
     return task.llm_profile_ids.map(String);
   }
   return task.llm_profile_id ? [String(task.llm_profile_id)] : [];
+}
+
+function mergeTaskStats(task: Task, stats: Stats | null): Task {
+  const active = stats?.active_task;
+  if (!active) return task;
+  return {
+    ...task,
+    in_flight: active.in_flight,
+    goals_total: active.goals_total,
+    goals_met: active.goals_met,
+    engine_mode: stats?.engine_mode ?? active.engine_mode,
+    paused: active.paused,
+  };
 }
 
 function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: LLMProfile[]; onUpdated: () => void }) {
@@ -208,7 +225,7 @@ function TaskDetailInner() {
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("sessions");
-  const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
+  const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [archiving, setArchiving] = React.useState(false);
 
@@ -221,15 +238,23 @@ function TaskDetailInner() {
 
   React.useEffect(() => {
     let alive = true;
-    const load = () =>
-      api
+    let inFlight = false;
+    setPendingIntercepts([]);
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      return api
         .interceptTask(id)
         .then((rows) => {
-          if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
+          if (alive) setPendingIntercepts(rows.filter((row) => row.status === "pending"));
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
+        })
+        .finally(() => {
+          inFlight = false;
         });
+    };
     void load();
     const t = setInterval(load, 5000);
     return () => {
@@ -238,39 +263,66 @@ function TaskDetailInner() {
     };
   }, [id]);
 
-  const taskLoadInFlight = React.useRef<string | null>(null);
-  const load = React.useCallback(() => {
-    if (taskLoadInFlight.current === id) return;
-    taskLoadInFlight.current = id;
-    Promise.all([api.task(id), api.stats(id).catch(() => null)])
-      .then(([task, s]) => {
-        if (taskLoadInFlight.current !== id) return;
-        const base = { ...task };
-        const at = s?.active_task;
-        if (at) {
-          base.in_flight = at.in_flight;
-          base.goals_total = at.goals_total;
-          base.goals_met = at.goals_met;
-          base.engine_mode = s?.engine_mode ?? at.engine_mode;
-          base.paused = at.paused;
-        }
-        setTask(base);
-        setPaused(at?.paused ?? base.paused ?? false);
+  const taskLoadInFlight = React.useRef<symbol | null>(null);
+  const statsLoadInFlight = React.useRef<symbol | null>(null);
+  const latestStats = React.useRef<Stats | null>(null);
+  const loadTask = React.useCallback(() => {
+    if (taskLoadInFlight.current) return;
+    const request = Symbol(id);
+    taskLoadInFlight.current = request;
+    api
+      .task(id)
+      .then((value) => {
+        if (taskLoadInFlight.current !== request) return;
+        const merged = mergeTaskStats(value, latestStats.current);
+        setTask(merged);
+        setPaused(merged.paused ?? false);
+        setLoaded(true);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
       })
       .finally(() => {
-        if (taskLoadInFlight.current === id) {
+        if (taskLoadInFlight.current === request) {
           taskLoadInFlight.current = null;
           setLoaded(true);
         }
       });
   }, [id]);
+  const loadStats = React.useCallback(() => {
+    if (statsLoadInFlight.current) return;
+    const request = Symbol(id);
+    statsLoadInFlight.current = request;
+    api
+      .stats(id)
+      .then((value) => {
+        if (statsLoadInFlight.current !== request) return;
+        latestStats.current = value;
+        setTask((current) => (current ? mergeTaskStats(current, value) : current));
+        if (value.active_task?.paused !== undefined) setPaused(value.active_task.paused);
+      })
+      .catch(() => {
+        // Keep the last live state during a transient statistics failure.
+      })
+      .finally(() => {
+        if (statsLoadInFlight.current === request) statsLoadInFlight.current = null;
+      });
+  }, [id]);
+  const load = React.useCallback(() => {
+    loadTask();
+    loadStats();
+  }, [loadStats, loadTask]);
   React.useEffect(() => {
+    setTask(null);
+    setLoaded(false);
+    latestStats.current = null;
     load();
     const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      taskLoadInFlight.current = null;
+      statsLoadInFlight.current = null;
+    };
   }, [load]);
 
   async function togglePause() {
@@ -402,9 +454,9 @@ function TaskDetailInner() {
             {TABS.map((t) => (
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
-                {t.value === "intercept" && interceptPendingCount > 0 && (
+                {t.value === "intercept" && pendingIntercepts.length > 0 && (
                   <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
-                    {interceptPendingCount > 99 ? "99+" : interceptPendingCount}
+                    {pendingIntercepts.length > 99 ? "99+" : pendingIntercepts.length}
                   </span>
                 )}
               </TabsTrigger>
@@ -416,7 +468,7 @@ function TaskDetailInner() {
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
-          <SessionsTab taskId={id} />
+          <SessionsTab taskId={id} pendingIntercepts={pendingIntercepts} />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />

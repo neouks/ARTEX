@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -609,6 +610,74 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	restored, err := d.Assets().QueryByTaskApproval(current.ID, "service", "all", "all", 10, 0)
 	if err != nil || len(restored) != 1 || restored[0].Blocked || restored[0].TaskInherited || restored[0].TaskReadOnly {
 		t.Fatalf("reattached task asset metadata=%+v err=%v", restored, err)
+	}
+}
+
+func TestIntentAssetsHonorsCanceledReadContext(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+	task, err := d.CreateTask("canceled intent assets", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = d.Assets().WithReadContext(ctx).IntentAssets(task.ID)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("IntentAssets error=%v, want context.Canceled", err)
+	}
+}
+
+func TestIntentAssetsPageLimitsIntentsBeforeJoiningAssets(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer d.Close()
+	task, err := d.CreateTask("paged intent assets", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{
+		Domain: fmt.Sprintf("intent-page-%d.example.test", time.Now().UnixNano()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = d.DeleteTask(task.ID)
+		_, _ = d.Assets().DeleteByIDs([]int64{assetID})
+	})
+	if _, err := d.Assets().AttachAssetsToTask(task.ID, []int64{assetID}, "test target"); err != nil {
+		t.Fatal(err)
+	}
+	intentIDs := make([]int64, 0, 3)
+	for i := 0; i < 3; i++ {
+		intentID, err := d.Exploration(task.ExplorationID).AddIntent(
+			map[string]any{"summary": fmt.Sprintf("intent %d", i)}, 1, []int64{assetID}, "planner",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intentIDs = append(intentIDs, intentID)
+	}
+	page, err := d.Assets().IntentAssetsPage(task.ID, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].IntentID != intentIDs[2] || page[1].IntentID != intentIDs[1] {
+		t.Fatalf("newest intent asset page=%+v, want intent ids %v", page, intentIDs[1:])
+	}
+	page, err = d.Assets().IntentAssetsPage(task.ID, intentIDs[1], 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].IntentID != intentIDs[0] {
+		t.Fatalf("older intent asset page=%+v, want intent id %d", page, intentIDs[0])
 	}
 }
 

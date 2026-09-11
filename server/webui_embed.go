@@ -40,21 +40,6 @@ func (s *Server) webuiHandler() http.Handler {
 				return
 			}
 		}
-		http.ServeFileFS(w, r, root, "index.html")
+		serveFileIfExists(w, r, root, "index.html")
 	})
-}
-
-// serveFileIfExists serves name from fsys when it exists as a regular file.
-func serveFileIfExists(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) bool {
-	f, err := fsys.Open(name)
-	if err != nil {
-		return false
-	}
-	st, statErr := f.Stat()
-	_ = f.Close()
-	if statErr != nil || st.IsDir() {
-		return false
-	}
-	http.ServeFileFS(w, r, fsys, name)
-	return true
 }

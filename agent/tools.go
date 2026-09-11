@@ -765,33 +765,53 @@ func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.Expl
 	if t.as == nil || t.taskID <= 0 || store == nil {
 		return nodes
 	}
+	nodeIDs := make([]int64, 0, len(nodes))
+	for _, node := range nodes {
+		nodeIDs = append(nodeIDs, node.ID)
+	}
+	lineage, err := store.LineageAnchorAssetIDsForNodes(nodeIDs)
+	if err != nil {
+		return nil
+	}
+	unique := make(map[int64]bool)
+	var assetIDs []int64
+	for _, node := range nodes {
+		if len(lineage[node.ID]) == 0 {
+			lineage[node.ID] = intentAssetIDs(node)
+		}
+		for _, id := range lineage[node.ID] {
+			if !unique[id] {
+				unique[id] = true
+				assetIDs = append(assetIDs, id)
+			}
+		}
+	}
+	ownerStates, err := t.as.TaskAssetApprovalStates(ownerTaskID, assetIDs)
+	if err != nil {
+		return nil
+	}
+	currentStates := ownerStates
+	if ownerTaskID != t.taskID {
+		currentStates, err = t.as.TaskAssetApprovalStates(t.taskID, assetIDs)
+		if err != nil {
+			return nil
+		}
+	}
 	out := make([]*db.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if n.Kind == db.KindDigest && !t.digestAuthorized(store, ownerTaskID, n.ID) {
 			continue
 		}
-		ids, err := store.LineageAnchorAssetIDs(n.ID)
-		if err != nil {
-			continue
-		}
-		if len(ids) == 0 {
-			ids = intentAssetIDs(n)
-		}
-		if len(ids) == 0 {
-			out = append(out, n)
-			continue
-		}
-		if err := t.as.ValidateTaskAssetsApproved(ownerTaskID, ids); err != nil {
-			continue
-		}
-		// Inherited nodes must also remain usable in the current task context;
-		// a current-task deletion tombstone is an explicit local opt-out.
-		if ownerTaskID != t.taskID {
-			if err := t.as.ValidateTaskAssetsApproved(t.taskID, ids); err != nil {
-				continue
+		approved := true
+		for _, id := range lineage[n.ID] {
+			if ownerStates[id] != db.ApprovalApproved || currentStates[id] != db.ApprovalApproved {
+				approved = false
+				break
 			}
 		}
-		out = append(out, n)
+		if approved {
+			out = append(out, n)
+		}
 	}
 	return out
 }

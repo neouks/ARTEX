@@ -1003,39 +1003,54 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{}
 	out["engine_mode"] = "idle"              // spec enum; overridden below when a task is active
 	out["llm_configured"] = s.engine.Ready() // is an LLM provider installed at all
-	if tr := s.m.Traffic(); tr != nil {
-		c, _ := tr.Count()
-		out["traffic"] = c
-		out["traffic_enabled"] = true
-	}
-	if counts, err := s.m.Assets().CountsByType(); err == nil {
-		total := 0
-		for _, n := range counts {
-			total += n
+	addGlobalStats := func() {
+		if tr := s.m.Traffic(); tr != nil {
+			c, _ := tr.Count()
+			out["traffic"] = c
+			out["traffic_enabled"] = true
 		}
-		out["assets"] = total
-		out["asset_counts"] = counts
+		if counts, err := s.m.Assets().CountsByType(); err == nil {
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			out["assets"] = total
+			out["asset_counts"] = counts
+		}
 	}
-
 	// resolve the task: explicit ?task=<id> binds to that task (so a detail view
 	// never silently follows a globally-changed active task); empty = active.
 	taskParam := r.URL.Query().Get("task")
+	compact := taskParam != "" && r.URL.Query().Get("compact") == "1"
 	t := s.m.ResolveTask(taskParam)
 	if t == nil {
 		if taskParam != "" && taskParam != "active" {
 			writeErr(w, 404, "task not found")
 			return
 		}
+		if !compact {
+			addGlobalStats()
+		}
 		writeJSON(w, 200, out) // no task selected: only global fields
 		return
 	}
+	// Global dashboard totals are unrelated to an explicitly requested task.
+	// Avoid serially scanning traffic and all assets on every detail-page poll.
+	if !compact {
+		addGlobalStats()
+	}
 	out["llm_configured"] = s.engine.ReadyFor(t)
 
-	st, _ := t.Store.Stats()
-	out["exploration"] = st
+	if !compact {
+		st, _ := t.Store.StatsContext(r.Context())
+		out["exploration"] = st
+	}
 
 	// per-task running state + heartbeat (distinct from "LLM configured").
-	inFlight, goals, goalsMet, _ := t.Store.ExecutionCounts()
+	inFlight, goals, goalsMet, err := t.Store.ExecutionCountsContext(r.Context())
+	if err != nil && r.Context().Err() != nil {
+		return
+	}
 	last := s.engine.LastActivity(t.ID)
 	paused := s.engine.IsPaused(t.ID)
 	activeCalls := s.engine.ActiveLLMCalls(t.ID)
@@ -1762,8 +1777,11 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto := taskDTO(t, s.resolvedTaskStatus(t))
-	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
-	applyTaskArchiveBlocker(&dto, archiveBlockers)
+	if taskID, err := strconv.ParseInt(t.ID, 10, 64); err == nil {
+		if blocker, err := s.m.PG().TaskArchiveBlockerContext(r.Context(), taskID); err == nil && blocker > 0 {
+			dto.ArchiveBlockedBy = strconv.FormatInt(blocker, 10)
+		}
+	}
 	writeJSON(w, 200, dto)
 }
 
@@ -2877,13 +2895,22 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	// overlap by skipping channel events whose id was already replayed.
 	ch, unsub := s.engine.Broadcaster().Subscribe(t.ID)
 	defer unsub()
+	// Establish SSE immediately, even when replay is waiting for the database.
+	// Comments don't advance Last-Event-ID or fabricate an activity event.
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 
 	// Emit a standard SSE id: line so the browser echoes it as Last-Event-ID on
 	// auto-reconnect (see cursor precedence above).
-	sendSSE := func(a db.Activity) {
+	sendSSE := func(a db.Activity) error {
 		b, _ := json.Marshal(activityDTO(a))
-		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b)
+		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b); err != nil {
+			return err
+		}
 		flusher.Flush()
+		return nil
 	}
 
 	// Compensate the DB backlog after `since` in batches until caught up. This is the
@@ -2895,13 +2922,17 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	// the id<=since skip below drops any that this replay already covered.
 	const replayBatch = 500
 	for {
-		items, cursor, err := t.Store.ActivityList(intentPtr, since, replayBatch)
+		replayCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		items, cursor, err := t.Store.ActivityListContext(replayCtx, intentPtr, since, replayBatch)
+		cancel()
 		if err != nil {
 			log.Printf("[activity/stream] task=%s replay since=%d: %v", t.ID, since, err)
 			return
 		}
 		for _, a := range items {
-			sendSSE(a)
+			if err := sendSSE(a); err != nil {
+				return
+			}
 		}
 		if cursor > since {
 			since = cursor
@@ -2930,7 +2961,9 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 				continue // scoped session: only this intent's steps
 			}
 			since = a.ID
-			sendSSE(a)
+			if err := sendSSE(a); err != nil {
+				return
+			}
 		case <-ping.C:
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()

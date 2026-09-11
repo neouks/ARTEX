@@ -456,7 +456,13 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({
+  taskId,
+  pendingIntercepts,
+}: {
+  taskId: string;
+  pendingIntercepts: InterceptApprovalRow[];
+}) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
   // 手机端（<lg）会话列表默认折叠：屏幕高度本就紧张，列表若固定占掉 10~15rem，
   // 下方的会话记录会被挤到只剩标题与输入框。折叠后记录区拿到几乎全部高度，
@@ -467,6 +473,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // Worker sessions derived from exploration intents (paged past the old 300 cap).
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [intentAssets, setIntentAssets] = React.useState<IntentAsset[]>([]);
+  const [olderIntentAssets, setOlderIntentAssets] = React.useState<IntentAsset[]>([]);
   const [olderIntents, setOlderIntents] = React.useState<TaskNode[]>([]);
   const [firstIntentsHasMore, setFirstIntentsHasMore] = React.useState(false);
   const [olderIntentsHasMore, setOlderIntentsHasMore] = React.useState(false);
@@ -549,9 +556,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [taskTokens, setTaskTokens] = React.useState<TokenTotal | null>(null);
   const [sessionTokens, setSessionTokens] = React.useState<Record<string, SessionTokenUsage>>({});
   const [llmResolutions, setLLMResolutions] = React.useState<TaskLLMResolutions | null>(null);
-  // Pending intercept requests for this task — used to show warning icons on sessions.
-  const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
-
   // Refs backing SSE/loading without re-render churn.
   const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
   const esRef = React.useRef<EventSource | null>(null);
@@ -754,25 +758,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     };
   }, [taskId]);
 
-  React.useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .interceptTask(taskId)
-        .then((rows) => {
-          if (alive) setPendingIntercepts(rows.filter((r) => r.status === "pending"));
-        })
-        .catch(() => {
-          // Polling is best-effort; the next interval retries automatically.
-        });
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [taskId]);
-
   // Re-render on a timer so "streaming" liveness recomputes as activity goes stale.
   const [, setTick] = React.useState(0);
   React.useEffect(() => {
@@ -790,6 +775,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setStore({});
     setIntents([]);
     setIntentAssets([]);
+    setOlderIntentAssets([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
@@ -806,6 +792,57 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     // won't double-load it and pre-empt the SSE opened here.
     loadingKeysRef.current = new Set(["main"]);
     let alive = true;
+    let pending: Activity[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushActivities = () => {
+      flushTimer = undefined;
+      if (!alive || !pending.length) return;
+      const batches = new Map<string, Activity[]>();
+      for (const activity of pending) {
+        const key = sessionKeyOf(activity);
+        const batch = batches.get(key) ?? [];
+        batch.push(activity);
+        batches.set(key, batch);
+      }
+      pending = [];
+      const activeK = activeKeyRef.current;
+      const atBottom = atBottomRef.current;
+      setStore((prev) => {
+        const next = { ...prev };
+        for (const [key, batch] of batches) {
+          const cur = prev[key] ?? emptyState();
+          const lastTs = batch[batch.length - 1].ts;
+          if (!cur.loaded && !cur.loading && key !== activeK) {
+            const accounting = batch.filter((item) => item.kind === "usage" || item.kind === "result");
+            next[key] = {
+              ...cur,
+              items: mergeBySeq(cur.items, accounting).slice(-4),
+              lastTs,
+              unread: cur.unread + batch.length,
+            };
+            continue;
+          }
+          let items = mergeBySeq(cur.items, batch);
+          let hasMore = cur.hasMore;
+          let earliestSeq = cur.earliestSeq;
+          // Preserve scrolled-up history; trimmed rows remain available via pagination.
+          if ((key !== activeK || atBottom) && items.length > MAX_KEEP) {
+            items = items.slice(-MAX_KEEP);
+            hasMore = true;
+            earliestSeq = items[0].seq;
+          }
+          next[key] = {
+            ...cur,
+            items,
+            lastTs,
+            hasMore,
+            earliestSeq,
+            unread: key === activeK ? 0 : cur.unread + batch.length,
+          };
+        }
+        return next;
+      });
+    };
 
     // MOCK demo: no SSE backend — pull one activity snapshot and bucket by session.
     if (MOCK) {
@@ -870,6 +907,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         es.onopen = () => setSseLive(true);
         es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
         es.onmessage = (e) => {
+          if (!alive) return;
           let a: Activity;
           try {
             a = JSON.parse(e.data) as Activity;
@@ -895,36 +933,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 // The periodic resolver poll will retry if this event-triggered refresh fails.
               });
           }
-          const k = sessionKeyOf(a);
-          setStore((prev) => {
-            const cur = prev[k] ?? emptyState();
-            const activeK = activeKeyRef.current;
-            // Merge into sessions that are loaded, actively loading, or the current
-            // view (so returning is instant + a frame that lands mid-load isn't lost).
-            // A cold, inactive session also keeps a tiny accounting tail so the
-            // sidebar can add the latest unfinished usage without loading history.
-            if (!cur.loaded && !cur.loading && k !== activeK) {
-              const accountingItems =
-                a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
-              return {
-                ...prev,
-                [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
-              };
-            }
-            let items = mergeBySeq(cur.items, [a]);
-            // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
-            // but never while the user is reading this session's history (scrolled up).
-            let hasMore = cur.hasMore;
-            let earliestSeq = cur.earliestSeq;
-            const trimmable = k !== activeK || atBottomRef.current;
-            if (trimmable && items.length > MAX_KEEP) {
-              items = items.slice(items.length - MAX_KEEP);
-              hasMore = true;
-              earliestSeq = items[0].seq;
-            }
-            const unread = k === activeK ? 0 : cur.unread + 1;
-            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
-          });
+          pending.push(a);
+          // Replay can arrive in hundreds of frames. Merge once per session per
+          // batch instead of repeatedly sorting its entire history for every frame.
+          if (flushTimer === undefined) flushTimer = setTimeout(flushActivities, 50);
         };
       })
       .catch((err) => {
@@ -935,6 +947,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
     return () => {
       alive = false;
+      if (flushTimer !== undefined) clearTimeout(flushTimer);
+      pending = [];
       esRef.current?.close();
       esRef.current = null;
     };
@@ -942,19 +956,28 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
   React.useEffect(() => {
     let active = true;
-    const load = () =>
-      api
-        .taskIntentAssets(taskId)
+    let inFlight = false;
+    const controller = new AbortController();
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      return api
+        .taskIntentAssets(taskId, 0, 300, controller.signal)
         .then((assets) => {
           if (active) setIntentAssets(assets);
         })
         .catch(() => {
           // The next poll retries; Worker controls and transcripts remain available.
+        })
+        .finally(() => {
+          inFlight = false;
         });
+    };
     void load();
     const timer = setInterval(load, 5000);
     return () => {
       active = false;
+      controller.abort();
       clearInterval(timer);
     };
   }, [taskId]);
@@ -962,13 +985,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
     let active = true;
+    let inFlight = false;
     firstIntentsRef.current = [];
     setIntents([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
-    const load = () =>
-      api
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      return api
         .intentsPage(taskId, 0, 300)
         .then((r) => {
           if (!active) return;
@@ -990,7 +1016,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
+        })
+        .finally(() => {
+          inFlight = false;
         });
+    };
     void load();
     const t = setInterval(load, 5000);
     return () => {
@@ -1005,12 +1035,18 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const minId = all.reduce((m, n) => Math.min(m, Number(n.id)), Infinity);
     if (!Number.isFinite(minId)) return;
     setLoadingOlderIntents(true);
-    api
-      .intentsPage(taskId, minId, 300)
-      .then((r) => {
+    Promise.all([api.intentsPage(taskId, minId, 300), api.taskIntentAssets(taskId, minId, 300)])
+      .then(([r, assets]) => {
         setOlderIntents((prev) => {
           const seen = new Set([...intents, ...prev].map((n) => n.id));
           return [...prev, ...r.items.filter((n) => !seen.has(n.id))];
+        });
+        setOlderIntentAssets((previous) => {
+          const seen = new Set(previous.map((asset) => `${asset.intent_id}:${asset.asset_id}:${asset.source_task_id}`));
+          return [
+            ...previous,
+            ...assets.filter((asset) => !seen.has(`${asset.intent_id}:${asset.asset_id}:${asset.source_task_id}`)),
+          ];
         });
         setOlderIntentsHasMore(r.hasMore);
         setHasLoadedOlderIntentsPage(true);
@@ -1030,14 +1066,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, [intents, olderIntents]);
   const intentAssetsByID = React.useMemo(() => {
     const grouped = new Map<string, IntentAsset[]>();
-    for (const asset of intentAssets) {
+    for (const asset of [...intentAssets, ...olderIntentAssets]) {
       const key = String(asset.intent_id);
       const current = grouped.get(key);
       if (current) current.push(asset);
       else grouped.set(key, [asset]);
     }
     return grouped;
-  }, [intentAssets]);
+  }, [intentAssets, olderIntentAssets]);
 
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;

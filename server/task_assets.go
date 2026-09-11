@@ -38,6 +38,10 @@ func (s *Server) updateTaskAssetTemplate(w http.ResponseWriter, r *http.Request)
 
 func writeTaskAssetError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, context.Canceled):
+		return
+	case errors.Is(err, context.DeadlineExceeded):
+		writeErr(w, http.StatusGatewayTimeout, "资产查询超时，请缩小查询范围后重试")
 	case errors.Is(err, db.ErrTaskAssetInvalid):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, db.ErrTaskAssetBlocked), errors.Is(err, db.ErrTaskAssetNotApproved):
@@ -235,7 +239,15 @@ func (s *Server) taskIntentAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := parseTaskID(task.ID)
-	assets, err := s.m.Assets().IntentAssets(taskID)
+	q := r.URL.Query()
+	before := int64(atoiDefault(q.Get("before"), 0))
+	limit := 0
+	if q.Get("limit") != "" {
+		limit = min(max(atoiDefault(q.Get("limit"), 300), 1), 500)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	assets, err := s.m.Assets().WithReadContext(ctx).IntentAssetsPage(taskID, before, limit)
 	if err != nil {
 		writeTaskAssetError(w, err)
 		return

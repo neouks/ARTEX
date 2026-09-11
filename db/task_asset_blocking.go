@@ -81,7 +81,7 @@ WHERE task_id=$1 AND asset_id=ANY($2::bigint[]) AND approval_state<>'blocked'`, 
 
 func (s *AssetStore) directTaskAssetBlockKind(taskID, assetID int64) (string, error) {
 	var kind string
-	err := s.db.QueryRow(`SELECT b.block_kind FROM task_asset_blocks b JOIN assets a
+	err := s.queryRow(`SELECT b.block_kind FROM task_asset_blocks b JOIN assets a
 ON b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a)
 WHERE b.task_id=$1 AND a.id=$2 LIMIT 1`, taskID, assetID).Scan(&kind)
 	if err == sql.ErrNoRows {

@@ -1,0 +1,509 @@
+{
+  "observedMs": 23316,
+  "navigation": [
+    {
+      "ttfb": 798,
+      "dom": 2726,
+      "load": 6136
+    }
+  ],
+  "mainThread": {
+    "long": [
+      {
+        "start": 6177.5999999940395,
+        "duration": 113
+      },
+      {
+        "start": 7753.699999988079,
+        "duration": 74
+      },
+      {
+        "start": 7827.899999991059,
+        "duration": 58
+      },
+      {
+        "start": 7929.5,
+        "duration": 67
+      }
+    ],
+    "milestones": {
+      "sessions": 6733.899999991059
+    }
+  },
+  "paint": [
+    {
+      "name": "first-paint",
+      "start": 2748
+    },
+    {
+      "name": "first-contentful-paint",
+      "start": 6348
+    }
+  ],
+  "resources": [
+    {
+      "path": "/_next/static/media/GeistMono_Variable-s.p.3ms9vq719j3f8.woff2",
+      "start": 808,
+      "queue": 1,
+      "ttfb": 760,
+      "end": 2170,
+      "bytes": 71668
+    },
+    {
+      "path": "/_next/static/media/GeistPixel_Circle.p.0rqe0db4f0cia.woff2",
+      "start": 808,
+      "queue": 1,
+      "ttfb": 832,
+      "end": 1948,
+      "bytes": 28344
+    },
+    {
+      "path": "/_next/static/media/GeistPixel_Line.p.1gvmpev-r-ty_.woff2",
+      "start": 809,
+      "queue": 1,
+      "ttfb": 778,
+      "end": 1890,
+      "bytes": 18420
+    },
+    {
+      "path": "/_next/static/media/GeistPixel_Square.p.2hsizu-z_gncm.woff2",
+      "start": 809,
+      "queue": 3,
+      "ttfb": 779,
+      "end": 1898,
+      "bytes": 28840
+    },
+    {
+      "path": "/_next/static/media/GeistPixel_Grid.p.2ss63b6eqyzy4.woff2",
+      "start": 809,
+      "queue": 1,
+      "ttfb": 859,
+      "end": 1990,
+      "bytes": 28668
+    },
+    {
+      "path": "/_next/static/media/GeistPixel_Triangle.p.04xw1z5oncddb.woff2",
+      "start": 809,
+      "queue": 1090,
+      "ttfb": 422,
+      "end": 2321,
+      "bytes": 29060
+    },
+    {
+      "path": "/_next/static/media/Geist_Variable-s.p.0mrjj4bg00-he.woff2",
+      "start": 809,
+      "queue": 1139,
+      "ttfb": 374,
+      "end": 2624,
+      "bytes": 69952
+    },
+    {
+      "path": "/_next/static/chunks/4384baud_6ozc.css",
+      "start": 809,
+      "queue": 293,
+      "ttfb": 362,
+      "end": 1464,
+      "bytes": 10911
+    },
+    {
+      "path": "/_next/static/chunks/1g4bbjr1w1jrs.css",
+      "start": 809,
+      "queue": 656,
+      "ttfb": 361,
+      "end": 2709,
+      "bytes": 266695
+    },
+    {
+      "path": "/_next/static/chunks/1jexzsn2qdw84.js",
+      "start": 809,
+      "queue": 1901,
+      "ttfb": 391,
+      "end": 3102,
+      "bytes": 5672
+    },
+    {
+      "path": "/_next/static/chunks/3z-oetkpttgun.js",
+      "start": 809,
+      "queue": 1905,
+      "ttfb": 388,
+      "end": 3107,
+      "bytes": 31202
+    },
+    {
+      "path": "/_next/static/chunks/3nc6x0_y5iwnk.js",
+      "start": 809,
+      "queue": 1906,
+      "ttfb": 393,
+      "end": 3426,
+      "bytes": 44791
+    },
+    {
+      "path": "/_next/static/chunks/2g05-lers809t.js",
+      "start": 809,
+      "queue": 1905,
+      "ttfb": 388,
+      "end": 4017,
+      "bytes": 227951
+    },
+    {
+      "path": "/_next/static/chunks/14_fsmfcbrrbe.js",
+      "start": 809,
+      "queue": 1906,
+      "ttfb": 1185,
+      "end": 4798,
+      "bytes": 138093
+    },
+    {
+      "path": "/_next/static/chunks/turbopack-3p84inqw3zu8w.js",
+      "start": 809,
+      "queue": 2294,
+      "ttfb": 367,
+      "end": 3471,
+      "bytes": 10914
+    },
+    {
+      "path": "/_next/static/chunks/2lwgdaiign-ra.js",
+      "start": 809,
+      "queue": 2298,
+      "ttfb": 368,
+      "end": 3476,
+      "bytes": 30811
+    },
+    {
+      "path": "/_next/static/chunks/3pv9ea13-4r3q.js",
+      "start": 809,
+      "queue": 2567,
+      "ttfb": 367,
+      "end": 3746,
+      "bytes": 31400
+    },
+    {
+      "path": "/_next/static/chunks/1ntn7efqc-iiw.js",
+      "start": 809,
+      "queue": 2618,
+      "ttfb": 386,
+      "end": 3816,
+      "bytes": 55063
+    },
+    {
+      "path": "/_next/static/chunks/12j-n_j2swqsy.js",
+      "start": 809,
+      "queue": 2667,
+      "ttfb": 401,
+      "end": 3884,
+      "bytes": 48130
+    },
+    {
+      "path": "/_next/static/chunks/04u9x8_fzw9b5.js",
+      "start": 809,
+      "queue": 2663,
+      "ttfb": 407,
+      "end": 3883,
+      "bytes": 32742
+    },
+    {
+      "path": "/_next/static/chunks/3srjx2jgdex5c.js",
+      "start": 809,
+      "queue": 3007,
+      "ttfb": 384,
+      "end": 4201,
+      "bytes": 24353
+    },
+    {
+      "path": "/_next/static/chunks/31epa9yds3scr.js",
+      "start": 809,
+      "queue": 3075,
+      "ttfb": 369,
+      "end": 4258,
+      "bytes": 18311
+    },
+    {
+      "path": "/_next/static/chunks/1vw9u947zekpa.js",
+      "start": 809,
+      "queue": 2937,
+      "ttfb": 1146,
+      "end": 4893,
+      "bytes": 10873
+    },
+    {
+      "path": "/_next/static/chunks/1o-5fj0-vo-3m.js",
+      "start": 809,
+      "queue": 3075,
+      "ttfb": 361,
+      "end": 4246,
+      "bytes": 29061
+    },
+    {
+      "path": "/_next/static/chunks/0hr8bb-v3mrku.js",
+      "start": 809,
+      "queue": 3208,
+      "ttfb": 391,
+      "end": 4410,
+      "bytes": 27605
+    },
+    {
+      "path": "/_next/static/chunks/25dvlotzjxttw.js",
+      "start": 809,
+      "queue": 3437,
+      "ttfb": 361,
+      "end": 4612,
+      "bytes": 180155
+    },
+    {
+      "path": "/_next/static/chunks/2jzlvh8zcm3dx.js",
+      "start": 809,
+      "queue": 3449,
+      "ttfb": 377,
+      "end": 4636,
+      "bytes": 34180
+    },
+    {
+      "path": "/_next/static/chunks/43kq3m2jr3vap.js",
+      "start": 809,
+      "queue": 3601,
+      "ttfb": 368,
+      "end": 4782,
+      "bytes": 61270
+    },
+    {
+      "path": "/_next/static/chunks/3riw0-7aeplln.js",
+      "start": 809,
+      "queue": 3393,
+      "ttfb": 1919,
+      "end": 6121,
+      "bytes": 23594
+    },
+    {
+      "path": "/_next/static/chunks/0_kojunhphkgu.js",
+      "start": 809,
+      "queue": 3803,
+      "ttfb": 358,
+      "end": 4979,
+      "bytes": 36548
+    },
+    {
+      "path": "/_next/static/chunks/0got7ea_xi-cz.js",
+      "start": 809,
+      "queue": 3973,
+      "ttfb": 411,
+      "end": 5291,
+      "bytes": 59543
+    },
+    {
+      "path": "/_next/static/chunks/2magtxv943thg.js",
+      "start": 809,
+      "queue": 3989,
+      "ttfb": 394,
+      "end": 5291,
+      "bytes": 144344
+    },
+    {
+      "path": "/_next/static/chunks/1wss42m09trz2.js",
+      "start": 809,
+      "queue": 3828,
+      "ttfb": 377,
+      "end": 5401,
+      "bytes": 146722
+    },
+    {
+      "path": "/_next/static/chunks/3dspmct73e5zl.js",
+      "start": 809,
+      "queue": 4084,
+      "ttfb": 393,
+      "end": 5965,
+      "bytes": 175434
+    },
+    {
+      "path": "/_next/static/chunks/19hoowcssv0w1.css",
+      "start": 809,
+      "queue": 1081,
+      "ttfb": 1210,
+      "end": 3376,
+      "bytes": 15713
+    },
+    {
+      "path": "/_next/static/chunks/3f8my0nzlk0bj.js",
+      "start": 809,
+      "queue": 4170,
+      "ttfb": 422,
+      "end": 5403,
+      "bytes": 135317
+    },
+    {
+      "path": "/logo.png",
+      "start": 6177,
+      "queue": 0,
+      "ttfb": 1178,
+      "end": 8352,
+      "bytes": 492365
+    },
+    {
+      "path": "/api/intercept/pending",
+      "start": 6180,
+      "queue": 0,
+      "ttfb": 425,
+      "end": 6605,
+      "bytes": 315
+    },
+    {
+      "path": "/api/llm/profiles",
+      "start": 6180,
+      "queue": 1,
+      "ttfb": 424,
+      "end": 6669,
+      "bytes": 6430
+    },
+    {
+      "path": "/api/intercept/task/97",
+      "start": 6181,
+      "queue": 0,
+      "ttfb": 423,
+      "end": 6605,
+      "bytes": 22842
+    },
+    {
+      "path": "/api/tasks/97",
+      "start": 6182,
+      "queue": 0,
+      "ttfb": 422,
+      "end": 6703,
+      "bytes": 2233
+    },
+    {
+      "path": "/api/stats",
+      "start": 6182,
+      "queue": 0,
+      "ttfb": 422,
+      "end": 6606,
+      "bytes": 2073
+    },
+    {
+      "path": "/api/health",
+      "start": 6183,
+      "queue": 422,
+      "ttfb": 489,
+      "end": 7095,
+      "bytes": 360
+    },
+    {
+      "path": "/api/exploration/tokens",
+      "start": 6726,
+      "queue": 0,
+      "ttfb": 380,
+      "end": 7109,
+      "bytes": 16164
+    },
+    {
+      "path": "/api/tasks/97/chat/status",
+      "start": 6727,
+      "queue": 0,
+      "ttfb": 367,
+      "end": 7094,
+      "bytes": 318
+    },
+    {
+      "path": "/api/tasks/97/llm/resolution",
+      "start": 6727,
+      "queue": 0,
+      "ttfb": 366,
+      "end": 7096,
+      "bytes": 747
+    },
+    {
+      "path": "/api/intercept/task/97",
+      "start": 6728,
+      "queue": 0,
+      "ttfb": 368,
+      "end": 7097,
+      "bytes": 22842
+    },
+    {
+      "path": "/api/exploration/activity/history",
+      "start": 6729,
+      "queue": 366,
+      "ttfb": 360,
+      "end": 7752,
+      "bytes": 59862
+    },
+    {
+      "path": "/api/tasks/97/intent-assets",
+      "start": 6729,
+      "queue": 366,
+      "ttfb": 4636,
+      "end": 12945,
+      "bytes": 424839
+    },
+    {
+      "path": "/api/exploration/intents",
+      "start": 6730,
+      "queue": 366,
+      "ttfb": 363,
+      "end": 7762,
+      "bytes": 181104
+    },
+    {
+      "path": "/function/tasks/",
+      "start": 6754,
+      "queue": 343,
+      "ttfb": 408,
+      "end": 7506,
+      "bytes": 300
+    },
+    {
+      "path": "/function/tasks/__next._tree.txt",
+      "start": 7507,
+      "queue": 1644,
+      "ttfb": 930,
+      "end": 10158,
+      "bytes": 1600
+    },
+    {
+      "path": "/api/exploration/activity/641465",
+      "start": 7897,
+      "queue": 0,
+      "ttfb": 454,
+      "end": 8353,
+      "bytes": 2391
+    },
+    {
+      "path": "/api/exploration/activity/641466",
+      "start": 7897,
+      "queue": 0,
+      "ttfb": 454,
+      "end": 8353,
+      "bytes": 314
+    },
+    {
+      "path": "/api/exploration/activity/641477",
+      "start": 7898,
+      "queue": 0,
+      "ttfb": 454,
+      "end": 8353,
+      "bytes": 2727
+    },
+    {
+      "path": "/api/exploration/activity/641478",
+      "start": 7898,
+      "queue": 454,
+      "ttfb": 406,
+      "end": 8776,
+      "bytes": 314
+    },
+    {
+      "path": "/api/exploration/activity/641487",
+      "start": 7899,
+      "queue": 455,
+      "ttfb": 424,
+      "end": 8784,
+      "bytes": 2503
+    },
+    {
+      "path": "/api/tasks/97/chat/status",
+      "start": 8728,
+      "queue": 0,
+      "ttfb": 420,
+      "end": 9150,
+      "bytes": 318
+    }
+  ]
+}

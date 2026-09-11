@@ -174,7 +174,7 @@ export function sseUrl(path: string): string {
   return token ? `${base}${path}${sep}token=${encodeURIComponent(token)}` : `${base}${path}`;
 }
 
-const get = <T>(p: string) => http<T>(p);
+const get = <T>(p: string, init?: RequestInit) => http<T>(p, init);
 const post = <T>(p: string, body?: unknown) =>
   http<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 const put = <T>(p: string, body?: unknown) =>
@@ -327,7 +327,7 @@ export const api = {
   rerunBlocked: (taskId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/rerun-blocked`),
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
-  stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  stats: (task?: string) => get<Stats>(`/stats${tq(task)}${task ? "&compact=1" : ""}`),
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
@@ -470,8 +470,12 @@ export const api = {
     post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/revoke`, { asset_ids: assetIds, reason }),
   blockTaskAssets: (taskId: string, assetIds: number[], reason = "") =>
     post<TaskAssetApprovalMutation>(`/tasks/${taskId}/asset-approvals/block`, { asset_ids: assetIds, reason }),
-  taskIntentAssets: (taskId: string) =>
-    get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
+  taskIntentAssets: (taskId: string, before = 0, limit = 300, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ before: String(Math.max(0, before)), limit: String(limit) });
+    return get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets?${query}`, { signal }).then((r) =>
+      arr(r.assets),
+    );
+  },
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),

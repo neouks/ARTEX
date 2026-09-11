@@ -383,6 +383,13 @@ func TestTaskArchiveBlockersIgnoreQueuedDependents(t *testing.T) {
 	if blockers[source.ID] != dependent.ID {
 		t.Fatalf("source blocker=%d, want dependent %d", blockers[source.ID], dependent.ID)
 	}
+	blocker, err := d.TaskArchiveBlocker(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocker != dependent.ID {
+		t.Fatalf("scoped source blocker=%d, want dependent %d", blocker, dependent.ID)
+	}
 	if err := d.SetPaused(dependent.ID, true); err != nil {
 		t.Fatal(err)
 	}
@@ -395,6 +402,13 @@ func TestTaskArchiveBlockersIgnoreQueuedDependents(t *testing.T) {
 	}
 	if blocker := blockers[source.ID]; blocker != 0 {
 		t.Fatalf("queued dependent must not block source, got %d", blocker)
+	}
+	blocker, err = d.TaskArchiveBlocker(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocker != 0 {
+		t.Fatalf("scoped queued dependent must not block source, got %d", blocker)
 	}
 }
 

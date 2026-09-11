@@ -216,19 +216,18 @@ func (s *AssetStore) agentURL(raw string, taskID int64) (string, error) {
 }
 
 func seedUserAssetGrants(tx *sql.Tx, taskID int64) error {
-	rows, err := tx.Query(`SELECT a.id,a.type,COALESCE(a.domain,''),COALESCE(a.ip,''),COALESCE(a.url,'')
+	rows, err := tx.Query(`SELECT DISTINCT COALESCE(a.domain,''),COALESCE(a.ip,''),COALESCE(a.url,'')
  FROM task_asset_links l JOIN assets a ON a.id=l.asset_id WHERE l.task_id=$1 AND l.source IN ('manual','direct','company','api','task')`, taskID)
 	if err != nil {
 		return err
 	}
 	type seed struct {
-		id                   int64
-		typ, domain, ip, url string
+		domain, ip, url string
 	}
 	var seeds []seed
 	for rows.Next() {
 		var x seed
-		if err := rows.Scan(&x.id, &x.typ, &x.domain, &x.ip, &x.url); err != nil {
+		if err := rows.Scan(&x.domain, &x.ip, &x.url); err != nil {
 			rows.Close()
 			return err
 		}
@@ -239,6 +238,8 @@ func seedUserAssetGrants(tx *sql.Tx, taskID int64) error {
 		return err
 	}
 	rows.Close()
+	hosts, roots := []string{}, []string{}
+	seen := make(map[string]bool, len(seeds))
 	for _, x := range seeds {
 		h := x.domain
 		if h == "" && x.url != "" {
@@ -253,11 +254,21 @@ func seedUserAssetGrants(tx *sql.Tx, taskID int64) error {
 		if err != nil {
 			continue
 		}
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
 		root := ""
 		if net.ParseIP(h) == nil {
 			root, _ = RootDomain(h)
 		}
-		if _, err := tx.Exec(`INSERT INTO task_asset_grants(task_id,kind,value,root_domain,source) VALUES($1,'host',$2,$3,'user') ON CONFLICT DO NOTHING`, taskID, h, root); err != nil {
+		hosts = append(hosts, h)
+		roots = append(roots, root)
+	}
+	if len(hosts) > 0 {
+		if _, err := tx.Exec(`INSERT INTO task_asset_grants(task_id,kind,value,root_domain,source)
+SELECT $1,'host',host,root,'user' FROM unnest($2::text[],$3::text[]) AS seed(host,root)
+ON CONFLICT DO NOTHING`, taskID, hosts, roots); err != nil {
 			return err
 		}
 	}
