@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -155,14 +156,9 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	if err != nil {
 		return req, err
 	}
-	skips, err := p.assets.WithReadContext(ctx).ActiveTaskAssetSkips(p.taskID)
+	skips, err := p.assets.WithReadContext(ctx).ActiveTaskAssetSkips(p.taskID, guard.AssetSkipScope(ctx))
 	if err != nil {
 		return req, err
-	}
-	if message := db.TaskAssetSkipMessage(skips); message != "" {
-		req.System = append(append([]string(nil), req.System...), message)
-	} else {
-		req.System = append(append([]string(nil), req.System...), "当前跳过清单为空。历史拦截结果不是永久禁令；始终以最新资产授权和工具校验为准。")
 	}
 	policy := "仅用户明确提供或人工批准的域名/IP可测试；其他发现登记后等待用户审批。"
 	switch template {
@@ -171,7 +167,10 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	case "related_assets":
 		policy = "用户目标同根域的子域名及有本任务DNS解析依据的IP由系统自动批准，可直接测试；其他发现登记后等待用户审批。"
 	}
-	req.System = append(append([]string(nil), req.System...), "资产模板："+policy+"审批仅作用于域名/IP，获准主机的所有端口、服务和接口无需单独审批。用户封禁、撤回及删除限制优先；登记结果未返回的候选项不要测试或反复重试，批准后系统会重新调度。")
+	req.System = append(append([]string(nil), req.System...), "资产模板："+policy+"审批仅作用于域名/IP，获准主机的所有端口、服务和接口无需单独审批。用户封禁、撤回及删除限制优先。"+db.TaskAssetSkipRule)
+	if list := db.TaskAssetSkipList(skips); list != "" {
+		req.System = append(req.System, list)
+	}
 	type result struct {
 		message, block, content int
 		value                   any

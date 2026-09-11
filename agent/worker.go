@@ -212,7 +212,7 @@ func proxyEnv(proxyAddr, caCert string) []string {
 // forwarding and performs a second authorization check at the actual HTTP
 // egress boundary.
 // A direct/global proxy (no recording CA) is left untouched.
-func TaskProxyAddr(proxyAddr, caCert string, taskID int64) string {
+func TaskProxyAddr(proxyAddr, caCert string, taskID int64, scopes ...string) string {
 	if proxyAddr == "" || caCert == "" || taskID <= 0 {
 		return proxyAddr
 	}
@@ -220,7 +220,7 @@ func TaskProxyAddr(proxyAddr, caCert string, taskID int64) string {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return proxyAddr
 	}
-	username, password, ok := guard.TaskProxyCredentials(taskID)
+	username, password, ok := guard.TaskProxyCredentials(taskID, scopes...)
 	if !ok {
 		return proxyAddr
 	}
@@ -438,7 +438,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 有。仅【全局态势 overview】留在启动 user 消息里——它可降级、容忍 stale，压掉无碍。
 	// 本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	runProxyAddr := TaskProxyAddr(w.proxyAddr, w.proxyCACert, taskID)
+	runProxyAddr := TaskProxyAddr(w.proxyAddr, w.proxyCACert, taskID, guard.AssetSkipScope(ctx))
 	promptCACert := ""
 	if w.trafficRecording {
 		promptCACert = w.proxyCACert

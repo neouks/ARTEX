@@ -46,7 +46,7 @@ func TestPendingDiscoveryIsNotReturnedOrScheduled(t *testing.T) {
 	hooks := guard.AssetPolicyHooks(nil, d.Assets(), task.ID)
 	for i := 0; i < 2; i++ {
 		blocked, reason, _ := hooks.PreToolUse(context.Background(), "Bash", []byte(`{"command":"curl https://waiting.context.test/app.js"}`))
-		if !blocked || !strings.Contains(reason, "继续原目标的其他已授权测试") {
+		if !blocked || !strings.Contains(reason, "继续其他已授权测试") {
 			t.Fatalf("denial: %v %s", blocked, reason)
 		}
 	}

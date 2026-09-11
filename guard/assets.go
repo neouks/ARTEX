@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 )
@@ -22,6 +23,19 @@ import (
 type TaskAssetPolicy struct {
 	Store  *db.AssetStore
 	TaskID int64
+	Scope  string
+}
+
+// Intent identity survives worker slot reuse and transcript compaction.
+func AssetSkipScope(ctx context.Context) string {
+	ri := llmrec.RunInfoFrom(ctx)
+	if ri.IntentID > 0 {
+		return fmt.Sprintf("worker:%d", ri.IntentID)
+	}
+	if ri.AgentKey == "planner" {
+		return "planner"
+	}
+	return "mainagent"
 }
 
 // AssetPolicyHooks wraps an existing hook runner and blocks pending, revoked or
@@ -58,6 +72,7 @@ type assetPolicyHooks struct {
 }
 
 func (h assetPolicyHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
+	h.policy.Scope = AssetSkipScope(ctx)
 	if reason, audit := h.policy.check(name, input); reason != "" {
 		if h.audit != nil && audit {
 			h.audit.record(name, "block", reason, assetPolicyAuditSubject(name, input))
@@ -108,7 +123,7 @@ func (p TaskAssetPolicy) Check(tool string, input []byte) string {
 
 func (p TaskAssetPolicy) denial(err error, hosts []string, ids []int64) (string, bool) {
 	reason := fmt.Sprintf("任务资产执行被阻止：%v", err)
-	rows, saveErr := p.Store.RememberTaskAssetDenials(p.TaskID, hosts, ids)
+	rows, saveErr := p.Store.RememberTaskAssetDenials(p.TaskID, hosts, ids, p.Scope)
 	if saveErr != nil {
 		log.Printf("[asset-skip] task %d 记录失败: %v", p.TaskID, saveErr)
 		return reason + "。跳过本项资源，继续其他已授权测试，不要重试。", true
@@ -131,7 +146,7 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	}
 	// Discovery registers candidates; authorization belongs to the transaction
 	// and the returned executable view, not a pre-tool test of its new hosts.
-	if tool == "insert_assets" || tool == "register_user_target" {
+	if tool == "insert_assets" || tool == "register_user_target" || tool == "list_task_assets" {
 		return "", false
 	}
 	var value any

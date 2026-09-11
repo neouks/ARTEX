@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS task_asset_skips (
  attempts BIGINT NOT NULL DEFAULT 1,
  PRIMARY KEY(task_id,host)
 );
+ALTER TABLE task_asset_skips ADD COLUMN IF NOT EXISTS observer_scopes TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE OR REPLACE FUNCTION task_host_template_allows(tid BIGINT, host TEXT)
 RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$

@@ -377,6 +377,21 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	if rawRowCount(raw) == 0 {
 		return nil
 	}
+	if table == "task_asset_skips" {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row["observer_scopes"] == nil {
+				row["observer_scopes"] = []string{}
+			}
+		}
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+	}
 	if table == "task_asset_blocks" {
 		rows, err := decodeArchiveRows(raw)
 		if err != nil {

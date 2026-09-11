@@ -214,7 +214,7 @@ func (t *Traffic) SetAssetPolicyStore(store *db.AssetStore) { t.assets = store }
 func (t *Traffic) SetRecordingEnabled(enabled bool) { t.recording.Store(enabled) }
 
 func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request) (bool, error) {
-	taskID, tagged, err := guard.ParseTaskProxyAuthorization(req.Header.Get("Proxy-Authorization"))
+	taskID, scope, tagged, err := guard.ParseTaskProxyScope(req.Header.Get("Proxy-Authorization"))
 	if err != nil {
 		return false, err
 	}
@@ -234,7 +234,7 @@ func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request)
 		host = hostOnly(req.Host)
 	}
 	if err := t.assets.ValidateTaskHostsApproved(taskID, []string{host}); err != nil {
-		rows, saveErr := t.assets.RememberTaskAssetDenials(taskID, []string{host}, nil)
+		rows, saveErr := t.assets.RememberTaskAssetDenials(taskID, []string{host}, nil, scope)
 		if saveErr != nil {
 			log.Printf("[traffic] task %d 跳过记录失败: %v", taskID, saveErr)
 		}

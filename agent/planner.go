@@ -389,7 +389,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
 	}
-	runProxyAddr := TaskProxyAddr(p.proxyAddr, p.proxyCACert, taskID)
+	runProxyAddr := TaskProxyAddr(p.proxyAddr, p.proxyCACert, taskID, guard.AssetSkipScope(ctx))
 	opts := agentcore.Options{
 		Provider:               withAssetContext(p.prov, as, taskID),
 		SystemPrompt:           system,
