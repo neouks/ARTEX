@@ -271,7 +271,7 @@ func renderGraphOverview(data map[string]any) string {
 	const plannerOverviewMaxRunes = 24_000
 	return "\n\n【本轮态势（graph_overview 的轻量预取；需要细节再按需调 node_detail/list_facts 等）】：\n" +
 		renderLightTaggedOrdered("graph_overview", data, []string{
-			"task", "frontier_open", "findings", "facts", "running_intents", "goals", "hints",
+			"task", "asset_approval_counts", "asset_approval_error", "frontier_open", "findings", "facts", "running_intents", "goals", "hints",
 			"open_intents", "recent_done_intents", "recent_facts", "coverage", "related_tasks",
 		}, plannerOverviewMaxRunes)
 }
@@ -378,6 +378,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	sysBody += "\n审批态势只附计数，需要管理详情时才按需分页调用 list_task_assets。管理可见不等于允许测试：只有 can_schedule=true 的当前已授权资产可下发；pending/blocked/revoked 仅供解释，不要每轮查询全部状态。"
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}

@@ -156,6 +156,12 @@ func filterStructuredRows(value any, states map[int64]string, collect map[int64]
 }
 
 func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, error) {
+	req = deduplicateToolHistory(req)
+	var refreshErr error
+	req, refreshErr = p.refreshApprovalManagementHistory(ctx, req)
+	if refreshErr != nil {
+		return req, refreshErr
+	}
 	template, err := p.assets.WithReadContext(ctx).TaskApprovalTemplate(p.taskID)
 	if err != nil {
 		return req, err

@@ -803,7 +803,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			}
 		}
 	}
-
+	if t.as != nil && t.taskID > 0 {
+		if summary, err := t.as.QueryTaskAssetView(t.taskID, db.TaskAssetViewQuery{Status: "all", SummaryOnly: true}); err == nil {
+			out["asset_approval_counts"] = summary.Counts
+		} else {
+			out["asset_approval_error"] = "审批计数暂不可用：" + err.Error()
+		}
+	}
 	return out
 }
 
@@ -2528,6 +2534,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.listTaskAssets(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(), t.expandIndex(),
