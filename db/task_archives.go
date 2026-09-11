@@ -604,6 +604,7 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_relations", `SELECT * FROM task_relations WHERE task_id=$1 ORDER BY created_at,source_task_id`, []any{taskID}},
 		{"task_asset_links", `SELECT * FROM task_asset_links WHERE task_id=$1 ORDER BY asset_id`, []any{taskID}},
 		{"task_asset_blocks", `SELECT * FROM task_asset_blocks WHERE task_id=$1 ORDER BY asset_key`, []any{taskID}},
+		{"task_asset_skips", `SELECT * FROM task_asset_skips WHERE task_id=$1 ORDER BY host`, []any{taskID}},
 		{"task_asset_grants", `SELECT * FROM task_asset_grants WHERE task_id=$1 ORDER BY kind,value`, []any{taskID}},
 		{"task_asset_dns_evidence", `SELECT * FROM task_asset_dns_evidence WHERE task_id=$1 ORDER BY dns_asset_id,ip`, []any{taskID}},
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},

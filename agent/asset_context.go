@@ -155,6 +155,15 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	if err != nil {
 		return req, err
 	}
+	skips, err := p.assets.WithReadContext(ctx).ActiveTaskAssetSkips(p.taskID)
+	if err != nil {
+		return req, err
+	}
+	if message := db.TaskAssetSkipMessage(skips); message != "" {
+		req.System = append(append([]string(nil), req.System...), message)
+	} else {
+		req.System = append(append([]string(nil), req.System...), "当前跳过清单为空。历史拦截结果不是永久禁令；始终以最新资产授权和工具校验为准。")
+	}
 	policy := "仅用户明确提供或人工批准的域名/IP可测试；其他发现登记后等待用户审批。"
 	switch template {
 	case "all_assets":

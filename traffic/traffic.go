@@ -234,8 +234,18 @@ func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request)
 		host = hostOnly(req.Host)
 	}
 	if err := t.assets.ValidateTaskHostsApproved(taskID, []string{host}); err != nil {
-		log.Printf("[traffic] task %d blocked egress to %s: %v", taskID, host, err)
-		return false, fmt.Errorf("任务资产执行被阻止: %w", err)
+		rows, saveErr := t.assets.RememberTaskAssetDenials(taskID, []string{host}, nil)
+		if saveErr != nil {
+			log.Printf("[traffic] task %d 跳过记录失败: %v", taskID, saveErr)
+		}
+		if len(rows) == 0 || rows[0].Attempts == 1 {
+			log.Printf("[traffic] task %d blocked egress to %s: %v", taskID, host, err)
+		}
+		message := db.TaskAssetSkipMessage(rows)
+		if message == "" {
+			message = "跳过本项资源，继续其他已授权测试，不要重试。"
+		}
+		return false, fmt.Errorf("任务资产执行被阻止: %w。%s", err, message)
 	}
 	return true, nil
 }

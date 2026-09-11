@@ -88,6 +88,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_blocks WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_asset_skips WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_grants WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
@@ -257,7 +258,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_blocks", "task_asset_grants", "task_asset_links", "task_asset_dns_evidence", "findings"} {
+	for _, table := range []string{"task_asset_blocks", "task_asset_grants", "task_asset_links", "task_asset_dns_evidence", "task_asset_skips", "findings"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -363,6 +364,7 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
+		"task_asset_skips":        true,
 		"task_asset_grants":       true,
 		"task_asset_dns_evidence": true,
 		"exploration_nodes":       true, "exploration_edges": true, "exploration_anchors": true,

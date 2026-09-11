@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"regexp"
@@ -15,9 +16,9 @@ import (
 	"github.com/Autumn-27/norma/llm"
 )
 
-// TaskAssetPolicy is the last-mile task authorization check. It deliberately
-// accepts unstructured tool input because Bash, custom commands and MCP tools
-// do not share one request schema.
+// TaskAssetPolicy preflights explicit asset IDs, structured targets and URLs.
+// It does not infer network destinations from arbitrary shell arguments;
+// actual requests must also be authorized at the network boundary.
 type TaskAssetPolicy struct {
 	Store  *db.AssetStore
 	TaskID int64
@@ -57,8 +58,8 @@ type assetPolicyHooks struct {
 }
 
 func (h assetPolicyHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
-	if reason := h.policy.Check(name, input); reason != "" {
-		if h.audit != nil {
+	if reason, audit := h.policy.check(name, input); reason != "" {
+		if h.audit != nil && audit {
 			h.audit.record(name, "block", reason, assetPolicyAuditSubject(name, input))
 		}
 		return true, reason, nil
@@ -101,33 +102,57 @@ func assetPolicyAuditSubject(name string, input []byte) string {
 var urlPattern = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
 
 func (p TaskAssetPolicy) Check(tool string, input []byte) string {
+	reason, _ := p.check(tool, input)
+	return reason
+}
+
+func (p TaskAssetPolicy) denial(err error, hosts []string, ids []int64) (string, bool) {
+	reason := fmt.Sprintf("任务资产执行被阻止：%v", err)
+	rows, saveErr := p.Store.RememberTaskAssetDenials(p.TaskID, hosts, ids)
+	if saveErr != nil {
+		log.Printf("[asset-skip] task %d 记录失败: %v", p.TaskID, saveErr)
+		return reason + "。跳过本项资源，继续其他已授权测试，不要重试。", true
+	}
+	if len(rows) == 0 {
+		return reason, true
+	}
+	first := false
+	for _, row := range rows {
+		if row.Attempts == 1 {
+			first = true
+		}
+	}
+	return reason + "。" + db.TaskAssetSkipMessage(rows), first
+}
+
+func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	if p.Store == nil || p.TaskID <= 0 {
-		return ""
+		return "", false
 	}
 	// Discovery registers candidates; authorization belongs to the transaction
 	// and the returned executable view, not a pre-tool test of its new hosts.
 	if tool == "insert_assets" || tool == "register_user_target" {
-		return ""
+		return "", false
 	}
 	var value any
 	if json.Unmarshal(input, &value) == nil {
 		ids := collectAssetIDs(value)
 		if len(ids) > 0 {
 			if err := p.Store.ValidateTaskAssetsApproved(p.TaskID, ids); err != nil {
-				return "任务资产执行被阻止：" + err.Error()
+				return p.denial(err, nil, ids)
 			}
 		}
 	}
 	// Evidence and summaries may mention unrelated hosts without targeting them.
 	// These write tools enforce authorization on their explicit/implicit IDs.
 	if tool == "record_fact" || tool == "report_finding" {
-		return ""
+		return "", false
 	}
 	hosts := collectHosts(string(input))
 	if err := p.Store.ValidateTaskHostsApproved(p.TaskID, hosts); err != nil {
-		return fmt.Sprintf("任务资产执行被阻止：%v", err)
+		return p.denial(err, hosts, nil)
 	}
-	return ""
+	return "", false
 }
 
 func collectHosts(text string) []string {
@@ -149,30 +174,15 @@ func collectHosts(text string) []string {
 	var structured any
 	if json.Unmarshal([]byte(text), &structured) == nil {
 		collectStructuredHosts(structured, add)
-		collectCommandHosts(structured, add)
-	} else {
-		collectShellTargets(text, add)
 	}
-	// Explicit URL syntax identifies network targets, including single-label
-	// intranet hosts, without guessing domains from arbitrary text substrings.
+	// Positive identification only: structured targets and explicit URL hosts.
+	// Never interpret bare shell arguments as hosts or maintain exclusions for
+	// file/header/cookie options. Opaque commands require network-layer policy;
+	// this preflight is not a shell interpreter or an egress sandbox.
 	for _, rawURL := range urlPattern.FindAllString(text, -1) {
 		rawURL = strings.TrimRight(rawURL, `.,;:!?)]}`)
 		if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
 			add(u.Hostname())
-		}
-	}
-	// Raw IPv6 values do not need brackets in structured MCP/custom-tool
-	// arguments. Tokenize permissively, then let net.ParseIP reject non-addresses.
-	for _, candidate := range strings.FieldsFunc(text, func(r rune) bool {
-		return !(r == ':' || r == '.' || r == '%' || r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F')
-	}) {
-		candidate = strings.Trim(candidate, ".")
-		parsedCandidate := candidate
-		if zone := strings.LastIndex(parsedCandidate, "%"); zone > 0 {
-			parsedCandidate = parsedCandidate[:zone]
-		}
-		if strings.Count(parsedCandidate, ":") >= 2 && net.ParseIP(parsedCandidate) != nil {
-			add(candidate)
 		}
 	}
 	return hosts
@@ -186,7 +196,7 @@ func collectStructuredHosts(value any, add func(string)) {
 			for key, child := range typed {
 				normalized := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
 				isHostField := normalized == "url" || normalized == "uri" || normalized == "host" ||
-					normalized == "hostname" || normalized == "domain" || normalized == "ip" ||
+					normalized == "hostname" || normalized == "domain" || normalized == "ip" || normalized == "ipv4" || normalized == "ipv6" ||
 					normalized == "address" || normalized == "target" || normalized == "endpoint"
 				walk(child, isHostField)
 			}
@@ -200,6 +210,10 @@ func collectStructuredHosts(value any, add func(string)) {
 			}
 			candidate := strings.Trim(strings.TrimSpace(typed), `"'`)
 			if candidate == "" {
+				return
+			}
+			if ip := net.ParseIP(strings.Trim(candidate, "[]")); ip != nil {
+				add(ip.String())
 				return
 			}
 			if strings.Contains(candidate, "://") {

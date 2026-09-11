@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS task_asset_dns_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_task_asset_dns_evidence_ip ON task_asset_dns_evidence(task_id,ip);
 
+-- Runtime denial memory, not an authorization decision. Read against current
+-- authorization so approval immediately removes a host from the active list.
+CREATE TABLE IF NOT EXISTS task_asset_skips (
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ host TEXT NOT NULL,
+ first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+ last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+ attempts BIGINT NOT NULL DEFAULT 1,
+ PRIMARY KEY(task_id,host)
+);
+
 CREATE OR REPLACE FUNCTION task_host_template_allows(tid BIGINT, host TEXT)
 RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
  SELECT COALESCE((SELECT t.asset_approval_template='all_assets' OR EXISTS (

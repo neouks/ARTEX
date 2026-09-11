@@ -178,6 +178,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err := d.Assets().RevokeTaskAssets(task.ID, []int64{assetID}, "archive-test", "preserve revoked approval"); err != nil {
 		t.Fatal(err)
 	}
+	if rows, err := d.Assets().RememberTaskAssetDenials(task.ID, nil, []int64{assetID}); err != nil || len(rows) != 1 {
+		t.Fatalf("remember skip: %v %v", rows, err)
+	}
 	if detached, err := d.Assets().DetachAssetFromTask(task.ID, blockedAssetID); err != nil || !detached {
 		t.Fatalf("prepare archived tombstone detached=%v err=%v", detached, err)
 	}
@@ -295,6 +298,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if live.Name != "cold task" || !live.Paused {
 		t.Fatalf("restored task metadata mismatch: %+v", live)
+	}
+	if rows, err := d.Assets().ActiveTaskAssetSkips(task.ID); err != nil || len(rows) != 1 || rows[0].State != ApprovalRevoked {
+		t.Fatalf("restored skips: %v %v", rows, err)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {
 		t.Fatal(err)

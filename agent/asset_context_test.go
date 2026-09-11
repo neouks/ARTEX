@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -42,6 +43,13 @@ func TestPendingDiscoveryIsNotReturnedOrScheduled(t *testing.T) {
 	if id == 0 {
 		t.Fatal("candidate missing from user approval list")
 	}
+	hooks := guard.AssetPolicyHooks(nil, d.Assets(), task.ID)
+	for i := 0; i < 2; i++ {
+		blocked, reason, _ := hooks.PreToolUse(context.Background(), "Bash", []byte(`{"command":"curl https://waiting.context.test/app.js"}`))
+		if !blocked || !strings.Contains(reason, "继续原目标的其他已授权测试") {
+			t.Fatalf("denial: %v %s", blocked, reason)
+		}
+	}
 	store := d.Exploration(task.ExplorationID)
 	if waiting, err := store.WaitingForAssetApproval(); err != nil || !waiting {
 		t.Fatalf("waiting=%v err=%v", waiting, err)
@@ -55,6 +63,10 @@ func TestPendingDiscoveryIsNotReturnedOrScheduled(t *testing.T) {
 		t.Fatalf("pending graph node allowed: %v %v", nodeStates, err)
 	}
 	p := assetContextProvider{assets: d.Assets(), taskID: task.ID}
+	compacted, err := p.filter(context.Background(), llm.CompletionRequest{})
+	if err != nil || !strings.Contains(strings.Join(compacted.System, "\n"), "waiting.context.test（等待审批）") {
+		t.Fatalf("skip lost after compaction: %v %v", compacted.System, err)
+	}
 	req := llm.CompletionRequest{Messages: []llm.Message{
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: "list1", Name: "list_assets", Input: json.RawMessage(`{}`)}}},
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.ToolResultText("list1", fmt.Sprintf(`{"assets":[{"id":%d,"type":"subdomain","domain":"waiting.context.test"}]}`, id), false)}},
@@ -73,6 +85,13 @@ func TestPendingDiscoveryIsNotReturnedOrScheduled(t *testing.T) {
 	if err := d.Assets().ApproveTaskAssets(task.ID, []int64{id}, "user", ""); err != nil {
 		t.Fatal(err)
 	}
+	compacted, err = p.filter(context.Background(), llm.CompletionRequest{})
+	if err != nil || strings.Contains(strings.Join(compacted.System, "\n"), "waiting.context.test") {
+		t.Fatalf("stale skip: %v %v", compacted.System, err)
+	}
+	if blocked, reason, _ := hooks.PreToolUse(context.Background(), "Bash", []byte(`{"command":"curl https://waiting.context.test/app.js"}`)); blocked {
+		t.Fatalf("still denied after approval: %s", reason)
+	}
 	nodeStates, err = d.Assets().TaskNodeApprovalStates(task.ID, []int64{nodeID})
 	if err != nil || nodeStates[nodeID] != db.ApprovalApproved {
 		t.Fatalf("approved graph node hidden: %v %v", nodeStates, err)
@@ -87,5 +106,12 @@ func TestPendingDiscoveryIsNotReturnedOrScheduled(t *testing.T) {
 	}
 	if waiting, err := store.WaitingForAssetApproval(); err != nil || waiting {
 		t.Fatalf("still waiting after approval: %v %v", waiting, err)
+	}
+	// A different pending resource must not cancel or prevent work on this host.
+	if blocked, _, _ := hooks.PreToolUse(context.Background(), "Bash", []byte(`{"command":"curl https://another-pending.context.test/dep.js"}`)); !blocked {
+		t.Fatal("unapproved dependency allowed")
+	}
+	if blocked, reason, _ := hooks.PreToolUse(context.Background(), "Bash", []byte(`{"command":"curl https://waiting.context.test/other-test"}`)); blocked {
+		t.Fatalf("other approved work stopped: %s", reason)
 	}
 }
