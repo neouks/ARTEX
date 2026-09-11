@@ -574,12 +574,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		out["finding_list_truncated"] = true
 		out["finding_list_read_hint"] = "更多摘要请用 list_findings"
 	}
-	// findings 是任务里最高价值的产物、单任务通常也不多 → 直接全量带进概览（不像 facts 那样
-	// 只给最近窗口），让 planner 每轮判目标时一眼看全所有确认漏洞，无需再调 list_findings。
-	// 每条只留 {id, summary, evidence?, from_intent?, assets?}：evidence 是 report_finding 的
-	// PoC 文本（payload.evidence.poc）；from_intent 是产生本漏洞的意图；assets 直接给受影响资产
-	// 的可读内容（url/域名/ip:port 等，不再是裸 id）——锚定关系存于 exploration_anchors、经 findings
-	// 表回填。vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
+	// 概览仅预取有限漏洞摘要及关联资产；完整列表按需 list_findings 分页，
+	// 证据正文通过 node_detail 读取，不因概览窗口未包含某项就断言其不存在。
 	var findingMeta map[int64]db.FindingMeta // node_id -> 锚定资产等；仅任务上下文可查
 	assetByID := map[int64]*db.Asset{}
 	if t.as != nil && t.taskID > 0 {
@@ -1322,7 +1318,13 @@ func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
 	if kind == db.KindFinding {
 		name, key = "list_findings", "findings"
 	}
-	return readTool(name, "分页查询授权可见摘要。默认20条、最多100条，before续页；详情用 node_detail。失败不等于没有结果。",
+	description := "分页查询授权可见摘要。默认20条、最多100条；详情用 node_detail。q 仅搜索摘要，不搜索证据正文。"
+	if kind == db.KindFinding {
+		description += "查具体漏洞先用 asset_id、q、severity 筛选；未找到且 has_more=true 时继续翻页或调整筛选，不得断言不存在。翻页保留筛选条件，将 next_before 作为 before；改变筛选时清除 before。找到所需记录即可停止，无需遍历全部。查询失败报告‘查询失败’，预算不足报告‘尚未查完’。查完仅能说‘当前授权可见记录中，该筛选条件下未找到’，不能断言目标没有漏洞或证据正文无相关内容。"
+	} else {
+		description += "before 使用上一页 next_before，翻页保留筛选条件；失败不等于没有结果。"
+	}
+	return readTool(name, description,
 		obj(map[string]any{"limit": intp("1..100，默认20"), "before": intp("上一页 next_before"), "q": str("摘要关键词"), "severity": str("漏洞严重等级，仅漏洞列表适用"), "asset_id": idp("按关联资产筛选")}),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			var q struct {
@@ -1376,6 +1378,7 @@ func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
 			out := map[string]any{key: rows, "total": page.Total, "has_more": more, "truncated": cut}
 			if more && len(rows) > 0 {
 				out["next_before"] = rows[len(rows)-1]["id"]
+				out["read_hint"] = "结果未完整；未找到目标请保留筛选条件，用 next_before 作为 before 续页。改变筛选请清除 before；未查完不能断言不存在。"
 			}
 			return jsonResult(out)
 		})
