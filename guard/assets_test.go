@@ -1,9 +1,32 @@
 package guard
 
 import (
+	"encoding/json"
 	"reflect"
+	"sort"
 	"testing"
 )
+
+func TestCommandTargetsDoNotTreatLocalFilesAsHosts(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		hosts   []string
+	}{
+		{`curl.exe -s -k -i -m 30 "https://hogee.baidu.com/hogee/employee" -o resp_employee.txt -D headers_employee.txt; Get-Content headers_employee.txt | Select-Object -First 30; echo "----BODYLEN----"; (Get-Item resp_employee.txt).Length`, []string{"hogee.baidu.com"}},
+		{`curl https://first.test -o "C:\work\resp_employee.txt"; curl second.test -D headers.txt`, []string{"first.test", "second.test"}},
+		{`Get-Content headers.txt; python -c "open('home.html').read()"`, nil},
+		{`nc target.test 443 > result.txt; dig api.test A`, []string{"api.test", "target.test"}},
+		{`curl -O https://example.test/file.txt`, []string{"example.test"}},
+		{`nmap -A target.test; curl example.test/path -o report.txt`, []string{"example.test", "target.test"}},
+	} {
+		input, _ := json.Marshal(map[string]string{"command": tc.command})
+		got := collectHosts(string(input))
+		sort.Strings(got)
+		if len(got) != len(tc.hosts) || (len(got) > 0 && !reflect.DeepEqual(got, tc.hosts)) {
+			t.Errorf("%s: got %v want %v", tc.command, got, tc.hosts)
+		}
+	}
+}
 
 func TestCollectAssetIDsSupportsStructuredToolShapes(t *testing.T) {
 	value := map[string]any{

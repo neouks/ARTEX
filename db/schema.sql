@@ -754,6 +754,7 @@ END IF;
 RETURN EXISTS (
     SELECT 1 FROM task_asset_blocks block JOIN assets t ON t.id=p_asset_id
     WHERE block.task_id=p_task_id
+      AND (block.asset_type IN ('root_domain','subdomain','ip') OR block.block_kind='invalid')
       AND (block.asset_id=p_asset_id
            OR block.asset_key=task_asset_identity_key(t)
            OR (block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>''
@@ -776,6 +777,7 @@ BEGIN
  FROM assets a JOIN task_asset_links l ON l.asset_id=a.id
  WHERE a.id=p_asset_id AND l.task_id=p_task_id;
  IF NOT FOUND THEN RETURN 'revoked'; END IF;
+ IF target_type NOT IN ('root_domain','subdomain','ip','service','endpoint') THEN RETURN 'approved'; END IF;
  -- Hosts are normalized on asset writes; only matching parents need their
  -- authorization/tombstone checked. Keep normalized parent reads together.
  WITH parents AS MATERIALIZED (
@@ -792,8 +794,10 @@ BEGIN
  INTO parent_count,denied,revoked,exact_pending,exact_approved,pending FROM matching;
  IF denied THEN RETURN 'blocked'; END IF;
  IF revoked THEN RETURN 'revoked'; END IF;
- IF target_type NOT IN ('service','endpoint') THEN RETURN target_state; END IF;
+ IF target_state IN ('revoked','blocked') AND target_type IN ('root_domain','subdomain','ip') THEN RETURN target_state; END IF;
+ IF task_host_template_allows(p_task_id,target_host) THEN RETURN 'approved'; END IF;
  IF exact_pending THEN RETURN 'pending'; END IF;
+ IF target_type NOT IN ('service','endpoint') THEN RETURN target_state; END IF;
  IF exact_approved THEN RETURN 'approved'; END IF;
  IF parent_count=0 OR pending THEN RETURN 'pending'; END IF;
  RETURN 'approved';

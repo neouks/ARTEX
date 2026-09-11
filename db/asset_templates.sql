@@ -81,26 +81,58 @@ CREATE TABLE IF NOT EXISTS task_asset_dns_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_task_asset_dns_evidence_ip ON task_asset_dns_evidence(task_id,ip);
 
-CREATE OR REPLACE FUNCTION task_asset_template_allows(tid BIGINT, target assets)
+CREATE OR REPLACE FUNCTION task_host_template_allows(tid BIGINT, host TEXT)
 RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
  SELECT COALESCE((SELECT t.asset_approval_template='all_assets' OR EXISTS (
  SELECT 1 FROM task_asset_grants g WHERE g.task_id=tid AND (
-  (g.kind='host' AND task_asset_host(target)=g.value)
-  OR (g.kind='domain' AND task_asset_host_within(task_asset_host(target),g.value))
-  OR (g.kind='cidr' AND try_inet(task_asset_host(target)) IS NOT NULL
-      AND try_inet(task_asset_host(target)) <<= g.value::cidr)
+  (g.kind='host' AND host=g.value)
+  OR (g.kind='domain' AND task_asset_host_within(host,g.value))
+  OR (g.kind='cidr' AND try_inet(host) IS NOT NULL
+      AND try_inet(host) <<= g.value::cidr)
   OR (t.asset_approval_template='related_assets' AND g.root_domain<>'' AND (
-      task_asset_host_within(task_asset_host(target),g.root_domain)
-      OR (target.type='ip' AND EXISTS (
+      task_asset_host_within(host,g.root_domain)
+      OR (try_inet(host) IS NOT NULL AND EXISTS (
          SELECT 1 FROM task_asset_dns_evidence evidence
          JOIN assets dns ON dns.id=evidence.dns_asset_id
          WHERE evidence.task_id=tid AND dns.type='subdomain'
           AND task_asset_host_within(dns.domain,g.root_domain)
-          AND evidence.ip=try_inet(target.ip)
+          AND evidence.ip=try_inet(host)
       ))
   ))
  )) FROM tasks t WHERE t.id=tid),false)
 $$;
+
+CREATE OR REPLACE FUNCTION task_asset_template_allows(tid BIGINT, target assets)
+RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
+ SELECT task_host_template_allows(tid,task_asset_host(target))
+$$;
+
+-- Network targets have no port/path policy. Reuse the effective host records
+-- and template grants; callers can evaluate a whole batch in one round trip.
+CREATE OR REPLACE FUNCTION task_host_approval_state(tid BIGINT, host TEXT)
+RETURNS TEXT LANGUAGE plpgsql STABLE AS $$
+DECLARE denied BOOLEAN; revoked BOOLEAN; exact_pending BOOLEAN; exact_approved BOOLEAN;
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM tasks WHERE id=tid AND deleted_at IS NULL) THEN RETURN NULL; END IF;
+ IF EXISTS(SELECT 1 FROM task_asset_blocks b WHERE b.task_id=tid
+   AND b.asset_type IN ('root_domain','subdomain','ip') AND b.host_key<>''
+   AND task_asset_host_within(host,b.host_key)) THEN RETURN 'blocked'; END IF;
+ WITH candidates AS MATERIALIZED (
+  SELECT DISTINCT a.id,task_asset_host(a) AS candidate_host,task_asset_effective_approval_state(tid,a.id) AS state
+  FROM task_asset_links l JOIN assets a ON a.id=l.asset_id
+  WHERE (l.task_id=tid OR l.task_id IN (SELECT source_task_id FROM task_relations WHERE task_id=tid))
+   AND a.type IN ('root_domain','subdomain','ip') AND task_asset_host_within(host,task_asset_host(a))
+ )
+ SELECT bool_or(state='blocked'),bool_or(state='revoked'),
+ bool_or(candidate_host=host AND state='pending'),bool_or(candidate_host=host AND state='approved')
+ INTO denied,revoked,exact_pending,exact_approved FROM candidates;
+ IF denied THEN RETURN 'blocked'; END IF;
+ IF revoked THEN RETURN 'revoked'; END IF;
+ IF task_host_template_allows(tid,host) THEN RETURN 'approved'; END IF;
+ IF exact_pending THEN RETURN 'pending'; END IF;
+ IF exact_approved THEN RETURN 'approved'; END IF;
+ RETURN 'pending';
+END $$;
 
 -- Finalize discovery inside its transaction, including side-effect roots/IPs.
 CREATE OR REPLACE FUNCTION apply_task_asset_template() RETURNS trigger LANGUAGE plpgsql AS $$

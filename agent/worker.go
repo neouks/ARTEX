@@ -477,7 +477,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
 	}
 	opts := agentcore.Options{
-		Provider:               w.prov,
+		Provider:               withAssetContext(w.prov, as, taskID),
 		SystemPrompt:           system,
 		DynamicBoundary:        boundary,
 		Tools:                  tools,

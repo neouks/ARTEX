@@ -391,7 +391,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	}
 	runProxyAddr := TaskProxyAddr(p.proxyAddr, p.proxyCACert, taskID)
 	opts := agentcore.Options{
-		Provider:               p.prov,
+		Provider:               withAssetContext(p.prov, as, taskID),
 		SystemPrompt:           system,
 		DynamicBoundary:        boundary,
 		Tools:                  tools,

@@ -254,25 +254,6 @@ SET source=CASE WHEN task_asset_links.source IN ('manual','direct','company','ap
 	return nil
 }
 
-// taskAssetRow loads the global asset identity used for authorization and
-// tombstone matching.
-func (s *AssetStore) taskAssetRow(assetID int64) (*Asset, error) {
-	rows, err := s.GetByIDs([]int64{assetID})
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		return nil, ErrTaskAssetAssetNotFound
-	}
-	return rows[0], nil
-}
-
-// isTaskAssetBlocked checks both exact identity and parent-host tombstones.
-func (s *AssetStore) isTaskAssetBlocked(taskID, assetID int64) (bool, string, error) {
-	blocked, _, reason, _, err := s.taskAssetBlockInfo(taskID, assetID)
-	return blocked, reason, err
-}
-
 // ValidateTaskAssetsApproved is the common admission check used by Planner,
 // Worker and write-back tools. Empty ids are valid for global directions. A
 // current-task link is authoritative; when none exists, a directly inherited
@@ -351,6 +332,63 @@ func (s *AssetStore) FilterApprovedAssets(taskID int64, assets []*Asset) ([]*Ass
 			out = append(out, asset)
 		}
 	}
+	return s.projectApprovedAssetHosts(taskID, out)
+}
+
+// A visible domain may contain a pending resolved IP (or CNAME). Strip those
+// structured references from the model view without changing the stored asset.
+func (s *AssetStore) projectApprovedAssetHosts(taskID int64, assets []*Asset) ([]*Asset, error) {
+	unique := make(map[string]bool)
+	add := func(host string) {
+		if host != "" {
+			unique[normalizeTaskAssetHost(host)] = true
+		}
+	}
+	for _, a := range assets {
+		add(a.IP)
+		add(a.RootDomain)
+		for _, host := range a.BoundDomains {
+			add(host)
+		}
+		if a.RecordType == "A" || a.RecordType == "AAAA" || a.RecordType == "CNAME" {
+			for _, host := range a.RecordValue {
+				add(host)
+			}
+		}
+	}
+	hosts := make([]string, 0, len(unique))
+	for host := range unique {
+		hosts = append(hosts, host)
+	}
+	states, err := s.TaskHostApprovalStates(taskID, hosts)
+	if err != nil {
+		return nil, err
+	}
+	allowed := func(host string) bool { return states[normalizeTaskAssetHost(host)] == ApprovalApproved }
+	filter := func(values []string) []string {
+		var result []string
+		for _, host := range values {
+			if allowed(host) {
+				result = append(result, host)
+			}
+		}
+		return result
+	}
+	out := make([]*Asset, 0, len(assets))
+	for _, asset := range assets {
+		a := *asset
+		if !allowed(a.IP) {
+			a.IP = ""
+		}
+		if !allowed(a.RootDomain) {
+			a.RootDomain = ""
+		}
+		a.BoundDomains = filter(a.BoundDomains)
+		if a.RecordType == "A" || a.RecordType == "AAAA" || a.RecordType == "CNAME" {
+			a.RecordValue = filter(a.RecordValue)
+		}
+		out = append(out, &a)
+	}
 	return out, nil
 }
 
@@ -358,284 +396,111 @@ func (s *AssetStore) FilterApprovedAssets(taskID int64, assets []*Asset) ([]*Ass
 // network tools (Bash/HTTP/MCP). Explicit/related templates fail closed for an
 // unknown host; all-assets still permits a new valid host unless an operator
 // block, revocation, or deletion applies.
+func (s *AssetStore) TaskHostApprovalStates(taskID int64, hosts []string) (map[string]string, error) {
+	states := make(map[string]string, len(hosts))
+	if len(hosts) == 0 {
+		return states, nil
+	}
+	rows, err := s.query(`SELECT host,COALESCE(task_host_approval_state($1,host),'')
+FROM unnest($2::text[]) AS requested(host)`, taskID, hosts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var host, state string
+		if err := rows.Scan(&host, &state); err != nil {
+			return nil, err
+		}
+		states[host] = state
+	}
+	return states, rows.Err()
+}
+
 func (s *AssetStore) ValidateTaskHostsApproved(taskID int64, hosts []string) error {
 	if taskID <= 0 || len(hosts) == 0 {
 		return nil
 	}
-	want := map[string]struct{}{}
-	for _, h := range hosts {
-		h = normalizeTaskAssetHost(h)
-		if h == "" {
+	want := make([]string, 0, len(hosts))
+	seen := make(map[string]bool)
+	for _, host := range hosts {
+		host = normalizeTaskAssetHost(host)
+		if host == "" {
 			continue
 		}
-		normalized, err := NormalizeAgentHost(h, true)
+		normalized, err := NormalizeAgentHost(host, true)
 		if err != nil {
-			return fmt.Errorf("%w: host %q 格式无效", ErrTaskAssetInvalid, h)
+			return fmt.Errorf("%w: host %q 格式无效", ErrTaskAssetInvalid, host)
 		}
-		want[normalized] = struct{}{}
-	}
-	for host := range want {
-		if err := s.validateTaskHostApproved(taskID, host); err != nil {
-			return err
+		if !seen[normalized] {
+			want = append(want, normalized)
+			seen[normalized] = true
 		}
 	}
-	return nil
-}
-
-func (s *AssetStore) validateTaskHostApproved(taskID int64, host string) error {
-	var template, blockReason, deniedState string
-	var templateAllows, exactPending, exactApproved, ancestorPending bool
-	err := s.queryRow(`WITH task_policy AS (
- SELECT asset_approval_template FROM tasks WHERE id=$1 AND deleted_at IS NULL
-), context_tasks AS (
- SELECT $1::bigint AS task_id
- UNION ALL SELECT source_task_id FROM task_relations WHERE task_id=$1
-), candidates AS (
- SELECT DISTINCT a.id,task_asset_host(a) AS host,
-        task_asset_effective_approval_state($1,a.id) AS state
- FROM context_tasks context
- JOIN task_asset_links link ON link.task_id=context.task_id
- JOIN assets a ON a.id=link.asset_id
- WHERE a.type IN ('root_domain','subdomain','ip')
-   AND (context.task_id=$1 OR NOT EXISTS (
-       SELECT 1 FROM task_asset_links local WHERE local.task_id=$1 AND local.asset_id=a.id))
-   AND (task_asset_host(a)=$2 OR task_asset_host_within($2,task_asset_host(a)))
-), decision AS (
- SELECT policy.asset_approval_template,
-   COALESCE((SELECT block.reason FROM task_asset_blocks block
-     WHERE block.task_id=$1 AND block.asset_type IN ('root_domain','subdomain','ip')
-       AND block.host_key<>'' AND task_asset_host_within($2,block.host_key)
-     ORDER BY CASE block.block_kind WHEN 'invalid' THEN 0 WHEN 'deleted' THEN 1 ELSE 2 END,block.blocked_at DESC LIMIT 1),'') AS block_reason,
-   COALESCE((SELECT candidate.state FROM candidates candidate
-     WHERE candidate.state IN ('blocked','revoked')
-     ORDER BY CASE candidate.state WHEN 'blocked' THEN 0 ELSE 1 END LIMIT 1),'') AS denied_state,
-   EXISTS(SELECT 1 FROM candidates WHERE host=$2 AND state='pending') AS exact_pending,
-   EXISTS(SELECT 1 FROM candidates WHERE host=$2 AND state='approved') AS exact_approved,
-   EXISTS(SELECT 1 FROM candidates WHERE host<>$2 AND state='pending') AS ancestor_pending,
-   (policy.asset_approval_template='all_assets' OR EXISTS (
-     SELECT 1 FROM task_asset_grants grant_row WHERE grant_row.task_id=$1 AND (
-       (grant_row.kind='host' AND grant_row.value=$2)
-       OR (grant_row.kind='domain' AND task_asset_host_within($2,grant_row.value))
-       OR (grant_row.kind='cidr' AND try_inet($2) IS NOT NULL AND try_inet($2) <<= grant_row.value::cidr)
-       OR (policy.asset_approval_template='related_assets' AND grant_row.root_domain<>'' AND (
-         task_asset_host_within($2,grant_row.root_domain)
-         OR (try_inet($2) IS NOT NULL AND EXISTS (
-           SELECT 1 FROM task_asset_dns_evidence evidence
-           JOIN assets dns ON dns.id=evidence.dns_asset_id
-           WHERE evidence.task_id=$1 AND evidence.ip=try_inet($2)
-             AND task_asset_host_within(dns.domain,grant_row.root_domain)
-         ))
-       ))
-     )
-   )) AS template_allows
- FROM task_policy policy
-)
-SELECT asset_approval_template,block_reason,denied_state,template_allows,
-       exact_pending,exact_approved,ancestor_pending FROM decision`, taskID, host).
-		Scan(&template, &blockReason, &deniedState, &templateAllows, &exactPending, &exactApproved, &ancestorPending)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrTaskAssetTaskNotFound
-	}
+	states, err := s.TaskHostApprovalStates(taskID, want)
 	if err != nil {
 		return err
 	}
-	if blockReason != "" || deniedState == ApprovalBlocked {
-		if blockReason == "" {
-			blockReason = "该主机或其父资产已封禁"
+	for _, host := range want {
+		switch states[host] {
+		case ApprovalApproved:
+		case "":
+			return ErrTaskAssetTaskNotFound
+		case ApprovalBlocked:
+			return fmt.Errorf("%w: host %s 已封禁", ErrTaskAssetBlocked, host)
+		default:
+			return fmt.Errorf("%w: host %s 状态为 %s", ErrTaskAssetNotApproved, host, states[host])
 		}
-		return fmt.Errorf("%w: host %s: %s", ErrTaskAssetBlocked, host, blockReason)
 	}
-	if deniedState == ApprovalRevoked {
-		return fmt.Errorf("%w: host %s 或其父资产已撤回授权", ErrTaskAssetNotApproved, host)
-	}
-	if templateAllows {
-		return nil
-	}
-	if exactPending || ancestorPending {
-		return fmt.Errorf("%w: host %s 等待资产审批", ErrTaskAssetNotApproved, host)
-	}
-	if exactApproved {
-		return nil
-	}
-	return fmt.Errorf("%w: host %s 不在 %s 模板的授权范围内", ErrTaskAssetNotApproved, host, template)
+	return nil
 }
 
 func isParentAssetType(typ string) bool {
 	return typ == "root_domain" || typ == "subdomain" || typ == "ip"
 }
 
-// removeBlockedTaskAssociations cleans up the side-effect links created by an
-// agent upsert when a parent tombstone rejects the discovered asset. Without
-// this, inserting a service below a deleted domain could resurrect the domain
-// and its derived subdomain links even though the service itself was removed.
-func (s *AssetStore) removeBlockedTaskAssociations(taskID int64) error {
-	_, err := s.db.Exec(`UPDATE assets a SET task_ids=array_remove(a.task_ids,$1)
-WHERE $1=ANY(a.task_ids) AND EXISTS (
- SELECT 1 FROM task_asset_blocks b WHERE b.task_id=$1 AND b.block_kind='deleted'
- AND (b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a)
- OR (b.asset_type IN ('root_domain','subdomain','ip') AND task_asset_host_within(task_asset_host(a),b.host_key)))
-)`, taskID)
-	return err
-}
-
-// markAgentSideEffectParentsPending covers the host rows created implicitly by
-// an agent upsert (root domains and DNS A/AAAA IP rows). Those rows do not pass
-// through insert_assets' top-level result loop, so they must be downgraded here
-// or they would retain the trigger's legacy approved default.
-func (s *AssetStore) markAgentSideEffectParentsPending(taskID int64, discovered *Asset) error {
-	if taskID <= 0 || discovered == nil {
-		return nil
-	}
-	_, discoveredHost := AssetKey(discovered)
-	rootHost := normalizeTaskAssetHost(discovered.RootDomain)
-	ips := make(map[string]bool, len(discovered.RecordValue)+1)
-	if ip := normalizeTaskAssetHost(discovered.IP); net.ParseIP(ip) != nil {
-		ips[ip] = true
-	}
-	for _, value := range discovered.RecordValue {
-		if ip := normalizeTaskAssetHost(value); net.ParseIP(ip) != nil {
-			ips[ip] = true
-		}
-	}
-	rows, err := s.query(`SELECT a.id,COALESCE(a.domain,''),COALESCE(a.ip,''),l.source
-FROM task_asset_links l JOIN assets a ON a.id=l.asset_id
-WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')
-AND l.approval_state='approved' AND COALESCE(l.approved_by,'')='' AND COALESCE(l.approval_reason,'')=''`, taskID)
-	if err != nil {
-		return err
-	}
-	var pendingIDs []int64
-	for rows.Next() {
-		var id int64
-		var domain, ip, source string
-		if err := rows.Scan(&id, &domain, &ip, &source); err != nil {
-			rows.Close()
-			return err
-		}
-		if operatorApprovedTaskAssetSource(source) {
-			continue
-		}
-		host := normalizeTaskAssetHost(domain)
-		if host == "" {
-			host = normalizeTaskAssetHost(ip)
-		}
-		matched := id == discovered.ID || host == discoveredHost || host == rootHost || ips[host]
-		if matched {
-			pendingIDs = append(pendingIDs, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(pendingIDs) == 0 {
-		return nil
-	}
-	_, err = s.db.Exec(`UPDATE task_asset_links
-SET approval_state='pending', approved_at=NULL, approved_by=NULL,
-    approval_reason='Agent 发现，等待用户审批'
-WHERE task_id=$1 AND asset_id=ANY($2::bigint[])`, taskID, pendingIDs)
-	return err
-}
-
-// RegisterAgentDiscoveredAsset marks an agent-created association pending,
-// unless the task already has an operator-approved association. Derived
-// services/endpoints inherit a non-approved parent host state. A tombstoned
-// identity is rejected and is never reattached to the task.
+// RegisterAgentDiscoveredAsset is the compatibility path for callers that have
+// already written a row. New discovery must use RegisterAgentAsset so writing
+// the asset and deciding authorization are atomic.
 func (s *AssetStore) RegisterAgentDiscoveredAsset(taskID, assetID int64, agentKey string) (string, error) {
 	if taskID <= 0 || assetID <= 0 {
 		return ApprovalApproved, nil
 	}
-	asset, err := s.taskAssetRow(assetID)
+	_, err := s.RegisterAgentAsset(taskID, agentKey, 0, func(scoped *AssetStore) (int64, error) {
+		_, err := scoped.tx.Exec(`UPDATE task_asset_links l SET approval_state='pending',
+approved_at=NULL,approved_by=NULL,approval_reason='Agent 发现，等待用户审批'
+FROM assets a,assets discovered
+WHERE discovered.id=$2 AND l.task_id=$1 AND a.id=l.asset_id
+AND a.type IN ('root_domain','subdomain','ip')
+AND l.source='system' AND l.approval_state='approved'
+AND COALESCE(l.approved_by,'')='' AND COALESCE(l.approval_reason,'')=''
+AND (a.id=$2 OR task_asset_host(a)=task_asset_host(discovered)
+ OR (discovered.root_domain<>'' AND a.domain=discovered.root_domain))`, taskID, assetID)
+		return assetID, err
+	})
 	if err != nil {
 		return "", err
 	}
-	blocked, reason, err := s.isTaskAssetBlocked(taskID, assetID)
+	states, err := s.TaskAssetApprovalStates(taskID, []int64{assetID})
 	if err != nil {
 		return "", err
 	}
-	if blocked {
-		if reason == "" {
-			reason = "该资产已从当前任务删除"
-		}
-		_ = s.removeBlockedTaskAssociations(taskID)
-		return "blocked", fmt.Errorf("%w: %s", ErrTaskAssetBlocked, reason)
-	}
-	if asset.Type == "service" || asset.Type == "endpoint" {
-		if err := s.markAgentSideEffectParentsPending(taskID, asset); err != nil {
-			return "", err
-		}
-		var state string
-		if err := s.queryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
-			return "", err
-		}
-		if state == "blocked" {
-			return state, fmt.Errorf("%w: 父域名/IP已封禁", ErrTaskAssetBlocked)
-		}
-		if state == ApprovalRevoked {
-			return state, fmt.Errorf("%w: 父域名/IP已撤回授权", ErrTaskAssetNotApproved)
-		}
+	state := states[assetID]
+	switch state {
+	case "":
+		return "", ErrTaskAssetAssetNotFound
+	case ApprovalBlocked:
+		return state, ErrTaskAssetBlocked
+	case ApprovalRevoked:
+		return state, ErrTaskAssetNotApproved
+	default:
 		return state, nil
 	}
-	// A user-revoked association remains revoked until the user explicitly
-	// approves it again. Agent rediscovery must not turn that decision into a
-	// pending or approved link merely because the global asset row still exists.
-	var existingState, existingSource, existingActor string
-	err = s.queryRow(`SELECT approval_state,source,COALESCE(approved_by,'') FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, taskID, assetID).
-		Scan(&existingState, &existingSource, &existingActor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	if existingState == ApprovalRevoked {
-		return ApprovalRevoked, fmt.Errorf("%w: 资产已被用户撤回授权", ErrTaskAssetNotApproved)
-	}
-	if asset.Type == "subdomain" {
-		if err := s.markAgentSideEffectParentsPending(taskID, asset); err != nil {
-			return "", err
-		}
-	}
-	// User-authored and migrated links are durable approvals. Rediscovery may
-	// enrich the global row, but cannot silently turn the task link pending.
-	if existingState == ApprovalApproved && (operatorApprovedTaskAssetSource(existingSource) || (existingActor != "" && existingActor != "inherited")) {
-		return ApprovalApproved, nil
-	}
-	_, host := AssetKey(asset)
-	state := ApprovalApproved
-	if asset.Type == "root_domain" || asset.Type == "subdomain" || asset.Type == "ip" {
-		state = ApprovalPending
-	}
-	_, err = s.db.Exec(`UPDATE task_asset_links SET approval_state=$3,
-approval_reason=CASE WHEN $3='pending' THEN 'Agent 发现，等待用户审批' ELSE approval_reason END,
-approved_at=CASE WHEN $3='pending' THEN NULL WHEN approved_at IS NULL THEN now() ELSE approved_at END,
-approved_by=CASE WHEN $3='pending' THEN '' WHEN COALESCE(approved_by,'')='' THEN 'inherited' ELSE approved_by END
-WHERE task_id=$1 AND asset_id=$2 AND approval_state NOT IN ('revoked','blocked') AND source NOT IN ('manual','direct','company','api','task','legacy')`, taskID, assetID, state)
-	if err != nil {
-		return "", err
-	}
-	// Side-effect root/IP rows created while inserting a subdomain must receive
-	// the same pending state; otherwise they would be an approval bypass.
-	if asset.Type == "subdomain" {
-		_, err := s.db.Exec(`UPDATE task_asset_links l SET approval_state='pending', approved_at=NULL, approved_by=NULL, approval_reason='Agent 发现，等待用户审批'
-FROM assets a WHERE l.task_id=$1 AND l.asset_id=a.id AND l.approval_state='approved'
-	  AND COALESCE(l.approved_by,'')='' AND COALESCE(l.approval_reason,'')=''
-	  AND l.source NOT IN ('manual','direct','company','api','task','legacy') AND a.type IN ('root_domain','subdomain','ip')
-  AND (a.domain=$2 OR ($3<>'' AND a.ip=$3) OR ($4<>'' AND (a.domain=$4 OR a.root_domain=$4)))`, taskID, asset.RootDomain, asset.IP, host)
-		if err != nil {
-			return "", err
-		}
-	}
-	if err := s.queryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
-		return "", err
-	}
-	return state, nil
 }
 
 func rejectDerivedApprovalAssets(tx *sql.Tx, ids []int64) error {
 	var derived bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM assets WHERE id=ANY($1::bigint[]) AND type IN ('service','endpoint'))`, ids).Scan(&derived); err != nil {
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM assets WHERE id=ANY($1::bigint[]) AND type NOT IN ('root_domain','subdomain','ip'))`, ids).Scan(&derived); err != nil {
 		return err
 	}
 	if derived {
@@ -790,7 +655,7 @@ func (s *AssetStore) RunningIntentIDsForAssets(taskID int64, assetIDs []int64) (
 	rows, err := s.query(`WITH selected AS (
  SELECT task_asset_host(assets) AS host FROM assets WHERE id=ANY($2::bigint[]) AND type IN ('root_domain','subdomain','ip')
 ), targets AS (
- SELECT a.id FROM assets a WHERE a.id=ANY($2::bigint[])
+ SELECT a.id FROM assets a WHERE a.id=ANY($2::bigint[]) AND a.type IN ('root_domain','subdomain','ip')
  UNION SELECT child.id FROM assets child JOIN selected s ON s.host<>'' AND (
    task_asset_host_within(task_asset_host(child),s.host))
 )
@@ -837,18 +702,18 @@ SELECT a.id,a.type,
 COALESCE(NULLIF(a.domain,''),NULLIF(a.ip,''),NULLIF(a.url,''),NULLIF(a.app_name,''),'#'||a.id::text),
 l.source,l.source_summary,l.source_node_id,l.task_id,false,false,l.created_at,task_asset_owner_approval_state(l.task_id,l.asset_id),
 l.approved_at,COALESCE(l.approved_by,''),COALESCE(l.approval_reason,''),false,NULL::timestamptz,'','',''
-FROM task_asset_links l JOIN assets a ON a.id=l.asset_id WHERE l.task_id=$1 AND a.type NOT IN ('service','endpoint')
+FROM task_asset_links l JOIN assets a ON a.id=l.asset_id WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')
 UNION ALL
 SELECT a.id,a.type,
 COALESCE(NULLIF(a.domain,''),NULLIF(a.ip,''),NULLIF(a.url,''),NULLIF(a.app_name,''),'#'||a.id::text),
 inherited.source,inherited.source_summary,inherited.source_node_id,inherited.source_task_id,true,true,inherited.created_at,inherited.approval_state,
 inherited.approved_at,COALESCE(inherited.approved_by,''),COALESCE(inherited.approval_reason,''),false,NULL::timestamptz,'','',''
 FROM inherited_link inherited
-JOIN assets a ON a.id=inherited.asset_id WHERE a.type NOT IN ('service','endpoint')
+JOIN assets a ON a.id=inherited.asset_id WHERE a.type IN ('root_domain','subdomain','ip')
 UNION ALL
 SELECT COALESCE(b.asset_id,0),b.asset_type,b.asset_key,'deleted',b.reason,NULL,$1::bigint,false,true,b.blocked_at,
 'blocked',NULL,'',b.reason,true,b.blocked_at,b.reason,b.blocked_by,b.block_kind
-FROM task_asset_blocks b WHERE b.task_id=$1 AND b.asset_type NOT IN ('service','endpoint') AND NOT EXISTS (
+FROM task_asset_blocks b WHERE b.task_id=$1 AND b.asset_type IN ('root_domain','subdomain','ip') AND NOT EXISTS (
  SELECT 1 FROM task_asset_links l JOIN assets a ON a.id=l.asset_id
  WHERE l.task_id=b.task_id AND (l.asset_id=b.asset_id OR task_asset_identity_key(a)=b.asset_key))
   AND NOT EXISTS (
@@ -928,7 +793,8 @@ func (s *AssetStore) taskAssetBlockInfo(taskID, assetID int64) (bool, *time.Time
 	var reason, actor string
 	err := s.queryRow(`SELECT b.blocked_at,b.reason,b.blocked_by
 FROM task_asset_blocks b JOIN assets a ON a.id=$2
-WHERE b.task_id=$1 AND (b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a)
+WHERE b.task_id=$1 AND (b.asset_type IN ('root_domain','subdomain','ip') OR b.block_kind='invalid')
+AND (b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a)
  OR (b.asset_type IN ('root_domain','subdomain','ip') AND task_asset_host_within(task_asset_host(a),b.host_key)))
 ORDER BY b.blocked_at DESC LIMIT 1`, taskID, assetID).Scan(&at, &reason, &actor)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1252,7 +1118,9 @@ VALUES ($1,$2,$3,$4,$5,'用户从当前任务删除','user')
 ON CONFLICT (task_id,asset_key) DO UPDATE SET reason=EXCLUDED.reason,blocked_at=now(),blocked_by=EXCLUDED.blocked_by,block_kind='deleted'`, taskID, key, asset.Type, host, assetID); err != nil {
 		return false, err
 	}
-	if local {
+	// Non-host deletion is a presentation exclusion, not execution revocation.
+	// Keep its lineage association so a running intent can still write results.
+	if local && isParentAssetType(asset.Type) {
 		if _, err = tx.Exec(`UPDATE assets SET task_ids=array_remove(task_ids,$1) WHERE id=$2`, taskID, assetID); err != nil {
 			return false, err
 		}
@@ -1357,7 +1225,7 @@ FROM ranked WHERE ordinal=1`, taskID, ids)
 		key, assetType, host, reason, kind string
 		at                                 time.Time
 	}
-	blockRows, err := s.query(`SELECT asset_key,asset_type,host_key,blocked_at,reason,block_kind FROM task_asset_blocks WHERE task_id=$1`, taskID)
+	blockRows, err := s.query(`SELECT asset_key,asset_type,host_key,blocked_at,reason,block_kind FROM task_asset_blocks WHERE task_id=$1 AND (asset_type IN ('root_domain','subdomain','ip') OR block_kind='invalid')`, taskID)
 	if err != nil {
 		return err
 	}

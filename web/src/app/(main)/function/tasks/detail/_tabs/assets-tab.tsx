@@ -478,7 +478,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   };
 
   const removeButton = (asset: Asset) => {
-    const derived = asset.type === "service" || asset.type === "endpoint";
+    const derived = !["root_domain", "subdomain", "ip"].includes(asset.type);
     let approvalAction: React.ReactNode = null;
     if (asset.blocked && asset.block_direct && asset.block_kind === "manual" && !asset.task_read_only && !derived) {
       approvalAction = (
@@ -812,8 +812,10 @@ export function AssetsTab({ taskId }: { taskId: string }) {
             <AlertDialogTitle>移出当前任务？</AlertDialogTitle>
             <AlertDialogDescription className="[overflow-wrap:anywhere]">
               {removeDescription}
-              系统会建立当前任务删除墓碑，立即停止相关 Worker，并禁止 Agent
-              再次测试该资产及其派生目标；只有用户手动重新关联后才会恢复。全局资产和历史黑板锚点会继续保留。
+              {removeTarget && ["root_domain", "subdomain", "ip"].includes(removeTarget.type)
+                ? "删除主机将立即停止相关 Worker，并禁止再次测试该主机及其端口、服务和接口；重新关联后恢复。"
+                : "仅移除此记录的展示，不改变主机授权，不限制端口、服务或接口测试。"}
+              全局资产和历史记录会继续保留。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

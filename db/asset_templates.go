@@ -71,6 +71,55 @@ func ValidAssetApprovalTemplate(v string) bool {
 	return v == "all_assets" || v == "related_assets" || v == "explicit_targets"
 }
 
+func (s *AssetStore) TaskApprovalTemplate(taskID int64) (string, error) {
+	var template string
+	err := s.queryRow(`SELECT asset_approval_template FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&template)
+	return template, err
+}
+
+// RegisterAgentAsset commits discovery, provenance and template authorization
+// together. All side-effect hosts share this transaction via the scoped store.
+func (s *AssetStore) RegisterAgentAsset(taskID int64, agentKey string, ownerNode int64, write func(*AssetStore) (int64, error)) (int64, error) {
+	return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
+		if err := scoped.enableAgentDiscoveryMode(); err != nil {
+			return 0, err
+		}
+		id, err := write(scoped)
+		if err != nil || taskID <= 0 {
+			return id, err
+		}
+		if _, err := scoped.tx.Exec(`DELETE FROM task_asset_blocks b USING assets a
+WHERE b.task_id=$1 AND a.id=$2 AND b.asset_type NOT IN ('root_domain','subdomain','ip')
+AND b.block_kind<>'invalid' AND (b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a))`, taskID, id); err != nil {
+			return 0, err
+		}
+		var node *int64
+		summary := "Agent 通过 insert_assets 登记"
+		if ownerNode > 0 {
+			node = &ownerNode
+			summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_assets 登记", ownerNode)
+		}
+		// Deleted host identities must not be reattached by discovery. Active
+		// manual blocks retain their links and test history.
+		if _, err := scoped.tx.Exec(`UPDATE assets a SET task_ids=array_remove(a.task_ids,$1)
+WHERE $1=ANY(a.task_ids) AND EXISTS(SELECT 1 FROM task_asset_blocks b
+WHERE b.task_id=$1 AND b.block_kind='deleted' AND b.asset_type IN ('root_domain','subdomain','ip')
+AND task_asset_host_within(task_asset_host(a),b.host_key))`, taskID); err != nil {
+			return 0, err
+		}
+		var linked bool
+		if err := scoped.tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_asset_links WHERE task_id=$1 AND asset_id=$2)`, taskID, id).Scan(&linked); err != nil {
+			return 0, err
+		}
+		if linked {
+			if err := scoped.SetTaskAssetSource(taskID, id, "agent", summary, node); err != nil {
+				return 0, err
+			}
+		}
+		return id, nil
+	})
+}
+
 // RegisterUserAsset is the transactional UI/API path, never an Agent tool.
 func (s *AssetStore) RegisterUserAsset(taskID int64, write func(*AssetStore) (int64, error)) (int64, error) {
 	return s.RegisterUserAssetWithSource(taskID, "manual", "用户手动添加", write)

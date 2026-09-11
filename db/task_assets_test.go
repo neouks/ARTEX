@@ -437,7 +437,7 @@ func TestAssetKeyIsStableForNonHTTPServiceAndApp(t *testing.T) {
 	}
 }
 
-func TestAgentRediscoveryCannotReattachRecreatedTombstonedAsset(t *testing.T) {
+func TestAgentRediscoveryCanReattachServiceAfterRecordDeletion(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
@@ -478,7 +478,7 @@ func TestAgentRediscoveryCannotReattachRecreatedTombstonedAsset(t *testing.T) {
 		t.Fatal("global asset was not recreated with a new id")
 	}
 	state, err := d.Assets().RegisterAgentDiscoveredAsset(task.ID, recreatedID, "worker")
-	if !errors.Is(err, ErrTaskAssetBlocked) || state != "blocked" {
+	if err != nil || state != ApprovalApproved {
 		t.Fatalf("rediscovery state=%q err=%v", state, err)
 	}
 	var attached, linked bool
@@ -488,8 +488,8 @@ func TestAgentRediscoveryCannotReattachRecreatedTombstonedAsset(t *testing.T) {
 	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_asset_links WHERE task_id=$1 AND asset_id=$2)`, task.ID, recreatedID).Scan(&linked); err != nil {
 		t.Fatal(err)
 	}
-	if attached || linked {
-		t.Fatalf("recreated tombstoned asset remained attached: task_ids=%v link=%v", attached, linked)
+	if !attached || !linked {
+		t.Fatalf("service rediscovery failed to attach: task_ids=%v link=%v", attached, linked)
 	}
 }
 
@@ -572,7 +572,7 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	if claimed, err := d.Exploration(current.ExplorationID).ClaimIntent(currentIntentID, "worker"); err != nil || !claimed {
 		t.Fatalf("claim inherited intent=%v err=%v", claimed, err)
 	}
-	running, err := d.Assets().RunningIntentIDsForAssets(current.ID, []int64{assetID})
+	running, err := d.Assets().RunningIntentIDsForAssets(current.ID, []int64{parentID})
 	if err != nil || len(running) != 1 || running[0] != currentIntentID {
 		t.Fatalf("running inherited intents=%v err=%v", running, err)
 	}
@@ -591,15 +591,15 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	if detached, err := d.Assets().DetachAssetFromTask(current.ID, assetID); err != nil || !detached {
 		t.Fatalf("inherited task-local detach=%v err=%v", detached, err)
 	}
-	if err := d.Assets().ValidateTaskAssetsApproved(current.ID, []int64{assetID}); !errors.Is(err, ErrTaskAssetBlocked) {
-		t.Fatalf("current tombstone over source=%v, want ErrTaskAssetBlocked", err)
+	if err := d.Assets().ValidateTaskAssetsApproved(current.ID, []int64{assetID}); err != nil {
+		t.Fatalf("service record exclusion changed host authorization: %v", err)
 	}
 	if err := d.Assets().ValidateTaskAssetsApproved(source.ID, []int64{assetID}); err != nil {
 		t.Fatalf("current tombstone leaked into source task: %v", err)
 	}
 	blockedRows, err := d.Assets().QueryByTaskApproval(current.ID, "service", "all", "all", 10, 0)
-	if err != nil || len(blockedRows) != 1 || !blockedRows[0].Blocked {
-		t.Fatalf("inherited tombstone page=%+v err=%v", blockedRows, err)
+	if err != nil || len(blockedRows) != 0 {
+		t.Fatalf("excluded service still shown: %+v err=%v", blockedRows, err)
 	}
 	if _, err := d.Assets().AttachAssetsToTask(current.ID, []int64{assetID}, "manual override"); err != nil {
 		t.Fatal(err)

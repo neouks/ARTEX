@@ -325,7 +325,13 @@ VALUES ($1, 'root_domain', $2, 'manual', 'revision asset scope')`, current.ID, s
 		t.Fatal(err)
 	}
 	assetIDs = append(assetIDs, scopedID)
-	wantChanged("scope-matched asset insertion", before)
+	if after, err := store.BlackboardRevision(); err != nil || after != before {
+		t.Fatalf("unassociated asset changed executable revision: %q err=%v", after, err)
+	}
+	if _, err := d.Assets().AttachAssetsToTask(current.ID, []int64{scopedID}, "user linked scoped asset"); err != nil {
+		t.Fatal(err)
+	}
+	wantChanged("explicit scope asset association", before)
 }
 
 func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {

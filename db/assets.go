@@ -1374,6 +1374,10 @@ func pageClause(args *[]any, limit, offset int) string {
 // queries apply the stricter effective-approved predicate separately.
 func taskAssetContextAssociationSQL(assetAlias, taskArg string) string {
 	return fmt.Sprintf(`(
+NOT EXISTS (SELECT 1 FROM task_asset_blocks excluded
+ WHERE excluded.task_id=%[2]s AND excluded.block_kind='deleted'
+ AND excluded.asset_type NOT IN ('root_domain','subdomain','ip')
+ AND (excluded.asset_id=%[1]s.id OR excluded.asset_key=task_asset_identity_key(%[1]s))) AND (
 EXISTS (SELECT 1 FROM task_asset_links current_link
         WHERE current_link.task_id=%[2]s AND current_link.asset_id=%[1]s.id)
 OR (
@@ -1387,7 +1391,7 @@ OR (
 )
 OR EXISTS (SELECT 1 FROM task_asset_blocks block
            WHERE block.task_id=%[2]s AND block.asset_id=%[1]s.id)
-)`, assetAlias, taskArg)
+))`, assetAlias, taskArg)
 }
 
 // taskAssetSelectedLinkBoolSQL compares one field on the task-local link, or on

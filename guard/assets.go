@@ -98,13 +98,15 @@ func assetPolicyAuditSubject(name string, input []byte) string {
 	}
 }
 
-var (
-	urlPattern  = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
-	hostPattern = regexp.MustCompile(`(?i)((?:\d{1,3}\.){3}\d{1,3}|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z0-9-]{2,63}|\[[0-9a-f:]+\])`)
-)
+var urlPattern = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
 
 func (p TaskAssetPolicy) Check(tool string, input []byte) string {
 	if p.Store == nil || p.TaskID <= 0 {
+		return ""
+	}
+	// Discovery registers candidates; authorization belongs to the transaction
+	// and the returned executable view, not a pre-tool test of its new hosts.
+	if tool == "insert_assets" || tool == "register_user_target" {
 		return ""
 	}
 	var value any
@@ -115,6 +117,11 @@ func (p TaskAssetPolicy) Check(tool string, input []byte) string {
 				return "任务资产执行被阻止：" + err.Error()
 			}
 		}
+	}
+	// Evidence and summaries may mention unrelated hosts without targeting them.
+	// These write tools enforce authorization on their explicit/implicit IDs.
+	if tool == "record_fact" || tool == "report_finding" {
+		return ""
 	}
 	hosts := collectHosts(string(input))
 	if err := p.Store.ValidateTaskHostsApproved(p.TaskID, hosts); err != nil {
@@ -142,21 +149,16 @@ func collectHosts(text string) []string {
 	var structured any
 	if json.Unmarshal([]byte(text), &structured) == nil {
 		collectStructuredHosts(structured, add)
+		collectCommandHosts(structured, add)
+	} else {
+		collectShellTargets(text, add)
 	}
-	// Parse URLs first. The generic domain expression intentionally requires a
-	// dot, while URL syntax makes single-label intranet hosts unambiguous.
+	// Explicit URL syntax identifies network targets, including single-label
+	// intranet hosts, without guessing domains from arbitrary text substrings.
 	for _, rawURL := range urlPattern.FindAllString(text, -1) {
 		rawURL = strings.TrimRight(rawURL, `.,;:!?)]}`)
 		if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
 			add(u.Hostname())
-		}
-	}
-	for _, match := range hostPattern.FindAllStringSubmatch(text, -1) {
-		if len(match) > 1 {
-			h := strings.Trim(match[1], "[]")
-			if u, err := url.Parse("https://" + h); err == nil && u.Hostname() != "" {
-				add(u.Hostname())
-			}
 		}
 	}
 	// Raw IPv6 values do not need brackets in structured MCP/custom-tool

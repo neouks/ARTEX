@@ -87,7 +87,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"• service(other)：service_name(必填)、ip或domain(至少一个)、port(必填)、auth([...])\n"+
 			"• endpoint：url(必填)、method(必填)、params([{location,name,value,type}])、service_ip\n"+
 			"auth/technologies/params 都是【追加合并】(append)，不会覆盖原有值。\n"+
-			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
+			"返回可执行资产 results、错误 errors 及待审批/受限数量。未返回的候选资产由系统等待用户审批，不得继续测试或反复尝试；端口、服务和接口只继承主机授权。",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
 			"assets": map[string]any{
@@ -186,7 +186,6 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				ID            int64  `json:"id"`
 				Type          string `json:"type"`
 				ApprovalState string `json:"approval_state,omitempty"`
-				Blocked       bool   `json:"blocked,omitempty"`
 			}
 			type errEntry struct {
 				Index int    `json:"index"`
@@ -195,98 +194,101 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 
 			var results []result
 			var errs []errEntry
+			pendingCount, restrictedCount := 0, 0
 
 			for i, item := range a.Assets {
 				typ := strings.TrimSpace(item.Type)
 				var id int64
 				var err error
 
-				switch typ {
-				case "root_domain":
-					id, err = t.as.UpsertRootDomain(db.UpsertRootDomainReq{
-						Domain:          item.Domain,
-						ICP:             item.ICP,
-						TaskID:          taskID,
-						AgentDiscovered: true,
-					})
-
-				case "ip":
-					id, err = t.as.UpsertIP(db.UpsertIPReq{
-						IP:              item.IP,
-						BoundDomains:    item.BoundDomains,
-						OpenPorts:       item.OpenPorts,
-						TaskID:          taskID,
-						AgentDiscovered: true,
-					})
-
-				case "subdomain":
-					id, err = t.as.UpsertSubdomain(db.UpsertSubdomainReq{
-						Domain:          item.Domain,
-						RecordType:      item.RecordType,
-						RecordValue:     item.RecordValue,
-						ICP:             item.ICP,
-						TaskID:          taskID,
-						AgentDiscovered: true,
-					})
-
-				case "app":
-					id, err = t.as.UpsertApp(db.UpsertAppReq{
-						Name:            item.AppName,
-						BundleID:        item.BundleID,
-						Category:        item.Category,
-						Description:     item.Description,
-						ICP:             item.AppICP,
-						CompanyID:       item.CompanyID,
-						TaskID:          taskID,
-						AgentDiscovered: true,
-					})
-
-				case "service":
-					// distinguish HTTP vs other by presence of url
-					if item.URL != "" {
-						// agent may send "ip" or "service_ip" for the enrichment IP; accept both
-						svcIP := item.ServiceIP
-						if svcIP == "" {
-							svcIP = item.IP
-						}
-						id, err = t.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
-							URL:             item.URL,
-							Technologies:    item.Technologies,
-							StatusCode:      item.StatusCode,
-							ContentLength:   item.ContentLength,
-							PageTitle:       item.PageTitle,
-							FaviconMMH3:     item.FaviconMMH3,
-							Auth:            item.Auth,
-							IP:              svcIP,
-							TaskID:          taskID,
-							AgentDiscovered: true,
-						})
-					} else {
-						id, err = t.as.UpsertOtherService(db.UpsertOtherServiceReq{
+				id, err = t.as.RegisterAgentAsset(taskID, t.worker, t.ownerNode, func(scoped *db.AssetStore) (int64, error) {
+					switch typ {
+					case "root_domain":
+						id, err = scoped.UpsertRootDomain(db.UpsertRootDomainReq{
 							Domain:          item.Domain,
-							IP:              item.IP,
-							Port:            item.Port,
-							ServiceName:     item.ServiceName,
-							Auth:            item.Auth,
+							ICP:             item.ICP,
 							TaskID:          taskID,
 							AgentDiscovered: true,
 						})
+
+					case "ip":
+						id, err = scoped.UpsertIP(db.UpsertIPReq{
+							IP:              item.IP,
+							BoundDomains:    item.BoundDomains,
+							OpenPorts:       item.OpenPorts,
+							TaskID:          taskID,
+							AgentDiscovered: true,
+						})
+
+					case "subdomain":
+						id, err = scoped.UpsertSubdomain(db.UpsertSubdomainReq{
+							Domain:          item.Domain,
+							RecordType:      item.RecordType,
+							RecordValue:     item.RecordValue,
+							ICP:             item.ICP,
+							TaskID:          taskID,
+							AgentDiscovered: true,
+						})
+
+					case "app":
+						id, err = scoped.UpsertApp(db.UpsertAppReq{
+							Name:            item.AppName,
+							BundleID:        item.BundleID,
+							Category:        item.Category,
+							Description:     item.Description,
+							ICP:             item.AppICP,
+							CompanyID:       item.CompanyID,
+							TaskID:          taskID,
+							AgentDiscovered: true,
+						})
+
+					case "service":
+						// distinguish HTTP vs other by presence of url
+						if item.URL != "" {
+							// agent may send "ip" or "service_ip" for the enrichment IP; accept both
+							svcIP := item.ServiceIP
+							if svcIP == "" {
+								svcIP = item.IP
+							}
+							id, err = scoped.UpsertHTTPService(db.UpsertHTTPServiceReq{
+								URL:             item.URL,
+								Technologies:    item.Technologies,
+								StatusCode:      item.StatusCode,
+								ContentLength:   item.ContentLength,
+								PageTitle:       item.PageTitle,
+								FaviconMMH3:     item.FaviconMMH3,
+								Auth:            item.Auth,
+								IP:              svcIP,
+								TaskID:          taskID,
+								AgentDiscovered: true,
+							})
+						} else {
+							id, err = scoped.UpsertOtherService(db.UpsertOtherServiceReq{
+								Domain:          item.Domain,
+								IP:              item.IP,
+								Port:            item.Port,
+								ServiceName:     item.ServiceName,
+								Auth:            item.Auth,
+								TaskID:          taskID,
+								AgentDiscovered: true,
+							})
+						}
+
+					case "endpoint":
+						id, err = scoped.UpsertEndpoint(db.UpsertEndpointReq{
+							URL:             item.URL,
+							Method:          item.Method,
+							Params:          item.Params,
+							IP:              item.ServiceIP,
+							TaskID:          taskID,
+							AgentDiscovered: true,
+						})
+
+					default:
+						return 0, fmt.Errorf("unknown type: %s", typ)
 					}
-
-				case "endpoint":
-					id, err = t.as.UpsertEndpoint(db.UpsertEndpointReq{
-						URL:             item.URL,
-						Method:          item.Method,
-						Params:          item.Params,
-						IP:              item.ServiceIP,
-						TaskID:          taskID,
-						AgentDiscovered: true,
-					})
-
-				default:
-					errs = append(errs, errEntry{Index: i, Error: "unknown type: " + typ})
-					continue
-				}
+					return id, err
+				})
 
 				if err != nil {
 					errs = append(errs, errEntry{Index: i, Error: err.Error()})
@@ -294,31 +296,29 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				}
 				approvalState := "approved"
 				if taskID > 0 {
-					approvalState, err = t.as.RegisterAgentDiscoveredAsset(taskID, id, t.worker)
+					var states map[int64]string
+					states, err = t.as.TaskAssetApprovalStates(taskID, []int64{id})
+					approvalState = states[id]
 					if err != nil {
 						if errors.Is(err, db.ErrTaskAssetBlocked) || errors.Is(err, db.ErrTaskAssetNotApproved) {
-							results = append(results, result{Index: i, ID: id, Type: typ, ApprovalState: "blocked", Blocked: true})
+							restrictedCount++
 							continue
 						}
 						errs = append(errs, errEntry{Index: i, Error: err.Error()})
 						continue
 					}
 				}
+				if approvalState != db.ApprovalApproved {
+					if approvalState == db.ApprovalPending {
+						pendingCount++
+					} else {
+						restrictedCount++
+					}
+					continue
+				}
 				results = append(results, result{Index: i, ID: id, Type: typ, ApprovalState: approvalState})
 				t.writes.Assets++
 				t.anchorOwner(id)
-				if taskID > 0 {
-					var sourceNodeID *int64
-					if t.ownerNode > 0 {
-						nodeID := t.ownerNode
-						sourceNodeID = &nodeID
-					}
-					summary := "Agent 通过 insert_assets 登记"
-					if t.ownerNode > 0 {
-						summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_assets 登记", t.ownerNode)
-					}
-					_ = t.as.SetTaskAssetSource(taskID, id, "agent", summary, sourceNodeID)
-				}
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
 				// 资产覆盖度功能关闭时不再累积测试范围(分母)；related=false(与当前任务无关)
@@ -338,8 +338,10 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			}
 
 			return jsonResult(map[string]any{
-				"results": results,
-				"errors":  errs,
+				"results":          results,
+				"errors":           errs,
+				"pending_count":    pendingCount,
+				"restricted_count": restrictedCount,
 			})
 		},
 	)

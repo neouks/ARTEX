@@ -130,7 +130,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, g
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
 	runProxyAddr := TaskProxyAddr(m.proxyAddr, m.proxyCACert, taskID)
 	opts := agentcore.Options{
-		Provider:        m.prov,
+		Provider:        withAssetContext(m.prov, as, taskID),
 		SystemPrompt:    system,
 		DynamicBoundary: boundary,
 		Tools:           tools,

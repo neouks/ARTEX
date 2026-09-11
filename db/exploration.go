@@ -1145,8 +1145,30 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running')`, s.expID).Scan(&
 func (s *ExplorationStore) HasOpenIntent() (bool, error) {
 	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state='open')`, s.expID).Scan(&exists)
+WHERE exploration_id=$1 AND kind='intent' AND state='open'
+AND NOT EXISTS(SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=$1
+WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id)))`, s.expID).Scan(&exists)
 	return exists, err
+}
+
+// WaitingForAssetApproval prevents a model call when the only known host work
+// is pending. Seed planning (no candidates yet) and running work still proceed.
+func (s *ExplorationStore) WaitingForAssetApproval() (bool, error) {
+	var waiting bool
+	err := s.db.QueryRow(`WITH current_task AS (SELECT id FROM tasks WHERE exploration_id=$1),
+host_states AS MATERIALIZED (
+ SELECT task_asset_effective_approval_state(t.id,a.id) state
+ FROM current_task t JOIN task_asset_links l ON l.task_id=t.id OR l.task_id IN
+ (SELECT source_task_id FROM task_relations WHERE task_id=t.id)
+ JOIN assets a ON a.id=l.asset_id WHERE a.type IN ('root_domain','subdomain','ip')
+)
+SELECT EXISTS(SELECT 1 FROM host_states WHERE state='pending')
+AND NOT EXISTS(SELECT 1 FROM host_states WHERE state='approved')
+AND NOT EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.exploration_id=$1 AND n.kind='intent'
+ AND (n.state='running' OR (n.state='open' AND NOT EXISTS(
+  SELECT 1 FROM exploration_anchors ea CROSS JOIN current_task t
+  WHERE ea.node_id=n.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id)))))`, s.expID).Scan(&waiting)
+	return waiting, err
 }
 
 // ExecutionCounts avoids loading node payloads just to render task status.
@@ -1248,9 +1270,11 @@ SELECT md5(
     COALESCE((SELECT string_agg(concat_ws(':', task_id, asset_id, source, md5(source_summary),
                                           COALESCE(source_node_id,0), updated_at),
                                      '|' ORDER BY task_id, asset_id)
-              FROM task_asset_links WHERE task_id IN (SELECT task_id FROM context_tasks)), '') || '#' ||
+              FROM task_asset_links WHERE task_id IN (SELECT task_id FROM context_tasks)
+              AND task_asset_effectively_approved((SELECT id FROM tasks WHERE exploration_id=$1),asset_id)), '') || '#' ||
     COALESCE((SELECT string_agg(concat_ws(':', asset.id, asset.updated_at), '|' ORDER BY asset.id)
-              FROM assets asset WHERE asset.id IN (SELECT id FROM context_assets)), '') || '#' ||
+              FROM assets asset WHERE asset.id IN (SELECT id FROM context_assets)
+              AND task_asset_effectively_approved((SELECT id FROM tasks WHERE exploration_id=$1),asset.id)), '') || '#' ||
     COALESCE((SELECT string_agg(concat_ws(':', company.id, company.updated_at), '|' ORDER BY company.id)
               FROM companies company WHERE company.id IN (SELECT id FROM context_companies)), '') || '#' ||
     COALESCE((SELECT string_agg(concat_ws(':', scope.id, scope.company_id, scope.kind,

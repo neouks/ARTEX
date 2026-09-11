@@ -238,7 +238,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
             <CheckIcon />
           </EmptyMedia>
           <EmptyTitle>当前筛选下没有资产</EmptyTitle>
-          <EmptyDescription>Agent 新发现的根域名、子域名和 IP 会在这里等待审批。</EmptyDescription>
+          <EmptyDescription>域名和 IP 的自动批准记录及待审批记录会显示在这里。</EmptyDescription>
         </EmptyHeader>
       </Empty>
     );
@@ -397,7 +397,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
         <div className="min-w-0">
           <h2 className="font-medium text-sm">资产审批</h2>
           <p className="text-muted-foreground text-xs">
-            待审批资产不会进入可测试范围。服务和接口继承父域名/IP 的授权，无需单独审批，可在测试资产页查看。
+            审批仅作用于域名和 IP。待审批项不进入后续 Agent 测试调度；主机获准后，其所有端口、服务和接口均可测试。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

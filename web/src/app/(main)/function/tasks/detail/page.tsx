@@ -85,6 +85,15 @@ function mergeTaskStats(task: Task, stats: Stats | null): Task {
   };
 }
 
+function TaskDetailLoading() {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+      <Spinner className="size-6 text-muted-foreground" aria-label="正在加载任务" />
+      <p className="text-muted-foreground text-sm">正在加载任务…</p>
+    </div>
+  );
+}
+
 function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: LLMProfile[]; onUpdated: () => void }) {
   const [open, setOpen] = React.useState(false);
   const [profileIDs, setProfileIDs] = React.useState<string[]>(() => taskProfileIDs(task));
@@ -351,16 +360,16 @@ function TaskDetailInner() {
   }
 
   if (!task) {
+    if (!loaded) return <TaskDetailLoading />;
+
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">{loaded ? `未找到任务 ${id}` : "加载中…"}</p>
-        {loaded && (
-          <Button asChild variant="outline">
-            <Link href="/function/tasks">
-              <ArrowLeftIcon /> 返回任务列表
-            </Link>
-          </Button>
-        )}
+        <p className="text-muted-foreground">未找到任务 {id}</p>
+        <Button asChild variant="outline">
+          <Link href="/function/tasks">
+            <ArrowLeftIcon /> 返回任务列表
+          </Link>
+        </Button>
       </div>
     );
   }
@@ -502,7 +511,7 @@ function TaskDetailInner() {
 // useSearchParams must sit under a Suspense boundary for static export.
 export default function TaskDetailPage() {
   return (
-    <React.Suspense fallback={null}>
+    <React.Suspense fallback={<TaskDetailLoading />}>
       <TaskDetailInner />
     </React.Suspense>
   );

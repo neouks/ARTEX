@@ -688,6 +688,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
 			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。覆盖度开关无关，始终提供。
 			if rows, err := t.as.ListTaskScopeWithSources(t.taskID); err == nil && len(rows) > 0 {
+				rows = t.authorizedScope(rows)
 				scope := make([]map[string]any, 0, len(rows))
 				for _, r := range rows {
 					e := map[string]any{"kind": r.Kind, "source": r.Source, "task_id": r.TaskID}
@@ -1131,6 +1132,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 
 		if t.as != nil {
 			if scopeRows, err := t.as.ListTaskScope(source.Task.TaskID); err == nil && len(scopeRows) > 0 {
+				scopeRows = t.authorizedScope(scopeRows)
 				scopeCount := len(scopeRows)
 				if len(scopeRows) > relatedOverviewMaxScopePerSource {
 					scopeRows = scopeRows[:relatedOverviewMaxScopePerSource]
