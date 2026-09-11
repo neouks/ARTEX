@@ -521,43 +521,42 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 	var errs []errEntry
 
 	for i, a := range req.Assets {
-		var id int64
-		var err error
-		switch a.Type {
-		case "root_domain":
-			id, err = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: a.Domain, ICP: a.ICP, TaskID: req.TaskID})
-		case "ip":
-			id, err = as.UpsertIP(db.UpsertIPReq{IP: a.IP, BoundDomains: a.BoundDomains, OpenPorts: a.OpenPorts, TaskID: req.TaskID})
-		case "subdomain":
-			id, err = as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: a.Domain, RecordType: a.RecordType, RecordValue: a.RecordValue, ICP: a.ICP, TaskID: req.TaskID})
-		case "app":
-			id, err = as.UpsertApp(db.UpsertAppReq{Name: a.AppName, BundleID: a.BundleID, Category: a.Category, Description: a.Description, ICP: a.AppICP, TaskID: req.TaskID})
-		case "service":
-			if a.URL != "" {
+		id, err := as.RegisterUserAssetWithSource(req.TaskID, "api", "用户通过资产 API 登记", func(as *db.AssetStore) (int64, error) {
+			var id int64
+			var err error
+			switch a.Type {
+			case "root_domain":
+				id, err = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: a.Domain, ICP: a.ICP, TaskID: req.TaskID})
+			case "ip":
+				id, err = as.UpsertIP(db.UpsertIPReq{IP: a.IP, BoundDomains: a.BoundDomains, OpenPorts: a.OpenPorts, TaskID: req.TaskID})
+			case "subdomain":
+				id, err = as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: a.Domain, RecordType: a.RecordType, RecordValue: a.RecordValue, ICP: a.ICP, TaskID: req.TaskID})
+			case "app":
+				id, err = as.UpsertApp(db.UpsertAppReq{Name: a.AppName, BundleID: a.BundleID, Category: a.Category, Description: a.Description, ICP: a.AppICP, TaskID: req.TaskID})
+			case "service":
+				if a.URL != "" {
+					svcIP := a.ServiceIP
+					if svcIP == "" {
+						svcIP = a.IP
+					}
+					id, err = as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: a.URL, Technologies: a.Technologies, StatusCode: a.StatusCode, ContentLength: a.ContentLength, PageTitle: a.PageTitle, FaviconMMH3: a.FaviconMMH3, Auth: a.Auth, IP: svcIP, TaskID: req.TaskID})
+				} else {
+					id, err = as.UpsertOtherService(db.UpsertOtherServiceReq{Domain: a.Domain, IP: a.IP, Port: a.Port, ServiceName: a.ServiceName, Auth: a.Auth, TaskID: req.TaskID})
+				}
+			case "endpoint":
 				svcIP := a.ServiceIP
 				if svcIP == "" {
 					svcIP = a.IP
 				}
-				id, err = as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: a.URL, Technologies: a.Technologies, StatusCode: a.StatusCode, ContentLength: a.ContentLength, PageTitle: a.PageTitle, FaviconMMH3: a.FaviconMMH3, Auth: a.Auth, IP: svcIP, TaskID: req.TaskID})
-			} else {
-				id, err = as.UpsertOtherService(db.UpsertOtherServiceReq{Domain: a.Domain, IP: a.IP, Port: a.Port, ServiceName: a.ServiceName, Auth: a.Auth, TaskID: req.TaskID})
+				id, err = as.UpsertEndpoint(db.UpsertEndpointReq{URL: a.URL, Method: a.Method, Params: a.Params, IP: svcIP, TaskID: req.TaskID})
+			default:
+				return 0, fmt.Errorf("unknown type: %s", a.Type)
 			}
-		case "endpoint":
-			svcIP := a.ServiceIP
-			if svcIP == "" {
-				svcIP = a.IP
-			}
-			id, err = as.UpsertEndpoint(db.UpsertEndpointReq{URL: a.URL, Method: a.Method, Params: a.Params, IP: svcIP, TaskID: req.TaskID})
-		default:
-			errs = append(errs, errEntry{Index: i, Error: "unknown type: " + a.Type})
-			continue
-		}
+			return id, err
+		})
 		if err != nil {
 			errs = append(errs, errEntry{Index: i, Error: err.Error()})
 			continue
-		}
-		if req.TaskID > 0 {
-			_ = as.SetTaskAssetSource(req.TaskID, id, "api", "通过资产 API 登记", nil)
 		}
 		results = append(results, result{Index: i, ID: id, Type: a.Type})
 	}

@@ -1,10 +1,12 @@
 // ARTEX domain model — types used across the UI.
 // Derived from the functional spec (section 7: 关键数据形状).
 
+export type AssetApprovalTemplate = "all_assets" | "related_assets" | "explicit_targets";
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  asset_approval_template?: AssetApprovalTemplate;
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   category_id?: number;
@@ -265,12 +267,17 @@ export interface Asset {
   approval_reason?: string;
   blocked?: boolean;
   block_direct?: boolean;
-  block_kind?: "manual" | "deleted";
+  block_kind?: "manual" | "deleted" | "invalid";
   blocked_at?: string;
   block_reason?: string;
 }
 
 export interface TaskAssetApproval {
+  group_key?: string;
+  asset_ids?: number[];
+  record_types?: string[];
+  sources?: string[];
+  mixed_state?: boolean;
   asset_id: number;
   asset_type: NewAssetType | string;
   name: string;
@@ -289,7 +296,7 @@ export interface TaskAssetApproval {
   blocked_at?: string;
   block_reason?: string;
   blocked_by?: string;
-  block_kind?: "manual" | "deleted";
+  block_kind?: "manual" | "deleted" | "invalid";
   block_direct?: boolean;
 }
 

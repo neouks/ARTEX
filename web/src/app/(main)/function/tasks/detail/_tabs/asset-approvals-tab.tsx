@@ -5,6 +5,7 @@ import * as React from "react";
 import { CheckIcon, CircleAlertIcon, RefreshCwIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { AssetApprovalTemplateField } from "@/components/asset-approval-template";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -26,7 +27,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { taskAssetSourceLabel } from "@/lib/task-assets";
-import type { TaskAssetApproval } from "@/lib/types";
+import type { Task, TaskAssetApproval } from "@/lib/types";
 
 type ApprovalFilter = "all" | "pending" | "approved" | "revoked" | "blocked";
 
@@ -66,6 +67,7 @@ function formatTime(value?: string) {
 }
 
 export function AssetApprovalsTab({ taskId }: { taskId: string }) {
+  const [task, setTask] = React.useState<Task | null>(null);
   const [items, setItems] = React.useState<TaskAssetApproval[]>([]);
   const [filter, setFilter] = React.useState<ApprovalFilter>("all");
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
@@ -79,6 +81,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
   const load = React.useCallback(async () => {
     try {
+      setTask(await api.task(taskId));
       const next = (await api.taskAssetApprovals(taskId)).filter(
         (item) => item.asset_type !== "service" && item.asset_type !== "endpoint",
       );
@@ -131,9 +134,19 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
     if (ids.length === 0) return;
     setSaving(true);
     try {
-      if (operation === "approve") await api.approveTaskAssets(taskId, ids, "用户在资产审批面板批准");
-      else if (operation === "block") await api.blockTaskAssets(taskId, ids, "用户封禁测试授权");
-      else await api.revokeTaskAssets(taskId, ids, "用户在资产审批面板撤回批准");
+      const groups = items
+        .filter((item) => ids.includes(item.asset_id))
+        .map((item) => item.group_key)
+        .filter((key): key is string => Boolean(key));
+      const reason = {
+        approve: "用户在资产审批面板批准",
+        block: "用户封禁测试授权",
+        revoke: "用户在资产审批面板撤回批准",
+      }[operation];
+      if (groups.length === ids.length) await api.mutateTaskAssetGroups(taskId, operation, groups, reason);
+      else if (operation === "approve") await api.approveTaskAssets(taskId, ids, reason);
+      else if (operation === "block") await api.blockTaskAssets(taskId, ids, reason);
+      else await api.revokeTaskAssets(taskId, ids, reason);
       toast.success(
         operation === "approve"
           ? `已批准 ${ids.length} 项资产`
@@ -295,6 +308,14 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                 <TableCell className="max-w-sm whitespace-normal [overflow-wrap:anywhere]">
                   <div className="flex flex-col gap-0.5">
                     <span className="font-medium font-mono text-xs">{item.name}</span>
+                    {item.asset_ids && (
+                      <span className="text-muted-foreground text-xs">
+                        {item.asset_ids.length} 条记录 · {item.record_types?.join(" / ") || "主机"}
+                      </span>
+                    )}
+                    {item.mixed_state && (
+                      <span className="text-muted-foreground text-xs">记录状态不一致，按最严格状态显示</span>
+                    )}
                     {item.blocked ? (
                       <span className="text-destructive text-xs">{item.block_reason ?? "禁止再次测试"}</span>
                     ) : null}
@@ -306,7 +327,10 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                 </TableCell>
                 <TableCell className="max-w-xs whitespace-normal [overflow-wrap:anywhere]">
                   <div className="flex flex-col gap-0.5 text-xs">
-                    <span>{item.source ? taskAssetSourceLabel(item.source) : "—"}</span>
+                    <span>
+                      {item.sources?.map(taskAssetSourceLabel).join(" / ") ||
+                        (item.source ? taskAssetSourceLabel(item.source) : "—")}
+                    </span>
                     <span className="text-muted-foreground">{item.source_summary || "—"}</span>
                     {item.inherited ? (
                       <span className="text-muted-foreground">来源任务 #{item.source_task_id} · 状态只读</span>
@@ -344,6 +368,24 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex min-h-0 flex-col gap-4">
+      {task && (
+        <AssetApprovalTemplateField
+          value={task.asset_approval_template ?? "explicit_targets"}
+          disabled={saving || !["created", "queued"].includes(task.status)}
+          onChange={async (value) => {
+            setSaving(true);
+            try {
+              await api.updateTaskAssetTemplate(taskId, value);
+              await load();
+              toast.success("审批模板已更新");
+            } catch (error) {
+              toast.error(String(error));
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="font-medium text-sm">资产审批</h2>

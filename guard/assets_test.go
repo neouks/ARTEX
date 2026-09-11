@@ -26,8 +26,8 @@ func TestAssetPolicyAuditSubjectKeepsOnlyShellSurface(t *testing.T) {
 }
 
 func TestCollectHostsIncludesURLsIPv4AndRawIPv6(t *testing.T) {
-	got := collectHosts(`{"url":"https://api.example.test/v1","ip":"198.51.100.7","ipv6":"2001:db8::7"}`)
-	want := []string{"api.example.test", "198.51.100.7", "2001:db8::7"}
+	got := collectHosts(`{"url":"https://api.example.test/v1","host":"intranet2","internal":"http://intranet:8080/health","idn":"https://xn--fiqs8s.example/path","ip":"198.51.100.7","ipv6":"2001:db8::7"}`)
+	want := []string{"api.example.test", "intranet", "intranet2", "xn--fiqs8s.example", "198.51.100.7", "2001:db8::7"}
 	for _, host := range want {
 		found := false
 		for _, candidate := range got {

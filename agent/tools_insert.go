@@ -207,7 +207,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						Domain:          item.Domain,
 						ICP:             item.ICP,
 						TaskID:          taskID,
-						AgentDiscovered: taskID > 0,
+						AgentDiscovered: true,
 					})
 
 				case "ip":
@@ -216,7 +216,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						BoundDomains:    item.BoundDomains,
 						OpenPorts:       item.OpenPorts,
 						TaskID:          taskID,
-						AgentDiscovered: taskID > 0,
+						AgentDiscovered: true,
 					})
 
 				case "subdomain":
@@ -226,7 +226,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						RecordValue:     item.RecordValue,
 						ICP:             item.ICP,
 						TaskID:          taskID,
-						AgentDiscovered: taskID > 0,
+						AgentDiscovered: true,
 					})
 
 				case "app":
@@ -238,7 +238,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						ICP:             item.AppICP,
 						CompanyID:       item.CompanyID,
 						TaskID:          taskID,
-						AgentDiscovered: taskID > 0,
+						AgentDiscovered: true,
 					})
 
 				case "service":
@@ -259,7 +259,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 							Auth:            item.Auth,
 							IP:              svcIP,
 							TaskID:          taskID,
-							AgentDiscovered: taskID > 0,
+							AgentDiscovered: true,
 						})
 					} else {
 						id, err = t.as.UpsertOtherService(db.UpsertOtherServiceReq{
@@ -269,7 +269,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 							ServiceName:     item.ServiceName,
 							Auth:            item.Auth,
 							TaskID:          taskID,
-							AgentDiscovered: taskID > 0,
+							AgentDiscovered: true,
 						})
 					}
 
@@ -280,7 +280,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						Params:          item.Params,
 						IP:              item.ServiceIP,
 						TaskID:          taskID,
-						AgentDiscovered: taskID > 0,
+						AgentDiscovered: true,
 					})
 
 				default:
@@ -329,7 +329,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					if svcIP == "" {
 						svcIP = item.IP
 					}
-					_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
+					domain := item.Domain
+					if host, metadata, err := db.DNSRecordHost(domain, item.RecordType); metadata && err == nil {
+						domain = host
+					}
+					_ = t.as.AddAutoScope(taskID, typ, domain, item.URL, svcIP)
 				}
 			}
 

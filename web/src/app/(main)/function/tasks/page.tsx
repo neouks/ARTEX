@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AssetApprovalTemplateField } from "@/components/asset-approval-template";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
@@ -123,6 +124,7 @@ import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   Asset,
+  AssetApprovalTemplate,
   ChatAttachment,
   Company,
   DeleteTaskOptions,
@@ -3409,6 +3411,7 @@ function CreateTaskSheet({
   const [description, setDescription] = React.useState("");
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
+  const [assetApprovalTemplate, setAssetApprovalTemplate] = React.useState<AssetApprovalTemplate>("all_assets");
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
@@ -3483,6 +3486,7 @@ function CreateTaskSheet({
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
         assetIds: assetIDs,
+        assetApprovalTemplate,
         timeoutSeconds: timeoutSec,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
@@ -3494,6 +3498,7 @@ function CreateTaskSheet({
       setDescription("");
       setGoal("");
       setSelectedTemplateID(null);
+      setAssetApprovalTemplate("all_assets");
       setSourceTaskIDs([]);
       setCompanyIDs([]);
       setAssetIDs([]);
@@ -3567,6 +3572,11 @@ function CreateTaskSheet({
               <FieldDescription>可选，单个分类；用于任务列表筛选和归档，不影响 Agent 执行。</FieldDescription>
             </Field>
             <div className="grid gap-2">
+              <AssetApprovalTemplateField
+                value={assetApprovalTemplate}
+                onChange={setAssetApprovalTemplate}
+                disabled={creating}
+              />
               <Label htmlFor="description">描述</Label>
               <Textarea
                 id="description"

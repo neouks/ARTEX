@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -21,6 +22,10 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
 )
+
+// ErrWorkerAssetAuthorization identifies a worker admission failure that must
+// leave the intent open for a later approval, rather than marking it blocked.
+var ErrWorkerAssetAuthorization = errors.New("worker asset authorization pending")
 
 // Worker is an LLM work agent (docs §4.4): it claims ONE intent, completes it
 // with real tools (Bash: kali tooling through the recording proxy), writes the
@@ -311,6 +316,34 @@ func intentAssetIDs(intent *db.Node) []int64 {
 	return p.AssetIDs
 }
 
+// IntentAssetIDs returns explicit and inherited asset anchors for an intent.
+// The lineage lookup is deliberately performed before any provider/session
+// setup so authorization failures are zero-token outcomes.
+func IntentAssetIDs(ts *db.ExplorationStore, intent *db.Node) ([]int64, error) {
+	if intent == nil {
+		return nil, nil
+	}
+	ids := intentAssetIDs(intent)
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if ts == nil {
+		return ids, nil
+	}
+	lineage, err := ts.LineageAnchorAssetIDs(intent.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range lineage {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 func renderIntentTask(intent *db.Node) string {
 	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
 }
@@ -358,12 +391,16 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	if as != nil && taskID > 0 && intent != nil {
-		if err := as.ValidateTaskAssetsApproved(taskID, intentAssetIDs(intent)); err != nil {
+		ids, idsErr := IntentAssetIDs(ts, intent)
+		if idsErr != nil {
+			return harness.ReasonAbortedTools, WriteCounts{}, fmt.Errorf("%w: 读取意图资产血缘失败：%v", ErrWorkerAssetAuthorization, idsErr)
+		}
+		if err := as.ValidateTaskAssetsApproved(taskID, ids); err != nil {
 			wrapped := fmt.Errorf("Worker 启动前资产授权校验失败：%w", err)
 			if emit != nil {
 				emit(db.Activity{Kind: "result", IsError: true, Summary: "Worker 因资产未获授权而停止", Detail: wrapped.Error()})
 			}
-			return harness.ReasonAbortedTools, WriteCounts{}, wrapped
+			return harness.ReasonAbortedTools, WriteCounts{}, fmt.Errorf("%w: %v", ErrWorkerAssetAuthorization, wrapped)
 		}
 	}
 	tsx := NewToolSet(ts, name)

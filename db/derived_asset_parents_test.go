@@ -13,7 +13,7 @@ func TestDerivedManualParentAndAgentTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	task, err := d.CreateTask("derived parent transaction", "goal", nil, 0, 0)
+	task, err := d.CreateTaskWithOptions("derived parent transaction", "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}

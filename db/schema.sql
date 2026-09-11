@@ -838,6 +838,7 @@ CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
 CREATE OR REPLACE FUNCTION sync_task_asset_links() RETURNS trigger AS $$
 DECLARE
     agent_discovery boolean := COALESCE(current_setting('artex.agent_discovery', true), '') = 'on';
+    user_registration boolean := COALESCE(current_setting('artex.user_asset_registration', true), '') = 'on';
 BEGIN
     INSERT INTO task_asset_links(
         task_id, asset_id, source, source_summary, approval_state, approval_reason
@@ -846,7 +847,7 @@ BEGIN
            NEW.id,
            CASE WHEN agent_discovery THEN 'agent' ELSE 'system' END,
            CASE WHEN agent_discovery THEN 'Agent 通过 insert_assets 登记' ELSE '任务执行期间自动关联' END,
-           CASE WHEN agent_discovery AND NEW.type NOT IN ('service','endpoint') THEN 'pending' ELSE 'approved' END,
+           CASE WHEN (agent_discovery OR user_registration) AND NEW.type NOT IN ('service','endpoint') THEN 'pending' ELSE 'approved' END,
            CASE WHEN NEW.type IN ('service','endpoint') THEN '继承父资产授权'
                 WHEN agent_discovery THEN 'Agent 发现，等待用户审批' ELSE '' END
     FROM unnest(NEW.task_ids) AS requested(task_id)

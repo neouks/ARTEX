@@ -30,36 +30,37 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
-	ID                 string        `json:"id"`
-	ExplorationID      int64         `json:"exploration_id"`
-	Name               string        `json:"name"` // 可选任务名称;空=未命名
-	CategoryID         *int64        `json:"category_id,omitempty"`
-	CategoryName       string        `json:"category_name,omitempty"`
-	Pinned             bool          `json:"pinned"`
-	PinnedAt           string        `json:"pinned_at,omitempty"`
-	Description        string        `json:"description"`
-	Goal               string        `json:"goal"`
-	Status             string        `json:"status"` // created | running | paused | done | failed
-	CreatedAt          string        `json:"created_at"`
-	CreatedUnix        int64         `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
-	CompletedAt        string        `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
-	CompletedUnix      int64         `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
-	LastActivity       int64         `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
-	Paused             bool          `json:"paused"`
-	Queued             bool          `json:"queued"`
-	Tokens             TokenTotalDTO `json:"tokens"` // whole-task token consumption
-	GoalsTotal         int           `json:"goals_total"`
-	GoalsMet           int           `json:"goals_met"`
-	InFlight           int           `json:"in_flight"`                // 运行中 Worker 数（state=running 的意图）
-	LLMProfileID       *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
-	LLMProfileIDs      []int64       `json:"llm_profile_ids"`
-	ActiveLLMProfileID *int64        `json:"active_llm_profile_id,omitempty"`
-	LLMFailoverState   string        `json:"llm_failover_state"`
-	LLMFailoverReason  string        `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs      []string      `json:"source_task_ids"`
-	ArchiveBlockedBy   string        `json:"archive_blocked_by_task_id,omitempty"`
-	CompanyIDs         []int64       `json:"company_ids"`
-	CoverageEnabled    bool          `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+	ID                    string        `json:"id"`
+	ExplorationID         int64         `json:"exploration_id"`
+	Name                  string        `json:"name"` // 可选任务名称;空=未命名
+	CategoryID            *int64        `json:"category_id,omitempty"`
+	CategoryName          string        `json:"category_name,omitempty"`
+	Pinned                bool          `json:"pinned"`
+	PinnedAt              string        `json:"pinned_at,omitempty"`
+	Description           string        `json:"description"`
+	Goal                  string        `json:"goal"`
+	Status                string        `json:"status"` // created | running | paused | done | failed
+	CreatedAt             string        `json:"created_at"`
+	CreatedUnix           int64         `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
+	CompletedAt           string        `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished
+	CompletedUnix         int64         `json:"completed_unix"`     // completed_at as unix seconds (0 if unfinished)
+	LastActivity          int64         `json:"last_activity_unix"` // unix seconds of the last activity (0 if none)
+	Paused                bool          `json:"paused"`
+	Queued                bool          `json:"queued"`
+	Tokens                TokenTotalDTO `json:"tokens"` // whole-task token consumption
+	GoalsTotal            int           `json:"goals_total"`
+	GoalsMet              int           `json:"goals_met"`
+	InFlight              int           `json:"in_flight"`                // 运行中 Worker 数（state=running 的意图）
+	LLMProfileID          *int64        `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
+	LLMProfileIDs         []int64       `json:"llm_profile_ids"`
+	ActiveLLMProfileID    *int64        `json:"active_llm_profile_id,omitempty"`
+	LLMFailoverState      string        `json:"llm_failover_state"`
+	LLMFailoverReason     string        `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs         []string      `json:"source_task_ids"`
+	ArchiveBlockedBy      string        `json:"archive_blocked_by_task_id,omitempty"`
+	CompanyIDs            []int64       `json:"company_ids"`
+	CoverageEnabled       bool          `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+	AssetApprovalTemplate string        `json:"asset_approval_template"`
 }
 
 func applyTaskArchiveBlocker(dto *TaskDTO, blockers map[int64]int64) {
@@ -101,30 +102,31 @@ func taskDTO(t *Task, status string) TaskDTO {
 	}
 	profileIDs := append(make([]int64, 0, len(llmState.ProfileIDs)), llmState.ProfileIDs...)
 	return TaskDTO{
-		ID:                 t.ID,
-		ExplorationID:      t.ExpID,
-		Name:               lifecycle.Name,
-		CategoryID:         lifecycle.CategoryID,
-		CategoryName:       lifecycle.CategoryName,
-		Pinned:             lifecycle.PinnedAt > 0,
-		PinnedAt:           completedRFC(lifecycle.PinnedAt),
-		Description:        t.Description,
-		Goal:               t.Goal,
-		Status:             status,
-		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
-		CreatedUnix:        t.CreatedAt,
-		CompletedAt:        completedRFC(lifecycle.CompletedAt),
-		CompletedUnix:      lifecycle.CompletedAt,
-		Paused:             lifecycle.Paused,
-		Queued:             lifecycle.Queued,
-		LLMProfileID:       llmState.ProfileID,
-		LLMProfileIDs:      profileIDs,
-		ActiveLLMProfileID: llmState.ActiveID,
-		LLMFailoverState:   llmState.FailoverState,
-		LLMFailoverReason:  llmState.FailoverReason,
-		SourceTaskIDs:      sourceIDs,
-		CompanyIDs:         lifecycle.CompanyIDs,
-		CoverageEnabled:    t.CoverageEnabled,
+		ID:                    t.ID,
+		ExplorationID:         t.ExpID,
+		Name:                  lifecycle.Name,
+		CategoryID:            lifecycle.CategoryID,
+		CategoryName:          lifecycle.CategoryName,
+		Pinned:                lifecycle.PinnedAt > 0,
+		PinnedAt:              completedRFC(lifecycle.PinnedAt),
+		Description:           t.Description,
+		Goal:                  t.Goal,
+		Status:                status,
+		CreatedAt:             rfc3339(time.Unix(t.CreatedAt, 0)),
+		CreatedUnix:           t.CreatedAt,
+		CompletedAt:           completedRFC(lifecycle.CompletedAt),
+		CompletedUnix:         lifecycle.CompletedAt,
+		Paused:                lifecycle.Paused,
+		Queued:                lifecycle.Queued,
+		LLMProfileID:          llmState.ProfileID,
+		LLMProfileIDs:         profileIDs,
+		ActiveLLMProfileID:    llmState.ActiveID,
+		LLMFailoverState:      llmState.FailoverState,
+		LLMFailoverReason:     llmState.FailoverReason,
+		SourceTaskIDs:         sourceIDs,
+		CompanyIDs:            lifecycle.CompanyIDs,
+		CoverageEnabled:       t.CoverageEnabled,
+		AssetApprovalTemplate: lifecycle.AssetApprovalTemplate,
 	}
 }
 

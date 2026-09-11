@@ -188,7 +188,7 @@ func TestDerivedNodesInheritAssetAuthorization(t *testing.T) {
 	defer d.Close()
 
 	stamp := time.Now().UnixNano()
-	task, err := d.CreateTask(fmt.Sprintf("derived-authorization-%d", stamp), "goal", nil, 0, 0)
+	task, err := d.CreateTaskWithOptions(fmt.Sprintf("derived-authorization-%d", stamp), "goal", db.TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}

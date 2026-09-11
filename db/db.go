@@ -20,6 +20,9 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
+//go:embed asset_templates.sql
+var assetTemplateSQL string
+
 const schemaMigrationLockKey int64 = 7337741001
 
 var schemaDeadlockRetryDelays = [...]time.Duration{
@@ -40,7 +43,7 @@ func isPostgresDeadlock(err error) bool {
 
 func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(time.Duration)) error {
 	for attempt := 0; ; attempt++ {
-		if _, err := execer.ExecContext(ctx, schemaSQL); err != nil {
+		if _, err := execer.ExecContext(ctx, schemaSQL+"\n"+assetTemplateSQL); err != nil {
 			if !isPostgresDeadlock(err) || attempt >= len(schemaDeadlockRetryDelays) {
 				return err
 			}

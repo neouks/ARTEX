@@ -88,6 +88,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_blocks WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_asset_grants WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
@@ -256,7 +257,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_links", "task_asset_blocks", "findings"} {
+	for _, table := range []string{"task_asset_blocks", "task_asset_grants", "task_asset_links", "task_asset_dns_evidence", "findings"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -265,6 +266,12 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	// the same ordered conversion as startup after both links and blocks exist.
 	if _, err := tx.Exec(`SELECT normalize_derived_task_asset_approvals($1)`, taskID); err != nil {
 		return nil, fmt.Errorf("restore derived asset approvals: %w", err)
+	}
+	if _, err := tx.Exec(`SELECT repair_task_asset_inputs($1)`, taskID); err != nil {
+		return nil, err
+	}
+	if err := seedUserAssetGrants(tx, taskID); err != nil {
+		return nil, err
 	}
 	if streamedLLMRecords != "" {
 		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
@@ -314,6 +321,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,
  timeout_seconds=archived.timeout_seconds,plan_heartbeat_seconds=archived.plan_heartbeat_seconds,
  coverage_enabled=archived.coverage_enabled,pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
+ asset_approval_template=COALESCE(archived.asset_approval_template,'explicit_targets'),
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
@@ -355,7 +363,9 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
-		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
+		"task_asset_grants":       true,
+		"task_asset_dns_evidence": true,
+		"exploration_nodes":       true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "task_asset_blocks": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true, "mcp_usage": true,
 	}
@@ -597,6 +607,20 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 			}
 		}
 		out[table], _ = json.Marshal(rows)
+	}
+	if raw := tables["task_asset_dns_evidence"]; len(raw) > 0 && rawRowCount(raw) > 0 {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if old, ok := jsonInt64(row["dns_asset_id"]); ok {
+				if replacement, exists := mapping[old]; exists {
+					row["dns_asset_id"] = replacement
+				}
+			}
+		}
+		out["task_asset_dns_evidence"], _ = json.Marshal(rows)
 	}
 	for _, table := range []string{"exploration_nodes", "findings"} {
 		rows, err := decodeArchiveRows(tables[table])

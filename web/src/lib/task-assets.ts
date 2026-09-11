@@ -12,13 +12,13 @@ const ASSET_TYPE_LABELS: Record<NewAssetType, string> = {
 const TASK_ASSET_SOURCE_LABELS: Record<string, string> = {
   agent: "Agent 发现",
   anchor: "黑板锚点",
-  api: "资产 API",
+  api: "用户提供",
   company: "用户提供",
   direct: "用户提供",
   legacy: "历史关联",
-  manual: "人工加入",
+  manual: "用户提供",
   system: "系统关联",
-  task: "任务初始化",
+  task: "用户提供",
 };
 
 export function taskAssetTypeLabel(type: NewAssetType): string {

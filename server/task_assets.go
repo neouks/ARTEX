@@ -10,6 +10,30 @@ import (
 
 const maxTaskAssetRequestBytes = 512 << 10
 
+func (s *Server) updateTaskAssetTemplate(w http.ResponseWriter, r *http.Request) {
+	task, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	var req struct {
+		Template string `json:"asset_approval_template"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTaskAssetRequestBytes)
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	id, _ := parseTaskID(task.ID)
+	if err := s.m.pg.SetAssetApprovalTemplate(id, req.Template); err != nil {
+		writeTaskAssetError(w, err)
+		return
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) { state.AssetApprovalTemplate = req.Template })
+	task.Notify()
+	writeJSON(w, 200, map[string]any{"asset_approval_template": req.Template})
+}
+
 func writeTaskAssetError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, db.ErrTaskAssetInvalid):
@@ -34,6 +58,19 @@ func (s *Server) listTaskAssetApprovals(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id, _ := parseTaskID(task.ID)
+	if groupBy := r.URL.Query().Get("group_by"); groupBy != "" && groupBy != "host" {
+		writeErr(w, 400, "group_by 必须是 host 或省略")
+		return
+	}
+	if r.URL.Query().Get("group_by") == "host" {
+		items, err := s.m.Assets().ListTaskAssetApprovalGroups(id)
+		if err != nil {
+			writeTaskAssetError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
 	items, err := s.m.Assets().ListTaskAssetApprovals(id)
 	if err != nil {
 		writeTaskAssetError(w, err)
@@ -57,8 +94,9 @@ func (s *Server) mutateTaskAssetApprovals(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		AssetIDs []int64 `json:"asset_ids"`
-		Reason   string  `json:"reason"`
+		AssetIDs  []int64  `json:"asset_ids"`
+		GroupKeys []string `json:"group_keys"`
+		Reason    string   `json:"reason"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTaskAssetRequestBytes)
 	if err := decode(r, &req); err != nil {
@@ -67,18 +105,20 @@ func (s *Server) mutateTaskAssetApprovals(w http.ResponseWriter, r *http.Request
 	}
 	id, _ := parseTaskID(task.ID)
 	actor := taskAssetActor(r)
+	var resolvedIDs []int64
 	var err error
 	if operation == "approve" {
-		err = s.m.Assets().ApproveTaskAssets(id, req.AssetIDs, actor, req.Reason)
+		resolvedIDs, err = s.m.Assets().ApproveTaskAssetsResolved(id, req.AssetIDs, actor, req.Reason, req.GroupKeys...)
 	} else if operation == "block" {
-		err = s.m.Assets().BlockTaskAssets(id, req.AssetIDs, actor, req.Reason)
+		resolvedIDs, err = s.m.Assets().BlockTaskAssetsResolved(id, req.AssetIDs, actor, req.Reason, req.GroupKeys...)
 	} else {
-		err = s.m.Assets().RevokeTaskAssets(id, req.AssetIDs, actor, req.Reason)
+		resolvedIDs, err = s.m.Assets().RevokeTaskAssetsResolved(id, req.AssetIDs, actor, req.Reason, req.GroupKeys...)
 	}
 	if err != nil {
 		writeTaskAssetError(w, err)
 		return
 	}
+	req.AssetIDs = resolvedIDs
 	if operation != "approve" {
 		s.engine.CancelWorkersForAssets(id, req.AssetIDs)
 	}

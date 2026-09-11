@@ -136,6 +136,29 @@ func (s *AssetStore) withCompanyScopeMutation(fn func(*AssetStore) (int64, error
 	if err != nil {
 		return 0, err
 	}
+	var tids []int64
+	rows, e := tx.Query(`SELECT unnest(task_ids) FROM assets WHERE id=$1`, id)
+	if e != nil {
+		return 0, e
+	}
+	for rows.Next() {
+		var tid int64
+		if e = rows.Scan(&tid); e != nil {
+			rows.Close()
+			return 0, e
+		}
+		tids = append(tids, tid)
+	}
+	if e = rows.Err(); e != nil {
+		rows.Close()
+		return 0, e
+	}
+	rows.Close()
+	for _, tid := range tids {
+		if e = reconcileAssetTemplate(tx, tid); e != nil {
+			return 0, e
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -285,6 +308,16 @@ type UpsertRootDomainReq struct {
 
 // UpsertRootDomain idempotently inserts or merges a root domain asset.
 func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
+	if req.AgentDiscovered {
+		var err error
+		req.Domain, err = s.agentHost(req.Domain, req.TaskID)
+		if err != nil {
+			return 0, err
+		}
+		if net.ParseIP(req.Domain) != nil {
+			return 0, fmt.Errorf("IP 请使用 ip 类型")
+		}
+	}
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
@@ -374,6 +407,9 @@ type UpsertIPReq struct {
 
 // UpsertIP idempotently inserts or merges an IP asset.
 func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
+	if ip := net.ParseIP(strings.TrimSpace(req.IP)); ip != nil {
+		req.IP = ip.String()
+	}
 	if req.IP == "" {
 		return 0, fmt.Errorf("ip is required")
 	}
@@ -495,6 +531,25 @@ type UpsertSubdomainReq struct {
 // UpsertSubdomain idempotently inserts or merges a subdomain asset and triggers
 // side effects: root_domain upsert + IP bound_domains update.
 func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err error) {
+	req.RecordType = strings.ToUpper(strings.TrimSpace(req.RecordType))
+	if req.AgentDiscovered {
+		host, metadata, err := DNSRecordHost(req.Domain, req.RecordType)
+		if err != nil {
+			return 0, err
+		}
+		if metadata {
+			return s.registerDNSMetadata(req, host)
+		}
+	}
+	if req.AgentDiscovered {
+		req.Domain, err = s.agentHost(req.Domain, req.TaskID)
+		if err != nil {
+			return 0, err
+		}
+		if net.ParseIP(req.Domain) != nil {
+			return 0, fmt.Errorf("IP 请使用 ip 类型")
+		}
+	}
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
@@ -530,6 +585,8 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 	// side effect 2: if A/AAAA record, upsert each IP + bind domain.
 	// RecordValue is []string; each element may itself be comma-separated (legacy).
 	var ipStr string // first valid IP, used for the subdomain row itself
+	dnsIPs := make([]string, 0, len(req.RecordValue))
+	seenDNSIPs := make(map[string]struct{}, len(req.RecordValue))
 	if req.RecordType == "A" || req.RecordType == "AAAA" {
 		for _, rv := range req.RecordValue {
 			for _, part := range strings.Split(rv, ",") {
@@ -537,11 +594,16 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 				if candidate == "" || net.ParseIP(candidate) == nil {
 					continue
 				}
+				normalizedIP := net.ParseIP(candidate).String()
 				if ipStr == "" {
-					ipStr = candidate
+					ipStr = normalizedIP
+				}
+				if _, seen := seenDNSIPs[normalizedIP]; !seen {
+					seenDNSIPs[normalizedIP] = struct{}{}
+					dnsIPs = append(dnsIPs, normalizedIP)
 				}
 				_, _ = s.UpsertIP(UpsertIPReq{
-					IP:           candidate,
+					IP:           normalizedIP,
 					BoundDomains: []string{domain},
 					TaskID:       req.TaskID,
 				})
@@ -595,6 +657,12 @@ ON CONFLICT (domain, COALESCE(record_type,'')) WHERE type = 'subdomain' DO UPDAT
     extra        = assets.extra || EXCLUDED.extra,
     last_seen    = now()
 RETURNING id`, domain, rootDomain, recordType, recordValueArr, ipVal, csegVal, icpVal, companyID, taskIDs).Scan(&id)
+	if err != nil || req.TaskID <= 0 || len(dnsIPs) == 0 {
+		return id, err
+	}
+	_, err = s.tx.Exec(`INSERT INTO task_asset_dns_evidence(task_id,dns_asset_id,record_type,ip)
+SELECT $1,$2,$3,value::inet FROM unnest($4::text[]) AS input(value)
+ON CONFLICT(task_id,dns_asset_id,ip) DO NOTHING`, req.TaskID, id, req.RecordType, dnsIPs)
 	return id, err
 }
 
@@ -737,6 +805,13 @@ type UpsertHTTPServiceReq struct {
 // UpsertHTTPService inserts or merges an HTTP service asset. Domain, port,
 // service_name, and root_domain are auto-extracted from URL.
 func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) {
+	if req.AgentDiscovered {
+		var err error
+		req.URL, err = s.agentURL(req.URL, req.TaskID)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if req.URL == "" {
 		return 0, fmt.Errorf("url is required")
 	}
@@ -888,6 +963,13 @@ type UpsertOtherServiceReq struct {
 
 // UpsertOtherService inserts or merges a non-HTTP service asset.
 func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error) {
+	if req.AgentDiscovered && req.Domain != "" {
+		var err error
+		req.Domain, err = s.agentHost(req.Domain, req.TaskID)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if req.Domain == "" && req.IP == "" {
 		return 0, fmt.Errorf("domain or ip is required")
 	}
@@ -1049,6 +1131,13 @@ type UpsertEndpointReq struct {
 // UpsertEndpoint inserts or merges an endpoint asset. Domain, port, root_domain
 // are auto-extracted from the URL.
 func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
+	if req.AgentDiscovered {
+		var err error
+		req.URL, err = s.agentURL(req.URL, req.TaskID)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if req.URL == "" {
 		return 0, fmt.Errorf("url is required")
 	}

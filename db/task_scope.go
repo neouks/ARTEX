@@ -247,6 +247,21 @@ func (s *AssetStore) authorizeScopeAssetsInTx(tx *sql.Tx, scope TaskScope) error
 	if scope.TaskID <= 0 {
 		return nil
 	}
+	grantKind, grantValue, root := "", "", ""
+	switch scope.Kind {
+	case "root_domain":
+		grantKind, grantValue, root = "domain", scope.Domain, scope.Domain
+	case "subdomain":
+		grantKind, grantValue = "host", scope.Domain
+		root, _ = RootDomain(scope.Domain)
+	case "ip", "cidr":
+		grantKind, grantValue = "cidr", scope.Net
+	}
+	if grantKind != "" {
+		if _, err := tx.Exec(`INSERT INTO task_asset_grants(task_id,kind,value,root_domain,source,evidence) VALUES($1,$2,$3,$4,'manual',$5) ON CONFLICT DO NOTHING`, scope.TaskID, grantKind, grantValue, root, scope.Reason); err != nil {
+			return err
+		}
+	}
 	var where string
 	var arg any
 	switch scope.Kind {
@@ -299,7 +314,7 @@ approval_state='approved',approved_at=now(),approved_by='user',approval_reason=E
 			return err
 		}
 		key, _ := AssetKey(a)
-		if _, err := tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND (asset_id=$2 OR asset_key=$3)`, scope.TaskID, a.ID, key); err != nil {
+		if _, err := tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND block_kind<>'invalid' AND (asset_id=$2 OR asset_key=$3)`, scope.TaskID, a.ID, key); err != nil {
 			return err
 		}
 	}
@@ -310,12 +325,12 @@ approval_state='approved',approved_at=now(),approved_by='user',approval_reason=E
 	switch scope.Kind {
 	case "root_domain":
 		_, err = tx.Exec(`DELETE FROM task_asset_blocks
-WHERE task_id=$1 AND host_key<>'' AND (host_key=$2 OR host_key LIKE '%.'||$2)`, scope.TaskID, scope.Domain)
+WHERE task_id=$1 AND block_kind<>'invalid' AND host_key<>'' AND (host_key=$2 OR host_key LIKE '%.'||$2)`, scope.TaskID, scope.Domain)
 	case "subdomain":
-		_, err = tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND host_key=$2`, scope.TaskID, scope.Domain)
+		_, err = tx.Exec(`DELETE FROM task_asset_blocks WHERE task_id=$1 AND block_kind<>'invalid' AND host_key=$2`, scope.TaskID, scope.Domain)
 	case "ip", "cidr":
 		_, err = tx.Exec(`DELETE FROM task_asset_blocks
-WHERE task_id=$1 AND try_inet(host_key) IS NOT NULL AND $2::cidr >>= try_inet(host_key)`, scope.TaskID, scope.Net)
+WHERE task_id=$1 AND block_kind<>'invalid' AND try_inet(host_key) IS NOT NULL AND $2::cidr >>= try_inet(host_key)`, scope.TaskID, scope.Net)
 	}
 	return err
 }

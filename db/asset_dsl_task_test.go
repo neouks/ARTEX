@@ -45,7 +45,7 @@ func TestTaskDSLAppliesApprovalBeforePagination(t *testing.T) {
 	defer d.Close()
 
 	stamp := time.Now().UnixNano()
-	task, err := d.CreateTask(fmt.Sprintf("task-dsl-approval-%d", stamp), "test", nil, 0, 0)
+	task, err := d.CreateTaskWithOptions(fmt.Sprintf("task-dsl-approval-%d", stamp), "test", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}

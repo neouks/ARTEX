@@ -24,7 +24,7 @@ func TestTaskAssetApprovalsRejectDerivedAssetsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pg.Close() })
-	persisted, err := pg.CreateTask("derived approval API", "goal", nil, 0, 0)
+	persisted, err := pg.CreateTaskWithOptions("derived approval API", "goal", db.TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}

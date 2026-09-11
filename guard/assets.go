@@ -98,7 +98,10 @@ func assetPolicyAuditSubject(name string, input []byte) string {
 	}
 }
 
-var hostPattern = regexp.MustCompile(`(?i)(?:https?://|wss?://)?([a-z0-9][a-z0-9.-]*\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])`)
+var (
+	urlPattern  = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
+	hostPattern = regexp.MustCompile(`(?i)((?:\d{1,3}\.){3}\d{1,3}|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z0-9-]{2,63}|\[[0-9a-f:]+\])`)
+)
 
 func (p TaskAssetPolicy) Check(tool string, input []byte) string {
 	if p.Store == nil || p.TaskID <= 0 {
@@ -124,7 +127,7 @@ func collectHosts(text string) []string {
 	seen := make(map[string]bool)
 	hosts := make([]string, 0)
 	add := func(host string) {
-		host = strings.Trim(strings.TrimSpace(host), "[]")
+		host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
 		if zone := strings.LastIndex(host, "%"); zone > 0 {
 			host = host[:zone]
 		}
@@ -134,6 +137,18 @@ func collectHosts(text string) []string {
 		if host != "" && !seen[host] {
 			seen[host] = true
 			hosts = append(hosts, host)
+		}
+	}
+	var structured any
+	if json.Unmarshal([]byte(text), &structured) == nil {
+		collectStructuredHosts(structured, add)
+	}
+	// Parse URLs first. The generic domain expression intentionally requires a
+	// dot, while URL syntax makes single-label intranet hosts unambiguous.
+	for _, rawURL := range urlPattern.FindAllString(text, -1) {
+		rawURL = strings.TrimRight(rawURL, `.,;:!?)]}`)
+		if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+			add(u.Hostname())
 		}
 	}
 	for _, match := range hostPattern.FindAllStringSubmatch(text, -1) {
@@ -159,6 +174,47 @@ func collectHosts(text string) []string {
 		}
 	}
 	return hosts
+}
+
+func collectStructuredHosts(value any, add func(string)) {
+	var walk func(any, bool)
+	walk = func(current any, hostField bool) {
+		switch typed := current.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				normalized := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
+				isHostField := normalized == "url" || normalized == "uri" || normalized == "host" ||
+					normalized == "hostname" || normalized == "domain" || normalized == "ip" ||
+					normalized == "address" || normalized == "target" || normalized == "endpoint"
+				walk(child, isHostField)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child, hostField)
+			}
+		case string:
+			if !hostField {
+				return
+			}
+			candidate := strings.Trim(strings.TrimSpace(typed), `"'`)
+			if candidate == "" {
+				return
+			}
+			if strings.Contains(candidate, "://") {
+				if parsed, err := url.Parse(candidate); err == nil && parsed.Hostname() != "" {
+					add(parsed.Hostname())
+				}
+				return
+			}
+			if parsed, err := url.Parse("//" + candidate); err == nil && parsed.Hostname() != "" {
+				candidate = parsed.Hostname()
+			}
+			if normalized, err := db.NormalizeAgentHost(candidate, true); err == nil {
+				add(normalized)
+			}
+		}
+	}
+	walk(value, false)
 }
 
 func collectAssetIDs(value any) []int64 {

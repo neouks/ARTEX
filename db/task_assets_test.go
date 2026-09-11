@@ -186,7 +186,7 @@ func TestTaskAssetApprovalInheritanceAndTombstone(t *testing.T) {
 	defer d.Close()
 
 	suffix := time.Now().UnixNano()
-	task, err := d.CreateTask(fmt.Sprintf("approval-%d", suffix), "goal", nil, 0, 0)
+	task, err := d.CreateTaskWithOptions(fmt.Sprintf("approval-%d", suffix), "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestAgentDiscoverySideEffectsStayPendingAndManualApprovalIsDurable(t *testi
 	defer d.Close()
 
 	suffix := time.Now().UnixNano()
-	discoveryTask, err := d.CreateTask(fmt.Sprintf("side-effects-%d", suffix), "goal", nil, 0, 0)
+	discoveryTask, err := d.CreateTaskWithOptions(fmt.Sprintf("side-effects-%d", suffix), "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestInheritedApprovalListSelectsOneEffectiveSource(t *testing.T) {
 	defer d.Close()
 
 	stamp := time.Now().UnixNano()
-	pendingSource, err := d.CreateTask(fmt.Sprintf("pending-source-%d", stamp), "goal", nil, 0, 0)
+	pendingSource, err := d.CreateTaskWithOptions(fmt.Sprintf("pending-source-%d", stamp), "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 	if err != nil {
 		t.Fatal(err)
 	}

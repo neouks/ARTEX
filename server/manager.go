@@ -55,16 +55,17 @@ type Task struct {
 	CompanyIDs         []int64 `json:"company_ids,omitempty"`
 	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
-	TimeoutSeconds       int                    `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
-	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
-	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
-	Store                *pgdb.ExplorationStore `json:"-"`
-	Guard                *guard.Guard           `json:"-"`
-	notify               chan struct{}
-	lifecycleMu          sync.RWMutex
-	llmMu                sync.RWMutex
+	TimeoutSeconds        int                    `json:"timeout_seconds"`
+	PlanHeartbeatSeconds  int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	CoverageEnabled       bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	AssetApprovalTemplate string                 `json:"asset_approval_template"`
+	FirstRunAt            int64                  `json:"first_run_at,omitempty"`
+	DeadlineAt            int64                  `json:"deadline_at,omitempty"`
+	Store                 *pgdb.ExplorationStore `json:"-"`
+	Guard                 *guard.Guard           `json:"-"`
+	notify                chan struct{}
+	lifecycleMu           sync.RWMutex
+	llmMu                 sync.RWMutex
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
@@ -78,20 +79,21 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	Name          string
-	PinnedAt      int64
-	Status        string
-	Paused        bool
-	Queued        bool
-	QueuedAt      int64
-	QueueMode     string
-	CompletedAt   int64
-	FirstRunAt    int64
-	DeadlineAt    int64
-	SourceTaskIDs []int64
-	CompanyIDs    []int64
-	CategoryID    *int64
-	CategoryName  string
+	AssetApprovalTemplate string
+	Name                  string
+	PinnedAt              int64
+	Status                string
+	Paused                bool
+	Queued                bool
+	QueuedAt              int64
+	QueueMode             string
+	CompletedAt           int64
+	FirstRunAt            int64
+	DeadlineAt            int64
+	SourceTaskIDs         []int64
+	CompanyIDs            []int64
+	CategoryID            *int64
+	CategoryName          string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -105,20 +107,21 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
-		Name:          t.Name,
-		PinnedAt:      t.PinnedAt,
-		Status:        t.Status,
-		Paused:        t.Paused,
-		Queued:        t.Queued,
-		QueuedAt:      t.QueuedAt,
-		QueueMode:     t.QueueMode,
-		CompletedAt:   t.CompletedAt,
-		FirstRunAt:    t.FirstRunAt,
-		DeadlineAt:    t.DeadlineAt,
-		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
-		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
-		CategoryID:    cloneInt64Ptr(t.CategoryID),
-		CategoryName:  t.CategoryName,
+		Name:                  t.Name,
+		PinnedAt:              t.PinnedAt,
+		Status:                t.Status,
+		Paused:                t.Paused,
+		Queued:                t.Queued,
+		QueuedAt:              t.QueuedAt,
+		QueueMode:             t.QueueMode,
+		CompletedAt:           t.CompletedAt,
+		FirstRunAt:            t.FirstRunAt,
+		AssetApprovalTemplate: t.AssetApprovalTemplate,
+		DeadlineAt:            t.DeadlineAt,
+		SourceTaskIDs:         append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:            append([]int64(nil), t.CompanyIDs...),
+		CategoryID:            cloneInt64Ptr(t.CategoryID),
+		CategoryName:          t.CategoryName,
 	}
 }
 
@@ -138,6 +141,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.QueueMode = state.QueueMode
 	t.CompletedAt = state.CompletedAt
 	t.FirstRunAt = state.FirstRunAt
+	t.AssetApprovalTemplate = state.AssetApprovalTemplate
 	t.DeadlineAt = state.DeadlineAt
 	t.SourceTaskIDs = append(t.SourceTaskIDs[:0], state.SourceTaskIDs...)
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
@@ -861,8 +865,9 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
-		CoverageEnabled: pt.CoverageEnabled,
-		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		CoverageEnabled:       pt.CoverageEnabled,
+		AssetApprovalTemplate: pt.AssetApprovalTemplate,
+		FirstRunAt:            unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }

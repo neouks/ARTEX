@@ -17,7 +17,7 @@ func TestManualAssetBlockLifecycle(t *testing.T) {
 	s := d.Assets()
 	for _, initial := range []string{ApprovalPending, ApprovalApproved, ApprovalRevoked} {
 		t.Run(initial, func(t *testing.T) {
-			task, err := d.CreateTask("block lifecycle", "goal", nil, 0, 0)
+			task, err := d.CreateTaskWithOptions("block lifecycle", "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
 			if err != nil {
 				t.Fatal(err)
 			}

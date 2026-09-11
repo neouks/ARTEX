@@ -981,6 +981,19 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	// The detached human-message path also enters here, so repeat the admission
+	// check immediately before any task clock or LLM accounting is started.
+	if e.m.assets != nil {
+		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+		ids, idsErr := agent.IntentAssetIDs(t.Store, intent)
+		if idsErr != nil || e.m.assets.ValidateTaskAssetsApproved(taskID, ids) != nil {
+			if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
+				log.Printf("[worker %s] task %s 意图 #%d 授权等待回退失败: %v", name, t.ID, intent.ID, err)
+			}
+			e.touch(t.ID)
+			return true
+		}
+	}
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
@@ -1138,11 +1151,20 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped): %s", name, t.ID, intent.ID, short)
 		e.touch(t.ID)
-		t.Notify()
 		return true
 	}
 	if err != nil {
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
+	}
+	if errors.Is(err, agent.ErrWorkerAssetAuthorization) {
+		if stateErr := transitionIntentState(t.Store, intent.ID, "running", "open"); stateErr != nil {
+			log.Printf("[worker %s] task %s 意图 #%d 授权等待回退失败: %v", name, t.ID, intent.ID, stateErr)
+		}
+		touch := db.Activity{Kind: "result", IsError: true, Summary: "意图等待资产审批", Detail: err.Error()}
+		taskEmit(touch)
+		e.touch(t.ID)
+		t.Notify()
+		return true
 	}
 	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
@@ -1251,6 +1273,15 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
+		// Do not claim work whose target assets are still pending approval. This
+		// keeps the frontier idle until the approval handler wakes the task.
+		if e.m.assets != nil {
+			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+			ids, err := agent.IntentAssetIDs(t.Store, in)
+			if err != nil || e.m.assets.ValidateTaskAssetsApproved(taskID, ids) != nil {
+				continue
+			}
+		}
 		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
 			return in
 		}
