@@ -116,11 +116,12 @@ func restrictNodeOrigins(origins map[int64]int64, visible map[int64]struct{}) ma
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
-	as     *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs     *db.CompanyStore // company store (optional)
-	ts     *db.ExplorationStore
-	worker string
-	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	overviewReads *overviewReadScope // only set on a copy for one overview call
+	as            *db.AssetStore     // asset store (optional; nil = asset tools not available)
+	cs            *db.CompanyStore   // company store (optional)
+	ts            *db.ExplorationStore
+	worker        string
+	taskID        int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -414,7 +415,11 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 	return readTool("graph_overview",
 		"(探索链路图)探索态势蒸馏摘要：资产计数、无接口的站点、frontier、发现、hints(人类/主 agent 的战略提示，生成意图时须纳入)。Planner 每轮已预取；仅在需要刷新时调用。",
 		obj(map[string]any{}),
-		func(context.Context, json.RawMessage) (actool.Result, error) {
+		func(_ context.Context, raw json.RawMessage) (actool.Result, error) {
+			var args struct{}
+			if err := decodeToolInput(raw, &args); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			if t == nil || t.ts == nil {
 				return actool.Errorf("graph_overview 需要任务探索上下文，当前工具未绑定任务"), nil
 			}
@@ -430,10 +435,32 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	if t == nil || t.ts == nil {
 		return map[string]any{"error": "graph_overview 需要任务探索上下文，当前工具未绑定任务"}
 	}
+	local := *t
+	local.overviewReads = &overviewReadScope{states: map[int64]map[int64]string{}}
+	t = &local
 	out := map[string]any{}
+	unavailable := map[string]string{}
+	markError := func(err error, keys ...string) {
+		if err != nil {
+			for _, key := range keys {
+				unavailable[key] = err.Error()
+			}
+		}
+	}
+	defer func() {
+		if len(unavailable) > 0 {
+			for key := range unavailable {
+				delete(out, key)
+			}
+			out["unavailable"] = unavailable
+			out["partial"] = true
+		}
+	}()
 	// goals summary folded in so the planner needn't call list_goals each round.
-	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
-	goals = t.filterAuthorizedNodesForStore(goals, t.ts, t.taskID)
+	goals, goalsErr := t.ts.ToolNodesByKind(db.KindGoal, 100)
+	markError(goalsErr, "goals")
+	goals, goalsAuthErr := t.authorizedNodesForStore(goals, t.ts, t.taskID)
+	markError(goalsAuthErr, "goals")
 	gsum := make([]map[string]any, 0, len(goals))
 	for _, g := range goals {
 		var p map[string]any
@@ -443,8 +470,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["goals"] = gsum
 	// hints: 人类/主 agent 通过 add_hint 挂上图的战略提示；folded in so the
 	// planner reads them every round when generating intents (否则只写不读).
-	hints, _ := t.ts.ListByKind(db.KindHint, 50)
-	hints = t.filterAuthorizedNodesForStore(hints, t.ts, t.taskID)
+	hints, hintsErr := t.ts.ToolNodesByKind(db.KindHint, 50)
+	markError(hintsErr, "hints")
+	hints, hintsAuthErr := t.authorizedNodesForStore(hints, t.ts, t.taskID)
+	markError(hintsAuthErr, "hints")
 	hsum := make([]map[string]any, 0, len(hints))
 	for _, h := range hints {
 		var p map[string]any
@@ -456,7 +485,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// derived_from — possibly several facts combined) and its yields (the
 	// facts/findings it produced). factFrom maps a fact → the intent that
 	// produced it. This is the relationship layer the flat lists lacked.
-	edges, _ := t.ts.Edges(5000)
+	edges, edgesErr := t.ts.Edges(5000)
+	markError(edgesErr, "lineage")
 	parentsOf := map[int64][]int64{}
 	yieldsOf := map[int64][]int64{}
 	factFrom := map[int64]int64{}
@@ -485,17 +515,21 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		hotAtRender = cg.hotSet()
 	}
 	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
-	fr, _ := t.ts.Frontier(100)
-	fr = t.filterAuthorizedIntents(fr)
-	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	all = t.filterAuthorizedIntents(all)
+	fr, frontierErr := t.ts.Frontier(100)
+	markError(frontierErr, "frontier_open", "open_intents")
+	fr, frontierAuthErr := t.authorizedNodesForStore(fr, t.ts, t.taskID)
+	markError(frontierAuthErr, "frontier_open", "open_intents")
+	all, intentsErr := t.ts.ToolNodesByKind(db.KindIntent, 300)
+	markError(intentsErr, "running_intents", "recent_done_intents", "done_intents_total", "done_intents_in_window")
+	all, intentsAuthErr := t.authorizedNodesForStore(all, t.ts, t.taskID)
+	markError(intentsAuthErr, "running_intents", "recent_done_intents", "done_intents_in_window")
 	var running, recentDone []*db.Node
 	doneTotal := 0
 	for _, n := range all {
 		switch n.State {
 		case "running":
 			running = append(running, n)
-		case "done", "blocked", "exhausted":
+		case "done", "blocked", "exhausted", "stopped":
 			doneTotal++
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -511,27 +545,35 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	if t.as == nil || t.taskID <= 0 {
 		if total, err := t.ts.CountFinishedIntents(); err == nil {
 			out["done_intents_total"] = total
+		} else {
+			markError(err, "done_intents_total")
 		}
 	} else {
-		out["done_intents_total"] = doneTotal
+		out["done_intents_in_window"] = doneTotal
 	}
 	out["frontier_open"] = len(fr)
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
-	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
-	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	vulnNodes = t.filterAuthorizedNodesForStore(vulnNodes, t.ts, t.taskID)
-	factNodes = t.filterAuthorizedNodesForStore(factNodes, t.ts, t.taskID)
+	vulnPage, vulnErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFinding, 20)
+	factPage, factErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFact, 1000)
+	markError(vulnErr, "findings", "finding_list")
+	markError(factErr, "facts", "recent_facts")
+	vulnNodes := vulnPage.Nodes[:min(20, len(vulnPage.Nodes))]
+	factNodes := factPage.Nodes[:min(1000, len(factPage.Nodes))]
 	visible := visibleNodeIDs(goals, hints, fr, all, vulnNodes, factNodes)
 	parentsOf = restrictNodeRelations(parentsOf, visible)
 	yieldsOf = restrictNodeRelations(yieldsOf, visible)
 	factFrom = restrictNodeOrigins(factFrom, visible)
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
-	out["findings"] = len(vulnNodes) // 确认漏洞数（目标判定看它）
-	out["facts"] = len(factNodes)    // 探索事实/结论数（含否定结论）
+	out["findings"] = vulnPage.Total
+	out["facts"] = factPage.Total
+	if vulnPage.Total > len(vulnNodes) {
+		out["finding_list_truncated"] = true
+		out["finding_list_read_hint"] = "更多摘要请用 list_findings"
+	}
 	// findings 是任务里最高价值的产物、单任务通常也不多 → 直接全量带进概览（不像 facts 那样
 	// 只给最近窗口），让 planner 每轮判目标时一眼看全所有确认漏洞，无需再调 list_findings。
 	// 每条只留 {id, summary, evidence?, from_intent?, assets?}：evidence 是 report_finding 的
@@ -541,9 +583,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	var findingMeta map[int64]db.FindingMeta // node_id -> 锚定资产等；仅任务上下文可查
 	assetByID := map[int64]*db.Asset{}
 	if t.as != nil && t.taskID > 0 {
-		findingMeta, _ = t.as.FindingMetaByNodeID(t.taskID)
+		var metaErr error
+		findingMeta, metaErr = t.as.FindingMetaByNodeID(t.taskID)
+		markError(metaErr, "finding_asset_metadata")
 		idSet := map[int64]struct{}{}
-		for _, meta := range findingMeta {
+		for _, node := range vulnNodes {
+			meta := findingMeta[node.ID]
 			for _, aid := range meta.AssetIDs {
 				idSet[aid] = struct{}{}
 			}
@@ -565,11 +610,6 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		var fp map[string]any
 		_ = json.Unmarshal(n.Payload, &fp)
 		m := map[string]any{"id": n.ID, "summary": fp["summary"]}
-		if ev, ok := fp["evidence"].(map[string]any); ok {
-			if poc, ok := ev["poc"].(string); ok && poc != "" {
-				m["evidence"] = poc
-			}
-		}
 		if from := factFrom[n.ID]; from > 0 {
 			m["from_intent"] = from // 本漏洞由哪个意图产生
 		}
@@ -638,7 +678,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["recent_facts"] = append(recentFactsHot, recentFactsCold[:keepColdFacts]...) // {id, summary, from_intent, confidence?}；详情用 node_detail(id)
 	// cold-digest §6.1/§6.2: the folded cold region + the per-asset directory that
 	// collapses independent directions, plus the dangling-lineage resolver map.
-	if cds, cidx := t.coldDigestOverview(); len(cds) > 0 {
+	cds, cidx, coldErr := t.coldDigestOverview()
+	markError(coldErr, "cold_digests", "cold_index", "covered_members")
+	if len(cds) > 0 {
 		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
 		out["cold_index"] = cidx  // [{asset, asset_id, digest_ids}] —— 按资产收敛方向 (§6.2)
 	}
@@ -658,11 +700,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// decomposed goals.
 	if description, goal, err := t.ts.Root(); err == nil {
 		out["task"] = map[string]any{"description": description, "goal": goal}
+	} else {
+		markError(err, "task")
 	}
 	// Direct source tasks are a live, read-only blackboard view. Keep their
 	// summaries in a separate field so their intents never enter this task's
 	// frontier or get mistaken for locally claimable work.
-	out["related_tasks"] = t.relatedTaskOverviews()
+	related, relatedErr := t.relatedTaskOverviews()
+	markError(relatedErr, "related_tasks")
+	out["related_tasks"] = related
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
 	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
 	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 scope/hosts(范围边界与目标主机的
@@ -745,26 +791,30 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				}
 				m["scope"] = scope
 			}
-			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
+			if count, err := t.as.CountHostsByTaskWithSources(t.taskID); err == nil {
 				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
 				// 都重复携带的大量字符串，对规划决策价值有限）；具体主机按需 list_assets 查。
-				m["host_count"] = len(hosts)
+				m["host_count"] = count
+			} else {
+				markError(err, "host_count")
 			}
 			if len(m) > 0 {
 				out["coverage"] = m
 			}
 		}
 	}
+
 	return out
 }
 
-func (t *ToolSet) filterAuthorizedIntents(nodes []*db.Node) []*db.Node {
-	return t.filterAuthorizedNodesForStore(nodes, t.ts, t.taskID)
+func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.ExplorationStore, ownerTaskID int64) []*db.Node {
+	out, _ := t.authorizedNodesForStore(nodes, store, ownerTaskID)
+	return out
 }
 
-func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.ExplorationStore, ownerTaskID int64) []*db.Node {
+func (t *ToolSet) authorizedNodesForStore(nodes []*db.Node, store *db.ExplorationStore, ownerTaskID int64) ([]*db.Node, error) {
 	if t.as == nil || t.taskID <= 0 || store == nil {
-		return nodes
+		return nodes, nil
 	}
 	nodeIDs := make([]int64, 0, len(nodes))
 	for _, node := range nodes {
@@ -772,7 +822,7 @@ func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.Expl
 	}
 	lineage, err := store.LineageAnchorAssetIDsForNodes(nodeIDs)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	unique := make(map[int64]bool)
 	var assetIDs []int64
@@ -787,21 +837,27 @@ func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.Expl
 			}
 		}
 	}
-	ownerStates, err := t.as.TaskAssetApprovalStates(ownerTaskID, assetIDs)
+	ownerStates, err := t.readApprovalStates(ownerTaskID, assetIDs)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	currentStates := ownerStates
 	if ownerTaskID != t.taskID {
-		currentStates, err = t.as.TaskAssetApprovalStates(t.taskID, assetIDs)
+		currentStates, err = t.readApprovalStates(t.taskID, assetIDs)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 	}
 	out := make([]*db.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if n.Kind == db.KindDigest && !t.digestAuthorized(store, ownerTaskID, n.ID) {
-			continue
+		if n.Kind == db.KindDigest {
+			allowed, _, err := t.digestAuthorizationBatch(store, ownerTaskID, []int64{n.ID})
+			if err != nil {
+				return nil, err
+			}
+			if !allowed[n.ID] {
+				continue
+			}
 		}
 		approved := true
 		for _, id := range lineage[n.ID] {
@@ -814,26 +870,33 @@ func (t *ToolSet) filterAuthorizedNodesForStore(nodes []*db.Node, store *db.Expl
 			out = append(out, n)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (t *ToolSet) nodeAuthorized(n *db.Node) bool {
+	ok, _ := t.nodeAuthorization(n)
+	return ok
+}
+
+func (t *ToolSet) nodeAuthorization(n *db.Node) (bool, error) {
 	if n == nil || t.as == nil || t.taskID <= 0 {
-		return n != nil
+		return n != nil, nil
 	}
 	if !n.Inherited {
-		return len(t.filterAuthorizedNodesForStore([]*db.Node{n}, t.ts, t.taskID)) == 1
+		nodes, err := t.authorizedNodesForStore([]*db.Node{n}, t.ts, t.taskID)
+		return len(nodes) == 1, err
 	}
-	sources, err := t.ts.DirectSourceStores()
+	sources, err := t.directSourceStores()
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, source := range sources {
 		if source.Task.TaskID == n.SourceTaskID {
-			return len(t.filterAuthorizedNodesForStore([]*db.Node{n}, source.Store, source.Task.TaskID)) == 1
+			nodes, err := t.authorizedNodesForStore([]*db.Node{n}, source.Store, source.Task.TaskID)
+			return len(nodes) == 1, err
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (t *ToolSet) nodeLineageAssetIDs(n *db.Node) ([]int64, error) {
@@ -843,7 +906,7 @@ func (t *ToolSet) nodeLineageAssetIDs(n *db.Node) ([]int64, error) {
 	if !n.Inherited {
 		return t.ts.LineageAnchorAssetIDs(n.ID)
 	}
-	sources, err := t.ts.DirectSourceStores()
+	sources, err := t.directSourceStores()
 	if err != nil {
 		return nil, err
 	}
@@ -929,42 +992,13 @@ func (b *overviewTextBudget) take(value any, fieldLimit int) string {
 	return text
 }
 
-func recentTerminalIntents(store *db.ExplorationStore, limit int) []*db.Node {
-	if limit <= 0 {
-		return []*db.Node{}
-	}
-	const batch = 300
-	cursor := int64(0)
-	out := make([]*db.Node, 0, limit)
-	for len(out) < limit {
-		page, more, err := store.ListByKindPage(db.KindIntent, cursor, batch)
-		if err != nil || len(page) == 0 {
-			break
-		}
-		for _, intent := range page {
-			switch intent.State {
-			case "done", "blocked", "exhausted", "stopped":
-				out = append(out, intent)
-			}
-			if len(out) >= limit {
-				break
-			}
-		}
-		if !more {
-			break
-		}
-		cursor = page[len(page)-1].ID
-	}
-	return out
-}
-
 // relatedTaskOverviews distills persistent blackboard state from direct source
 // tasks. It intentionally reads each source's local store methods, never its own
 // related sources, so inheritance is one level only.
-func (t *ToolSet) relatedTaskOverviews() []map[string]any {
-	sources, err := t.ts.DirectSourceStores()
+func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
+	sources, err := t.directSourceStores()
 	if err != nil {
-		return []map[string]any{}
+		return nil, err
 	}
 	if len(sources) > db.MaxTaskSourceCount {
 		sources = sources[:db.MaxTaskSourceCount]
@@ -986,9 +1020,29 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 				"status":      source.Task.Status,
 			},
 		}
+		sourceErrors := map[string]string{}
+		note := func(err error, key string) {
+			if err != nil {
+				sourceErrors[key] = err.Error()
+			}
+		}
+		readNodes := func(kind string, limit int) []*db.Node {
+			nodes, err := ts.ToolNodesByKind(kind, limit)
+			note(err, kind)
+			if err != nil {
+				return nil
+			}
+			nodes, err = t.authorizedNodesForStore(nodes, ts, source.Task.TaskID)
+			note(err, kind)
+			return nodes
+		}
 		stats, statsErr := ts.Stats()
+		if t.as == nil {
+			note(statsErr, "node_stats")
+		}
 
-		edges, _ := ts.Edges(5000)
+		edges, edgesErr := ts.Edges(5000)
+		note(edgesErr, "lineage")
 		parentsOf := map[int64][]int64{}
 		yieldsOf := map[int64][]int64{}
 		factFrom := map[int64]int64{}
@@ -1002,8 +1056,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			}
 		}
 
-		goals, _ := ts.ListByKind(db.KindGoal, relatedOverviewMaxGoalsPerSource)
-		goals = t.filterAuthorizedNodesForStore(goals, ts, source.Task.TaskID)
+		goals := readNodes(db.KindGoal, relatedOverviewMaxGoalsPerSource)
 		goalSummary := make([]map[string]any, 0, len(goals))
 		for _, goal := range goals {
 			var payload map[string]any
@@ -1014,8 +1067,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		item["goals"] = goalSummary
 
-		hints, _ := ts.ListByKind(db.KindHint, relatedOverviewMaxHintsPerSource)
-		hints = t.filterAuthorizedNodesForStore(hints, ts, source.Task.TaskID)
+		hints := readNodes(db.KindHint, relatedOverviewMaxHintsPerSource)
 		hintSummary := make([]map[string]any, 0, len(hints))
 		for _, hint := range hints {
 			var payload map[string]any
@@ -1026,20 +1078,17 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		item["hints"] = hintSummary
 
-		facts, _ := ts.ListByKind(db.KindFact, relatedOverviewMaxFactsPerSource)
-		findings, _ := ts.ListByKind(db.KindFinding, relatedOverviewMaxFindingsPerTask)
-		intentNodes, _ := ts.ListByKind(db.KindIntent, 300)
-		facts = t.filterAuthorizedNodesForStore(facts, ts, source.Task.TaskID)
-		findings = t.filterAuthorizedNodesForStore(findings, ts, source.Task.TaskID)
-		intentNodes = t.filterAuthorizedNodesForStore(intentNodes, ts, source.Task.TaskID)
+		facts := readNodes(db.KindFact, relatedOverviewMaxFactsPerSource)
+		findings := readNodes(db.KindFinding, relatedOverviewMaxFindingsPerTask)
+		intentNodes := readNodes(db.KindIntent, 300)
 		visible := visibleNodeIDs(goals, hints, facts, findings, intentNodes)
 		factFrom = restrictNodeOrigins(factFrom, visible)
 		terminalIntent := make(map[int64]bool, len(intentNodes))
 		for _, intent := range intentNodes {
 			terminalIntent[intent.ID] = inheritedIntentSummaryState(intent.State)
 		}
-		item["facts"] = len(facts)
-		item["findings"] = len(findings)
+		item["facts_in_window"] = len(facts)
+		item["findings_in_window"] = len(findings)
 		if statsErr == nil && t.as == nil {
 			item["facts"] = stats[db.KindFact]
 			item["findings"] = stats[db.KindFinding]
@@ -1075,7 +1124,10 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		item["recent_facts"] = recentFacts
 
-		recentDoneRaw := recentTerminalIntents(ts, relatedOverviewMaxIntentsPerTask)
+		recentDoneRaw, terminalErr := ts.ToolTerminalIntents(relatedOverviewMaxIntentsPerTask)
+		if terminalErr != nil {
+			item["recent_intent_results_error"] = terminalErr.Error()
+		}
 		recentDoneRaw = t.filterAuthorizedNodesForStore(recentDoneRaw, ts, source.Task.TaskID)
 		recentDone := recentDoneRaw[:0] // in-place filter: drop this source's folded intents (§2)
 		for _, intent := range recentDoneRaw {
@@ -1094,29 +1146,23 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		parentsOf = restrictNodeRelations(parentsOf, visible)
 		yieldsOf = restrictNodeRelations(yieldsOf, visible)
 		intentResults := compactIntents(recentDone, parentsOf, yieldsOf)
+		ids := make([]int64, 0, len(recentDone))
+		for _, n := range recentDone {
+			ids = append(ids, n.ID)
+		}
+		summaries, summaryErr := ts.ToolLatestTerminalSummaries(ids)
+		if summaryErr != nil {
+			item["intent_result_summaries_error"] = summaryErr.Error()
+		}
 		for i, intent := range recentDone {
 			intentResults[i]["summary"] = budget.take(intentResults[i]["summary"], 400)
-			acts, _, err := ts.ActivityPageForTerminalIntent(intent.ID, 0, 20)
-			if err != nil {
-				continue
-			}
-			var resultSummary, textFallback string
-			for _, activity := range acts {
-				switch activity.Kind {
-				case "result":
-					resultSummary = activity.Summary
-				case "text":
-					textFallback = activity.Summary
-				}
-			}
-			if resultSummary == "" {
-				resultSummary = textFallback
-			}
-			if resultSummary != "" {
-				intentResults[i]["result_summary"] = budget.take(resultSummary, 800)
+			if summary := summaries[intent.ID]; summary != "" {
+				intentResults[i]["result_summary"] = budget.take(summary, 800)
 			}
 		}
-		item["recent_intent_results"] = intentResults
+		if terminalErr == nil {
+			item["recent_intent_results"] = intentResults
+		}
 		// §2 cross-task: the source task's folded cold region, read-only. Members are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
 		if cds := t.activeDigestBodies(ts, source.Task.TaskID); len(cds) > 0 {
@@ -1168,9 +1214,28 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		if budget.truncated {
 			item["summary_truncated"] = true
 		}
+		if len(sourceErrors) > 0 {
+			for key := range sourceErrors {
+				switch key {
+				case db.KindGoal:
+					delete(item, "goals")
+				case db.KindHint:
+					delete(item, "hints")
+				case db.KindFact:
+					delete(item, "facts_in_window")
+					delete(item, "recent_facts")
+				case db.KindFinding:
+					delete(item, "findings_in_window")
+					delete(item, "recent_findings")
+				case db.KindIntent:
+					delete(item, "recent_intent_results")
+				}
+			}
+			item["unavailable"] = sourceErrors
+		}
 		out = append(out, item)
 	}
-	return out
+	return out, nil
 }
 
 func inheritedIntentSummaryState(state string) bool {
@@ -1237,88 +1302,76 @@ func compactFinding(n *db.Node) map[string]any {
 	if sv, ok := p["severity"]; ok && sv != nil && sv != "" {
 		m["severity"] = sv
 	}
+	if id, ok := p["intent_id"]; ok {
+		m["intent_id"] = id
+	}
 	return m
 }
 
-func (t *ToolSet) listFindings() actool.CoreTool {
-	return readTool("list_findings", "列本任务及直接关联任务的【确认漏洞】(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。这里只含漏洞；普通探索事实用 list_facts，详情用 node_detail(id)。",
-		obj(map[string]any{}),
-		func(context.Context, json.RawMessage) (actool.Result, error) {
-			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
-			intentOf, _ := t.ts.FindingIntentsWithSources() // finding id -> 产生它的 intent id
-			taskID := t.taskID
-			if taskID <= 0 {
-				taskID, _ = t.ts.TaskID()
+func (t *ToolSet) listFindings() actool.CoreTool { return t.nodeListTool(db.KindFinding) }
+func (t *ToolSet) listFacts() actool.CoreTool    { return t.nodeListTool(db.KindFact) }
+
+func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
+	name, key := "list_facts", "facts"
+	if kind == db.KindFinding {
+		name, key = "list_findings", "findings"
+	}
+	return readTool(name, "分页查询授权可见摘要。默认20条、最多100条，before续页；详情用 node_detail。失败不等于没有结果。",
+		obj(map[string]any{"limit": intp("1..100，默认20"), "before": intp("上一页 next_before"), "q": str("摘要关键词"), "severity": str("漏洞严重等级，仅漏洞列表适用"), "asset_id": idp("按关联资产筛选")}),
+		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+			var q struct {
+				Limit    int    `json:"limit"`
+				Before   int64  `json:"before"`
+				Q        string `json:"q"`
+				Severity string `json:"severity"`
+				AssetID  int64  `json:"asset_id"`
 			}
-			out := make([]map[string]any, 0, len(f))
-			for _, n := range f {
-				if !t.nodeAuthorized(n) {
-					continue
+			if err := decodeToolInput(raw, &q); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if q.Limit == 0 {
+				q.Limit = 20
+			}
+			if q.Limit < 1 || q.Limit > 100 || q.Before < 0 || q.AssetID < 0 {
+				return actool.Errorf("无效分页参数"), nil
+			}
+			if q.Severity != "" {
+				switch q.Severity {
+				case "critical", "high", "medium", "low", "info":
+				default:
+					return actool.Errorf("无效 severity"), nil
 				}
-				m := compactFinding(n)
-				if n.Inherited {
-					m["task_id"] = n.SourceTaskID
-				} else {
-					m["task_id"] = taskID
+				if kind != db.KindFinding {
+					return actool.Errorf("severity 仅用于漏洞列表"), nil
 				}
-				if iid, ok := intentOf[n.ID]; ok {
-					m["intent_id"] = iid
+			}
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
+			}
+			page, err := t.ts.ToolNodePage(ctx, kind, strings.TrimSpace(q.Q), q.Severity, q.AssetID, q.Before, q.Limit)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			more := len(page.Nodes) > q.Limit
+			if more {
+				page.Nodes = page.Nodes[:q.Limit]
+			}
+			rows := make([]map[string]any, 0, len(page.Nodes))
+			for _, n := range page.Nodes {
+				row := compactFact(n)
+				if kind == db.KindFinding {
+					row = compactFinding(n)
+					row["task_id"] = n.SourceTaskID
 				}
-				out = append(out, m)
+				rows = append(rows, row)
+			}
+			rows, cut := budgetRows(rows)
+			more = more || cut
+			out := map[string]any{key: rows, "total": page.Total, "has_more": more, "truncated": cut}
+			if more && len(rows) > 0 {
+				out["next_before"] = rows[len(rows)-1]["id"]
 			}
 			return jsonResult(out)
-		})
-}
-
-// factsPageSize is the default page size for list_facts. Facts pile up on long
-// tasks; returning all of them at once (the old behaviour) could blow up the
-// context, so default to the newest page and let the agent page/filter for more.
-const factsPageSize = 20
-
-func (t *ToolSet) listFacts() actool.CoreTool {
-	return readTool("list_facts", "分页列本任务及直接关联任务的【探索事实/结论】，最新在前(紧凑：id+摘要+状态，摘要过长会截断，全文用 node_detail(id))。参数均可选：limit(默认 20，上限 100)、before(游标，传上一页返回的 next_before 取更旧的一页；省略/0=最新一页)、q(按摘要关键词过滤)。返回 {facts, total, has_more, next_before}：total 是过滤后的总数，has_more=true 时用 next_before 继续翻页。关联任务条目带 source_task_id/inherited=true 且只读。漏洞看 list_findings。",
-		obj(map[string]any{
-			"limit":  intp("返回条数，默认 20，上限 100"),
-			"before": intp("分页游标：只返回 id 小于该值的更旧事实；省略或 0 = 最新一页"),
-			"q":      str("按事实摘要关键词过滤（不区分大小写）；省略 = 不过滤"),
-		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				Limit  int    `json:"limit"`
-				Before int64  `json:"before"`
-				Q      string `json:"q"`
-			}
-			_ = json.Unmarshal(in, &a)
-			limit := a.Limit
-			if limit <= 0 {
-				limit = factsPageSize
-			}
-			if limit > 100 {
-				limit = 100
-			}
-			f, hasMore, total, err := t.ts.ListByKindPageWithSources(db.KindFact, a.Before, limit, strings.TrimSpace(a.Q))
-			if err != nil {
-				return actool.Result{}, err
-			}
-			out := make([]map[string]any, 0, len(f))
-			for _, n := range f {
-				if t.nodeAuthorized(n) {
-					out = append(out, compactFact(n))
-				}
-			}
-			visibleTotal := total
-			if t.as != nil && visibleTotal > len(out) {
-				// Do not disclose a hidden pending/revoked population through the
-				// count. Pagination remains conservative and may under-count older
-				// authorized rows, but never exposes unauthorized metadata.
-				visibleTotal = len(out)
-			}
-			visibleHasMore := hasMore && len(out) > 0
-			res := map[string]any{"facts": out, "total": visibleTotal, "has_more": visibleHasMore}
-			if visibleHasMore {
-				res["next_before"] = out[len(out)-1]["id"] // 传回它取下一页(更旧的)
-			}
-			return jsonResult(res)
 		})
 }
 
@@ -1340,13 +1393,24 @@ func compactFact(n *db.Node) map[string]any {
 
 func (t *ToolSet) nodeDetail() actool.CoreTool {
 	return readTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets。",
-		obj(map[string]any{"id": idp("探索图节点 id(非资产 id)")}, "id"),
+		obj(map[string]any{"id": idp("探索图节点 id(非资产 id)"), "field": str("延期字段的 JSON Pointer，默认整个 payload"), "index": intp("集合 next_index 续页"), "offset": intp("文本 next_offset 续读"), "max_chars": intp("默认8000，最大24000")}, "id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				ID json.RawMessage `json:"id"`
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
 			}
-			_ = json.Unmarshal(in, &a)
-			id := pid(a.ID)
+			var a struct {
+				ID    int64  `json:"id"`
+				Field string `json:"field"`
+				Index int    `json:"index"`
+				detailWindow
+			}
+			if err := decodeToolInput(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if err := a.detailWindow.validate(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			id := a.ID
 			if id <= 0 {
 				return actool.Errorf("id 必填"), nil
 			}
@@ -1357,10 +1421,22 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if n == nil {
 				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
 			}
-			if !t.nodeAuthorized(n) {
+			authorized, authErr := t.nodeAuthorization(n)
+			if authErr != nil {
+				return actool.Errorf(authErr.Error()), nil
+			}
+			if !authorized {
 				return actool.Errorf("该节点关联的任务资产未获授权或已被封禁"), nil
 			}
-			return jsonResult(n) // full payload incl. detail / evidence
+			projection, err := projectDetail(n.Payload, a.detailWindow, a.Field, a.Index)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			out := map[string]any{"id": n.ID, "kind": n.Kind, "state": n.State, "payload": projection}
+			if n.Inherited {
+				inheritedMap(out, n.SourceTaskID)
+			}
+			return jsonResult(out)
 		})
 }
 
@@ -2148,65 +2224,63 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
-	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出(terminated=true)。",
-		obj(map[string]any{"intent_id": idp("意图 id（= work 句柄）")}, "intent_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+	return readTool("get_worker_output", "读取最新 result，没有 result 时返回最新 text。state 表示意图当前状态；长正文使用 next_offset 续读。",
+		obj(map[string]any{"intent_id": idp("意图 ID"), "offset": intp("正文字符偏移，默认0"), "max_chars": intp("正文字符数，默认8000，最大24000")}, "intent_id"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				IntentID json.RawMessage `json:"intent_id"`
+				IntentID int64 `json:"intent_id"`
+				detailWindow
 			}
-			_ = json.Unmarshal(in, &a)
-			id := pid(a.IntentID)
-			if id <= 0 {
-				return actool.Errorf("intent_id 必填"), nil
+			if err := decodeToolInput(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			intentNode, err := t.ts.GetNodeWithSources(id)
+			if a.IntentID <= 0 {
+				return actool.Errorf("intent_id 必须为正整数"), nil
+			}
+			if err := a.detailWindow.validate(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
+			}
+			n, err := t.ts.GetNodeWithSources(a.IntentID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			if intentNode == nil || intentNode.Kind != db.KindIntent {
-				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
+			if n == nil || n.Kind != db.KindIntent {
+				return actool.Errorf("intent_id 不属于本任务或直接关联任务"), nil
 			}
-			if !t.nodeAuthorized(intentNode) {
+			authorized, authErr := t.nodeAuthorization(n)
+			if authErr != nil {
+				return actool.Errorf(authErr.Error()), nil
+			}
+			if !authorized {
 				return actool.Errorf("该 work 关联的任务资产未获授权或已被封禁"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := t.ts.LatestWorkerOutput(ctx, a.IntentID, a.Offset, a.MaxChars)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
+			out := map[string]any{"intent_id": a.IntentID, "state": n.State, "has_output": pick != nil}
+			if n.Inherited {
+				inheritedMap(out, n.SourceTaskID)
+			}
+			if pick != nil {
+				total := pick.DetailChars
+				next := min(a.Offset, total) + len([]rune(pick.Detail))
+				out["final_text"] = pick.Detail
+				out["total_chars"] = total
+				out["offset"] = a.Offset
+				out["truncated"] = next < total
+				if next < total {
+					out["next_offset"] = next
 				}
+				out["kind"] = pick.Kind
+				out["worker_name"] = pick.Worker
+				out["is_error"] = pick.IsError
+				out["terminated"] = n.State == "stopped" || n.State == "blocked" || n.State == "exhausted"
 			}
-			pick, terminated := chosen, false
-			if pick == nil {
-				pick, terminated = fallback, true
-			}
-			if pick == nil {
-				if intentNode.Inherited {
-					return jsonResult(inheritedMap(map[string]any{
-						"intent_id": id, "final_text": "（该 work 尚无任何输出）", "terminated": true,
-					}, intentNode.SourceTaskID))
-				}
-				return actool.Text("（该 work 尚无任何输出）"), nil
-			}
-			detail, _ := t.ts.ActivityDetailWithSources(pick.ID)
-			if detail == "" {
-				detail = pick.Summary
-			}
-			result := map[string]any{
-				"intent_id": id, "worker_name": pick.Worker, "final_text": detail,
-				"summary": pick.Summary, "is_error": pick.IsError, "terminated": terminated,
-			}
-			if intentNode.Inherited {
-				inheritedMap(result, intentNode.SourceTaskID)
-			}
-			return jsonResult(result)
+			return jsonResult(out)
 		})
 }
 
@@ -2217,7 +2291,7 @@ func traceSteps(acts []db.Activity) []map[string]any {
 	steps := make([]map[string]any, 0, len(acts))
 	for i := range acts {
 		step := map[string]any{
-			"step_id": acts[i].ID, "kind": acts[i].Kind, "tool": acts[i].Tool,
+			"step_id": acts[i].ID, "kind": acts[i].Kind, "tool": firstLine(acts[i].Tool, 100),
 			"is_error": acts[i].IsError, "summary": firstLine(acts[i].Summary, 100),
 		}
 		if acts[i].Inherited {
@@ -2232,111 +2306,119 @@ func traceSteps(acts []db.Activity) []map[string]any {
 // list step summaries, keyword-search within one work, or pull full detail of a
 // few specific steps. Thinking steps are excluded everywhere.
 func (t *ToolSet) getWorkerTrace() actool.CoreTool {
-	return readTool("get_worker_trace",
-		"查看某条意图(work)的【执行过程】（区别于 get_worker_output 只给最终结论）。三种用法：\n"+
-			"① 只传 intent_id → 返回该 work 每一步的摘要流（summary≤100字，含 step_id；只是动作轮廓，不含完整输出）；\n"+
-			"② intent_id + q → 只返回命中关键字的步骤摘要（在摘要和完整输出里都搜；仍只给 summary，要看内容用③）；\n"+
-			"③ intent_id + step_ids → 返回这些步骤的完整内容(detail)；一次最多取 5 个，超出只返回前 5 个并在 notice/omitted_step_ids 里告知未取的。\n"+
-			"典型流程：先①/②定位可疑步骤的 step_id，再用③取其完整输出。不含思考(thinking)步骤。支持直接关联任务的历史 trace；其结果带 source_task_id/inherited=true 且只读。",
-		obj(map[string]any{
-			"intent_id": idp("意图 id（= work 句柄）"),
-			"q":         str("关键字：只返回摘要/完整输出命中它的步骤（可选；与 step_ids 互斥）"),
-			"step_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "要取完整内容的 step_id（来自①/②返回；一次最多取 5 个，多传只返回前 5 个，其余在 omitted_step_ids 里列出）"},
-			"limit":     intp("摘要流/检索的返回上限（可选）"),
-		}, "intent_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				IntentID json.RawMessage   `json:"intent_id"`
-				Q        string            `json:"q"`
-				StepIDs  []json.RawMessage `json:"step_ids"`
-				Limit    int               `json:"limit"`
+	return readTool("get_worker_trace", "读取意图执行轨迹摘要，默认20，最大100，before续页；step_ids显式读取至多5个步骤正文，与q/before互斥。正文默认8000、最大24000字符，offset续读。不包含思考。",
+		obj(map[string]any{"intent_id": idp("意图 ID"), "q": str("摘要/正文关键词"), "before": intp("摘要 next_before"), "limit": intp("摘要默认20，最大100"), "step_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": 5}, "offset": intp("正文 next_offset"), "max_chars": intp("正文默认8000，最大24000")}, "intent_id"),
+		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+			var in struct {
+				IntentID int64   `json:"intent_id"`
+				Q        string  `json:"q"`
+				Before   int64   `json:"before"`
+				Limit    int     `json:"limit"`
+				StepIDs  []int64 `json:"step_ids"`
+				detailWindow
 			}
-			_ = json.Unmarshal(in, &a)
-			id := pid(a.IntentID)
-			if id <= 0 {
-				return actool.Errorf("intent_id 必填"), nil
+			if err := decodeToolInput(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			intentNode, nodeErr := t.ts.GetNodeWithSources(id)
-			if nodeErr != nil {
-				return actool.Errorf(nodeErr.Error()), nil
+			if err := in.detailWindow.validate(); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			if intentNode == nil || intentNode.Kind != db.KindIntent {
-				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
+			if in.Limit == 0 {
+				in.Limit = 20
 			}
-			if !t.nodeAuthorized(intentNode) {
-				return actool.Errorf("该 work 关联的任务资产未获授权或已被封禁"), nil
+			if in.IntentID <= 0 || in.Before < 0 || in.Limit < 1 || in.Limit > 100 || len(in.StepIDs) > 5 {
+				return actool.Errorf("无效 ID 或分页范围"), nil
 			}
-			// ③ detail drill-down by step ids, thinking excluded by the store.
-			if len(a.StepIDs) > 0 {
-				// Dedup + drop invalid ids first so garbage/duplicates don't eat into
-				// the per-call cap. detail is returned in full (untruncated), so the
-				// cap bounds one tool result; over the cap we serve the first N and
-				// tell the model exactly which ids were deferred, instead of erroring
-				// and forcing it to re-plan the call.
-				const maxStepIDs = 5
-				var ids []int64
-				seen := make(map[int64]bool)
-				for _, raw := range a.StepIDs {
-					if v := pid(raw); v > 0 && !seen[v] {
-						seen[v] = true
-						ids = append(ids, v)
-					}
+			for _, id := range in.StepIDs {
+				if id <= 0 {
+					return actool.Errorf("step_ids 必须为正整数"), nil
 				}
-				var omitted []int64
-				if len(ids) > maxStepIDs {
-					omitted = append(omitted, ids[maxStepIDs:]...)
-					ids = ids[:maxStepIDs]
-				}
-				acts, err := t.ts.ActivityByIDsWithSources(ids)
-				if err != nil {
-					return actool.Errorf(err.Error()), nil
-				}
-				steps := make([]map[string]any, 0, len(acts))
-				for i := range acts {
-					if acts[i].NodeID == nil || *acts[i].NodeID != id || acts[i].Inherited != intentNode.Inherited ||
-						(acts[i].Inherited && acts[i].SourceTaskID != intentNode.SourceTaskID) {
-						continue
-					}
-					step := map[string]any{
-						"step_id": acts[i].ID, "kind": acts[i].Kind, "tool": acts[i].Tool,
-						"is_error": acts[i].IsError, "detail": acts[i].Detail,
-					}
-					if acts[i].Inherited {
-						inheritedMap(step, acts[i].SourceTaskID)
-					}
-					steps = append(steps, step)
-				}
-				result := map[string]any{"intent_id": id, "steps": steps, "returned_step_ids": ids}
-				if len(omitted) > 0 {
-					// returned_step_ids/omitted_step_ids let the model decide programmatically
-					// whether another call is worth it; the notice states the same in prose.
-					result["omitted_step_ids"] = omitted
-					result["notice"] = fmt.Sprintf(
-						"每次最多取 %d 个步骤的完整内容，本次已返回前 %d 个（%v），未取的 %d 个为 %v。"+
-							"若这些内容已足够定位，则无需再取剩余步骤；确需继续时，用这些 step_id 再调一次。",
-						maxStepIDs, len(ids), ids, len(omitted), omitted)
-				}
-				if intentNode.Inherited {
-					inheritedMap(result, intentNode.SourceTaskID)
-				}
-				return jsonResult(result)
 			}
-			// ①/② summary stream, optionally keyword-filtered; 100-char summaries.
-			var acts []db.Activity
-			var err error
-			if strings.TrimSpace(a.Q) != "" {
-				acts, err = t.ts.ActivityTraceSearchWithSources(id, a.Q, a.Limit)
-			} else {
-				acts, err = t.ts.ActivityTraceWithSources(id, a.Limit)
+			if len(in.StepIDs) > 0 && (in.Q != "" || in.Before != 0) {
+				return actool.Errorf("step_ids 与 q/before 互斥"), nil
 			}
+			if len(in.StepIDs) == 0 && in.Offset != 0 {
+				return actool.Errorf("offset 仅用于步骤正文"), nil
+			}
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
+			}
+			n, err := t.ts.GetNodeWithSources(in.IntentID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			result := map[string]any{"intent_id": id, "steps": traceSteps(acts)}
-			if intentNode.Inherited {
-				inheritedMap(result, intentNode.SourceTaskID)
+			if n == nil || n.Kind != db.KindIntent {
+				return actool.Errorf("意图不属于本任务或直接关联任务"), nil
 			}
-			return jsonResult(result)
+			authorized, authErr := t.nodeAuthorization(n)
+			if authErr != nil {
+				return actool.Errorf(authErr.Error()), nil
+			}
+			if !authorized {
+				return actool.Errorf("该 work 关联的任务资产未获授权或已被封禁"), nil
+			}
+			out := map[string]any{"intent_id": in.IntentID, "state": n.State}
+			if n.Inherited {
+				inheritedMap(out, n.SourceTaskID)
+			}
+			if len(in.StepIDs) > 0 {
+				acts, err := t.ts.ActivityByIDsWithSources(in.StepIDs)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				steps := []map[string]any{}
+				returned := []int64{}
+				for _, a := range acts {
+					if a.NodeID == nil || *a.NodeID != in.IntentID || a.Inherited != n.Inherited || (a.Inherited && a.SourceTaskID != n.SourceTaskID) {
+						continue
+					}
+					row := map[string]any{"step_id": a.ID, "kind": a.Kind, "tool": a.Tool, "is_error": a.IsError}
+					window := in.detailWindow
+					budget := (toolListBudget - 512) / len(in.StepIDs)
+					for {
+						part, total, next := textWindow(a.Detail, window)
+						row["detail"] = part
+						row["total_chars"] = total
+						row["truncated"] = next < total
+						row["offset"] = in.Offset
+						if next < total {
+							row["next_offset"] = next
+						} else {
+							delete(row, "next_offset")
+						}
+						data, _ := json.Marshal(row)
+						if len([]rune(string(data))) <= budget {
+							break
+						}
+						if window.MaxChars <= 1 {
+							return actool.Errorf("步骤元数据超出预算"), nil
+						}
+						window.MaxChars = max(1, window.MaxChars/2)
+					}
+					if a.Inherited {
+						inheritedMap(row, a.SourceTaskID)
+					}
+					steps = append(steps, row)
+					returned = append(returned, a.ID)
+				}
+				out["steps"] = steps
+				out["returned_step_ids"] = returned
+			} else {
+				acts, err := t.ts.ToolWorkerTracePage(ctx, in.IntentID, strings.TrimSpace(in.Q), in.Before, in.Limit)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				more := len(acts) > in.Limit
+				if more {
+					acts = acts[:in.Limit]
+				}
+				out["steps"] = traceSteps(acts)
+				out["has_more"] = more
+				if more && len(acts) > 0 {
+					out["next_before"] = acts[len(acts)-1].ID
+				}
+			}
+			return jsonResult(out)
 		})
 }
 
@@ -2344,49 +2426,50 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 // finding what a worker saw but never wrote back as a fact. Returns only matching
 // summaries (≤100 chars), each tagged with its intent_id for follow-up drill-down.
 func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
-	return readTool("search_all_worker_traces",
-		"【通常不推荐使用，因为系统中已经给了大部分信息了】在【本任务其他 work 的执行过程】里按关键字(q)检索——用于找回某个 worker 见过、却没写进 fact 的东西（某路径/token/报错等）。"+
-			"已自动排除你自己这条意图的步骤（那些本就在你上下文里）。"+
-			"只返回命中步骤的摘要(summary≤100字)，每条带 intent_id；据此再用 get_worker_trace(intent_id, step_ids=[...]) 取完整内容。",
-		obj(map[string]any{
-			"q":     str("关键字（在所有 work 步骤的摘要+完整输出里搜）"),
-			"limit": intp("返回上限，默认 100（可选）"),
-		}, "q"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				Q     string `json:"q"`
-				Limit int    `json:"limit"`
+	return readTool("search_all_worker_traces", "按关键词搜索其他 Worker 的授权可见轨迹摘要，不包含思考；详情用 get_worker_trace。默认20，最大100。",
+		obj(map[string]any{"q": str("正文或摘要关键词"), "limit": intp("默认20，最大100"), "before": intp("next_before 续页")}, "q"),
+		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
 			}
-			_ = json.Unmarshal(in, &a)
-			if strings.TrimSpace(a.Q) == "" {
-				return actool.Errorf("q 必填"), nil
+			var in struct {
+				Q      string `json:"q"`
+				Limit  int    `json:"limit"`
+				Before int64  `json:"before"`
 			}
-			// 排除调用者自身这条意图的步骤（worker 的自有 trace 已在其上下文里）。
-			acts, err := t.ts.ActivityTraceSearchAllWithSources(t.ownerNode, a.Q, a.Limit)
+			if err := decodeToolInput(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			in.Q = strings.TrimSpace(in.Q)
+			if in.Limit == 0 {
+				in.Limit = 20
+			}
+			if in.Q == "" || in.Limit < 1 || in.Limit > 100 || in.Before < 0 {
+				return actool.Errorf("关键词或分页参数无效"), nil
+			}
+			acts, err := t.ts.ToolSearchWorkerTraces(ctx, t.ownerNode, in.Q, in.Before, in.Limit)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			hits := make([]map[string]any, 0, len(acts))
-			for i := range acts {
-				var intent int64
-				if acts[i].NodeID != nil {
-					intent = *acts[i].NodeID
-				}
-				intentNode, _ := t.ts.GetNodeWithSources(intent)
-				if !t.nodeAuthorized(intentNode) {
-					continue
-				}
-				hit := map[string]any{
-					"intent_id": intent, "step_id": acts[i].ID, "worker": acts[i].Worker,
-					"kind": acts[i].Kind, "tool": acts[i].Tool, "is_error": acts[i].IsError,
-					"summary": firstLine(acts[i].Summary, 100),
-				}
-				if acts[i].Inherited {
-					inheritedMap(hit, acts[i].SourceTaskID)
-				}
-				hits = append(hits, hit)
+			more := len(acts) > in.Limit
+			if more {
+				acts = acts[:in.Limit]
 			}
-			return jsonResult(map[string]any{"query": a.Q, "hits": hits})
+			rows := []map[string]any{}
+			for _, a := range acts {
+				row := map[string]any{"intent_id": *a.NodeID, "step_id": a.ID, "worker": a.Worker, "kind": a.Kind, "tool": a.Tool, "is_error": a.IsError, "summary": a.Summary}
+				if a.Inherited {
+					inheritedMap(row, a.SourceTaskID)
+				}
+				rows = append(rows, row)
+			}
+			rows, cut := budgetRows(rows)
+			more = more || cut
+			out := map[string]any{"query": in.Q, "hits": rows, "has_more": more, "truncated": cut}
+			if more && len(rows) > 0 {
+				out["next_before"] = rows[len(rows)-1]["step_id"]
+			}
+			return jsonResult(out)
 		})
 }
 
@@ -2397,58 +2480,48 @@ func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
 // from search_all_worker_traces hits. Excludes still-open intents (not yet run →
 // no process to inspect).
 func (t *ToolSet) listWorkerTraces() actool.CoreTool {
-	return readTool("list_worker_traces",
-		"【通常不推荐使用，因为系统中已经给了大部分信息了】列出本任务里【已跑过的 work（意图）】索引：intent_id + 一句话方向(summary) + 状态。"+
-			"你(worker)看不到探索图，用它来发现有哪些 work 值得翻看——再用 get_worker_trace(intent_id) 看其步骤、get_worker_trace(intent_id, step_ids=[...]) 取详情。"+
-			"只列已执行的(running/done/exhausted/blocked/stopped)，不含还没跑的 open。注意：你的任务边界仍是你领到的那条意图，看别的 work 只为复用观察/避免重复劳动。",
-		obj(map[string]any{
-			"q":     str("按 summary 关键字过滤（可选）"),
-			"limit": intp("返回上限，默认 50（可选）"),
-		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				Q     string `json:"q"`
-				Limit int    `json:"limit"`
+	return readTool("list_worker_traces", "分页查询已执行意图摘要，用于复用其他 Worker 观察；详情使用 get_worker_trace。默认20，最大100。",
+		obj(map[string]any{"q": str("摘要关键词"), "limit": intp("默认20，最大100"), "before": intp("next_before 续页")}),
+		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
 			}
-			_ = json.Unmarshal(in, &a)
-			limit := a.Limit
-			if limit <= 0 {
-				limit = 50
+			var in struct {
+				Q      string `json:"q"`
+				Limit  int    `json:"limit"`
+				Before int64  `json:"before"`
 			}
-			all, err := t.ts.ListByKindWithSources(db.KindIntent, 500)
+			if err := decodeToolInput(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if in.Limit == 0 {
+				in.Limit = 20
+			}
+			if in.Limit < 1 || in.Limit > 100 || in.Before < 0 {
+				return actool.Errorf("无效分页参数"), nil
+			}
+			page, err := t.ts.ToolNodePage(ctx, db.KindIntent, strings.TrimSpace(in.Q), "", 0, in.Before, in.Limit)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			q := strings.ToLower(strings.TrimSpace(a.Q))
-			out := make([]map[string]any, 0, limit)
-			for _, n := range all {
-				if !t.nodeAuthorized(n) {
-					continue
-				}
-				if n.Inherited && n.State == "running" {
-					continue
-				}
-				switch n.State {
-				case "running", "done", "exhausted", "blocked", "stopped": // has run → has a process
-				default:
-					continue
-				}
-				var p map[string]any
-				_ = json.Unmarshal(n.Payload, &p)
-				summary, _ := p["summary"].(string)
-				if q != "" && !strings.Contains(strings.ToLower(summary), q) {
-					continue
-				}
-				item := map[string]any{"intent_id": n.ID, "summary": summary, "state": n.State}
-				if n.Inherited {
-					inheritedMap(item, n.SourceTaskID)
-				}
-				out = append(out, item)
-				if len(out) >= limit {
-					break
-				}
+			more := len(page.Nodes) > in.Limit
+			if more {
+				page.Nodes = page.Nodes[:in.Limit]
 			}
-			return jsonResult(map[string]any{"works": out})
+			rows := []map[string]any{}
+			for _, n := range page.Nodes {
+				row := compactFact(n)
+				row["intent_id"] = n.ID
+				delete(row, "id")
+				rows = append(rows, row)
+			}
+			rows, cut := budgetRows(rows)
+			more = more || cut
+			out := map[string]any{"works": rows, "total": page.Total, "has_more": more, "truncated": cut}
+			if more && len(rows) > 0 {
+				out["next_before"] = rows[len(rows)-1]["intent_id"]
+			}
+			return jsonResult(out)
 		})
 }
 

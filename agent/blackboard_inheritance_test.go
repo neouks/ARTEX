@@ -394,7 +394,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 		t.Fatalf("list_facts direct-only: source=%v grand=%v payload=%#v", seenSource, seenGrand, facts)
 	}
 
-	findings := callReadJSON(t, tools.listFindings(), `{}`).([]any)
+	findings := callReadJSON(t, tools.listFindings(), `{}`).(map[string]any)["findings"].([]any)
 	if len(findings) != 1 {
 		t.Fatalf("list_findings: %#v", findings)
 	}
@@ -430,10 +430,8 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 	}
 }
 
-// TestGetWorkerTraceStepIDsDegradeGracefully pins the over-cap behaviour: instead
-// of erroring, get_worker_trace returns the first 5 requested steps and tells the
-// model which ids it deferred, after de-duplicating and dropping invalid ids.
-func TestGetWorkerTraceStepIDsDegradeGracefully(t *testing.T) {
+// Invalid or over-cap trace detail requests fail before executing a query.
+func TestGetWorkerTraceRejectsInvalidStepIDs(t *testing.T) {
 	d := testDB(t)
 	defer d.Close()
 
@@ -467,28 +465,14 @@ func TestGetWorkerTraceStepIDsDegradeGracefully(t *testing.T) {
 	// After dedup/cleanup that is 6 valid ids — one over the cap.
 	requested := []int64{stepIDs[0], stepIDs[0], 0, stepIDs[1], stepIDs[2], stepIDs[3], stepIDs[4], stepIDs[5]}
 	input, _ := json.Marshal(map[string]any{"intent_id": intent, "step_ids": requested})
-	res := callReadJSON(t, tools.getWorkerTrace(), string(input)).(map[string]any)
-
-	returned, _ := res["returned_step_ids"].([]any)
-	if len(returned) != 5 {
-		t.Fatalf("returned_step_ids=%v, want the first 5", res["returned_step_ids"])
+	res, err := tools.getWorkerTrace().Call(t.Context(), input, nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("invalid request accepted: %+v %v", res, err)
 	}
-	// First 5 distinct valid ids, in request order.
-	wantReturned := []int64{stepIDs[0], stepIDs[1], stepIDs[2], stepIDs[3], stepIDs[4]}
-	for i, raw := range returned {
-		if int64(raw.(float64)) != wantReturned[i] {
-			t.Fatalf("returned[%d]=%v, want %d", i, raw, wantReturned[i])
-		}
-	}
-	omitted, _ := res["omitted_step_ids"].([]any)
-	if len(omitted) != 1 || int64(omitted[0].(float64)) != stepIDs[5] {
-		t.Fatalf("omitted_step_ids=%v, want [%d]", res["omitted_step_ids"], stepIDs[5])
-	}
-	if notice, _ := res["notice"].(string); notice == "" {
-		t.Fatalf("notice missing — model would not know a step was deferred")
-	}
-	if steps, _ := res["steps"].([]any); len(steps) != 5 {
-		t.Fatalf("steps=%d, want 5 detail rows", len(steps))
+	tooMany, _ := json.Marshal(map[string]any{"intent_id": intent, "step_ids": stepIDs})
+	res, err = tools.getWorkerTrace().Call(t.Context(), tooMany, nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("over-cap request accepted: %+v %v", res, err)
 	}
 
 	// At or under the cap: no notice, no omitted list.

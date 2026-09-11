@@ -104,10 +104,11 @@ type PortService struct {
 
 // AssetStore operates on the assets table.
 type AssetStore struct {
-	db      *DB
-	company *CompanyStore
-	tx      *sql.Tx
-	readCtx context.Context
+	db         *DB
+	company    *CompanyStore
+	tx         *sql.Tx
+	readCtx    context.Context
+	toolSelect string
 }
 
 // WithReadContext returns a request-local store; shared stores are never mutated.
@@ -116,6 +117,49 @@ func (s *AssetStore) WithReadContext(ctx context.Context) *AssetStore {
 	copy := *s
 	copy.readCtx = ctx
 	return &copy
+}
+
+// WithToolReadFields is request-local. UI reads retain their original columns;
+// model lists never load large credential/parameter/extra arrays by default.
+func (s *AssetStore) WithToolReadFields(detail bool, groups []string) *AssetStore {
+	copy := *s
+	selected := map[string]bool{}
+	if detail {
+		for _, g := range groups {
+			selected[g] = true
+		}
+	}
+	query := assetSelectCols
+	for group, expressions := range map[string][]string{
+		"auth": {"array_to_json(auth)::text"}, "params": {"array_to_json(params)::text"},
+		"dns": {"array_to_json(bound_domains)::text", "array_to_json(open_ports)::text", "array_to_json(record_value)::text"},
+	} {
+		if !selected[group] {
+			for _, expr := range expressions {
+				query = strings.ReplaceAll(query, expr, "'[]'::text")
+			}
+		}
+	}
+	if !selected["extra"] {
+		query = strings.Replace(query, ", extra,", ", '{}'::jsonb,", 1)
+	}
+	if !detail {
+		query = strings.Replace(query, "COALESCE(app_description,'')", "''::text", 1)
+	}
+	query = strings.Replace(query, "array_to_json(task_ids)::text", "'[]'::text", 1)
+	if !detail {
+		query = strings.Replace(query, "COALESCE(page_title,'')", "left(COALESCE(page_title,''),160)", 1)
+		query = strings.Replace(query, "array_to_json(technologies)::text", "array_to_json(technologies[1:5])::text", 1)
+	}
+	copy.toolSelect = query
+	return &copy
+}
+
+func (s *AssetStore) selectAssetColumns() string {
+	if s.toolSelect != "" {
+		return s.toolSelect
+	}
+	return assetSelectCols
 }
 
 func (s *AssetStore) query(query string, args ...any) (*sql.Rows, error) {
@@ -1684,7 +1728,7 @@ func (s *AssetStore) GetByIDs(ids []int64) ([]*Asset, error) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	sql := assetSelectCols + " WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY last_seen DESC"
+	sql := s.selectAssetColumns() + " WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY last_seen DESC, id DESC"
 	rows, err := s.query(sql, args...)
 	if err != nil {
 		return nil, err

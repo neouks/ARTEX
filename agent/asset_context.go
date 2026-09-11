@@ -110,13 +110,17 @@ func structuredNodeIDs(row map[string]any) []int64 {
 	if _, asset := row["type"]; asset {
 		return nil
 	}
+	var ids []int64
+	if id, ok := row["intent_id"].(float64); ok && id > 0 && id == float64(int64(id)) {
+		ids = append(ids, int64(id))
+	}
 	_, summary := row["summary"]
 	_, state := row["state"]
 	_, kind := row["kind"]
 	if id, ok := row["id"].(float64); ok && id > 0 && (summary || (state && kind)) {
-		return []int64{int64(id)}
+		ids = append(ids, int64(id))
 	}
-	return nil
+	return ids
 }
 
 func filterStructuredRows(value any, states map[int64]string, collect map[int64]bool, rowIDs func(map[string]any) []int64) (any, bool) {
@@ -190,7 +194,7 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 			// Only ARTEX structured tools: arbitrary shell/HTTP JSON may use the
 			// same field names for unrelated application data.
 			switch toolNames[block.ToolUseID] {
-			case "insert_assets", "list_assets", "list_untested_assets", "graph_overview", "node_detail", "expand_digest", "list_findings", "list_facts":
+			case "insert_assets", "list_assets", "list_untested_assets", "graph_overview", "node_detail", "expand_digest", "expand_index", "list_findings", "list_facts", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces":
 			default:
 				continue
 			}
@@ -205,7 +209,7 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 			}
 		}
 	}
-	if len(ids) == 0 && len(nodeIDs) == 0 {
+	if len(results) == 0 {
 		return req, nil
 	}
 	list := make([]int64, 0, len(ids))
@@ -235,6 +239,14 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 		}
 		if !keep {
 			value = map[string]any{"message": "该结果已从可执行上下文移除，等待用户授权"}
+		}
+		if row, ok := value.(map[string]any); ok {
+			for _, key := range []string{"total", "count", "facts", "findings", "coverage", "asset_approval_counts"} {
+				if _, exists := row[key]; exists {
+					row["counts_are_snapshot"] = true
+					break
+				}
+			}
 		}
 		encoded, err := json.Marshal(value)
 		if err != nil {

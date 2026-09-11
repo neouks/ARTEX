@@ -183,8 +183,7 @@ ORDER BY target.id LIMIT $`+limitPosition+` OFFSET $`+offsetPosition, pageArgs..
 // source. Traffic remains global and is not copied. This read helper must not be
 // used for destructive task cleanup; HostsByTask intentionally retains that
 // narrower, task-owned behavior.
-func (s *AssetStore) HostsByTaskWithSources(taskID int64) ([]string, error) {
-	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`,
+const taskHostContextCTE = directTaskContextCTE + `,
 context_assets AS (
 	  SELECT DISTINCT a.id
 	  FROM assets a
@@ -211,7 +210,20 @@ context_assets AS (
 	  )
 	  JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 	  WHERE task_asset_effectively_approved($1,a.id)
-	)
+	)`
+
+func (s *AssetStore) CountHostsByTaskWithSources(taskID int64) (int, error) {
+	var count int
+	err := s.queryRow(`WITH `+taskHostContextCTE+`
+ SELECT count(DISTINCT host) FROM assets a JOIN context_assets ctx ON ctx.id=a.id
+ CROSS JOIN LATERAL (VALUES(lower(btrim(a.domain))),(lower(btrim(a.ip))),
+ (CASE WHEN a.url ~ '^[a-zA-Z][a-zA-Z0-9+.-]*://' THEN task_asset_normalized_host(a.url) ELSE '' END)) hosts(host)
+ WHERE host<>''`, taskID).Scan(&count)
+	return count, err
+}
+
+func (s *AssetStore) HostsByTaskWithSources(taskID int64) ([]string, error) {
+	rows, err := s.query(`WITH `+taskHostContextCTE+`
 SELECT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,'')
 FROM assets a JOIN context_assets ctx ON ctx.id=a.id`, taskID)
 	if err != nil {

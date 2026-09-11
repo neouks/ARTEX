@@ -330,6 +330,11 @@ CREATE INDEX IF NOT EXISTS idx_act_result_usage ON activity(exploration_id)
     INCLUDE (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
     WHERE kind='result';
 CREATE INDEX IF NOT EXISTS idx_act_latest ON activity(exploration_id, created_at DESC);
+-- Tool final-output lookup: result first, latest text as fallback, without a
+-- prefix scan or sorting an entire long-running worker stream.
+CREATE INDEX IF NOT EXISTS idx_act_worker_output ON activity
+    (node_id, (CASE WHEN kind='result' THEN 0 ELSE 1 END), id DESC)
+    WHERE kind IN ('result','text');
 
 -- =====================================================================
 -- C. LLM profiles

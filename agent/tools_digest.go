@@ -20,32 +20,45 @@ import (
 
 // A digest body cannot be partially redacted reliably. Hide the whole body if
 // any member is unavailable, and let authorized members remain visible unfolded.
-func (t *ToolSet) digestAuthorized(store *db.ExplorationStore, ownerTaskID, id int64) bool {
-	if t.as == nil || t.taskID <= 0 {
-		return true
+func (t *ToolSet) digestAuthorizationBatch(store *db.ExplorationStore, ownerTaskID int64, ids []int64) (map[int64]bool, map[int64][]int64, error) {
+	groups, err := store.ToolDigestMemberships(ids)
+	if err != nil {
+		return nil, nil, err
 	}
-	members, err := store.DigestMembers(id)
-	if err != nil || len(members) == 0 {
-		return false
+	allowed := map[int64]bool{}
+	members := map[int64][]int64{}
+	var all []int64
+	for _, g := range groups {
+		members[g.ID] = g.Members
+		all = append(all, g.Members...)
+		all = append(all, g.Anchors...)
 	}
-	digest, err := store.GetNode(id)
-	if err != nil || digest == nil {
-		return false
+	nodes, err := store.ToolNodesByIDs(all)
+	if err != nil {
+		return nil, nil, err
 	}
-	var payload struct {
-		Anchors []int64 `json:"anchor_ids"`
-	}
-	if json.Unmarshal(digest.Payload, &payload) != nil {
-		return false
-	}
-	members = append(members, payload.Anchors...)
-	for _, member := range members {
-		n, err := store.GetNode(member)
-		if err != nil || n == nil || n.Kind == db.KindDigest || len(t.filterAuthorizedNodesForStore([]*db.Node{n}, store, ownerTaskID)) != 1 {
-			return false
+	valid := map[int64]bool{}
+	eligible := make([]*db.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Kind != db.KindDigest {
+			eligible = append(eligible, n)
 		}
 	}
-	return true
+	checked, err := t.authorizedNodesForStore(eligible, store, ownerTaskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, n := range checked {
+		valid[n.ID] = true
+	}
+	for _, g := range groups {
+		ok := len(g.Members) > 0
+		for _, id := range append(append([]int64(nil), g.Members...), g.Anchors...) {
+			ok = ok && valid[id]
+		}
+		allowed[g.ID] = ok
+	}
+	return allowed, members, nil
 }
 
 func (t *ToolSet) authorizedCoveredMembers(store *db.ExplorationStore, ownerTaskID int64) map[int64]int64 {
@@ -54,10 +67,16 @@ func (t *ToolSet) authorizedCoveredMembers(store *db.ExplorationStore, ownerTask
 		return nil
 	}
 	allowed := map[int64]bool{}
+	var ids []int64
 	for _, id := range covered {
-		if _, checked := allowed[id]; !checked {
-			allowed[id] = t.digestAuthorized(store, ownerTaskID, id)
+		if _, seen := allowed[id]; !seen {
+			allowed[id] = false
+			ids = append(ids, id)
 		}
+	}
+	allowed, _, err = t.digestAuthorizationBatch(store, ownerTaskID, ids)
+	if err != nil {
+		return nil
 	}
 	for member, id := range covered {
 		if !allowed[id] {
@@ -69,22 +88,33 @@ func (t *ToolSet) authorizedCoveredMembers(store *db.ExplorationStore, ownerTask
 
 // coldDigestOverview returns the folded cold region for graph_overview: the flat
 // digest bodies and the asset-grouped index (§6.1/§6.2).
-func (t *ToolSet) coldDigestOverview() (digests []map[string]any, index []map[string]any) {
+func (t *ToolSet) coldDigestOverview() (digests, index []map[string]any, resultErr error) {
 	ads, err := t.ts.ActiveDigests()
 	if err != nil || len(ads) == 0 {
-		return nil, nil
+		return nil, nil, err
+	}
+	ids := make([]int64, 0, len(ads))
+	for _, d := range ads {
+		ids = append(ids, d.ID)
+	}
+	allowed, allMembersByDigest, batchErr := t.digestAuthorizationBatch(t.ts, t.taskID, ids)
+	if batchErr != nil {
+		return nil, nil, batchErr
 	}
 	memByDigest := map[int64][]int64{}
 	var allMembers []int64
 	for _, d := range ads {
-		if !t.digestAuthorized(t.ts, t.taskID, d.ID) {
+		if !allowed[d.ID] {
 			continue
 		}
-		ms, _ := t.ts.DigestMembers(d.ID)
+		ms := allMembersByDigest[d.ID]
 		memByDigest[d.ID] = ms
 		allMembers = append(allMembers, ms...)
 	}
-	assetsByNode, _ := t.ts.NodeAssets(allMembers)
+	assetsByNode, assetsErr := t.ts.NodeAssets(allMembers)
+	if assetsErr != nil {
+		return nil, nil, assetsErr
+	}
 
 	digests = make([]map[string]any, 0, len(ads))
 	for _, d := range ads {
@@ -94,11 +124,14 @@ func (t *ToolSet) coldDigestOverview() (digests []map[string]any, index []map[st
 		var p struct {
 			Body string `json:"body"`
 		}
-		_ = json.Unmarshal(d.Payload, &p)
+		if err := json.Unmarshal(d.Payload, &p); err != nil {
+			return nil, nil, err
+		}
 		digests = append(digests, map[string]any{
-			"id":           d.ID,
-			"body":         p.Body,
-			"member_count": len(memByDigest[d.ID]),
+			"id":              d.ID,
+			"body":            firstLine(p.Body, 1200),
+			"body_is_summary": true,
+			"member_count":    len(memByDigest[d.ID]),
 		})
 	}
 
@@ -169,26 +202,7 @@ func (t *ToolSet) coldDigestOverview() (digests []map[string]any, index []map[st
 	sort.Slice(index, func(i, j int) bool {
 		return fmt.Sprint(index[i]["asset"]) < fmt.Sprint(index[j]["asset"])
 	})
-	return digests, index
-}
-
-// digestMemberEntry builds the compact per-member view expand_digest returns —
-// same shape as recent_facts / recent_done_intents (§6.1 middle level). store is
-// the digest's OWNING store (the current task, or a read-only source task §2).
-func (t *ToolSet) digestMemberEntry(store *db.ExplorationStore, id int64) map[string]any {
-	n, _ := store.GetNode(id)
-	if n == nil {
-		return map[string]any{"id": id, "missing": true}
-	}
-	m := compactNode(n)
-	m["state"] = n.State
-	var p map[string]any
-	if json.Unmarshal(n.Payload, &p) == nil {
-		if c, ok := p["confidence"].(string); ok && c != "" {
-			m["confidence"] = c
-		}
-	}
-	return m
+	return digests, index, nil
 }
 
 // activeDigestBodies returns [{id, body, member_count}] for a store's active
@@ -199,17 +213,24 @@ func (t *ToolSet) activeDigestBodies(store *db.ExplorationStore, ownerTaskID int
 	if err != nil || len(ads) == 0 {
 		return nil
 	}
+	ids := make([]int64, 0, len(ads))
+	for _, d := range ads {
+		ids = append(ids, d.ID)
+	}
+	allowed, members, err := t.digestAuthorizationBatch(store, ownerTaskID, ids)
+	if err != nil {
+		return nil
+	}
 	out := make([]map[string]any, 0, len(ads))
 	for _, d := range ads {
-		if !t.digestAuthorized(store, ownerTaskID, d.ID) {
+		if !allowed[d.ID] {
 			continue
 		}
 		var p struct {
 			Body string `json:"body"`
 		}
 		_ = json.Unmarshal(d.Payload, &p)
-		ms, _ := store.DigestMembers(d.ID)
-		out = append(out, map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)})
+		out = append(out, map[string]any{"id": d.ID, "body": firstLine(p.Body, 1200), "body_is_summary": true, "member_count": len(members[d.ID])})
 	}
 	return out
 }
@@ -235,17 +256,28 @@ func (t *ToolSet) hiddenMembersFor(store *db.ExplorationStore, ownerTaskID int64
 // resolveDigest finds a digest node by id in the current task, else in a direct
 // source task (read-only, §2). Returns the node, its owning store, and the source
 // task id (0 = current task).
-func (t *ToolSet) resolveDigest(id int64) (*db.Node, *db.ExplorationStore, int64) {
-	if n, _ := t.ts.GetNode(id); n != nil && n.Kind == db.KindDigest {
-		return n, t.ts, 0
+func (t *ToolSet) resolveDigest(id int64) (*db.Node, *db.ExplorationStore, int64, error) {
+	n, err := t.ts.GetNode(id)
+	if err != nil {
+		return nil, nil, 0, err
 	}
-	srcs, _ := t.ts.DirectSourceStores()
+	if n != nil && n.Kind == db.KindDigest {
+		return n, t.ts, 0, nil
+	}
+	srcs, err := t.directSourceStores()
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	for _, s := range srcs {
-		if n, _ := s.Store.GetNode(id); n != nil && n.Kind == db.KindDigest {
-			return n, s.Store, s.Task.TaskID
+		n, err := s.Store.GetNode(id)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if n != nil && n.Kind == db.KindDigest {
+			return n, s.Store, s.Task.TaskID, nil
 		}
 	}
-	return nil, nil, 0
+	return nil, nil, 0, nil
 }
 
 // expandDigest returns a digest's covered members as a compact list (§6.1). It is
@@ -257,16 +289,37 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id": map[string]any{"type": "integer", "description": "digest 节点 id（来自概览 cold_digests / cold_index / covered_members）"},
+				"id":    map[string]any{"type": "integer", "description": "digest 节点 id（来自概览 cold_digests / cold_index / covered_members）"},
+				"limit": intp("成员默认20，最大100"), "before": intp("成员 next_before 续页"), "offset": intp("正文字符偏移"), "max_chars": intp("正文默认8000，最大24000"),
 			},
 			"required": []any{"id"},
 		},
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
-			var in struct {
-				ID int64 `json:"id"`
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
 			}
-			_ = json.Unmarshal(raw, &in)
-			n, store, srcTaskID := t.resolveDigest(in.ID)
+			var in struct {
+				ID     int64 `json:"id"`
+				Limit  int   `json:"limit"`
+				Before int64 `json:"before"`
+				detailWindow
+			}
+			if err := decodeToolInput(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if err := in.detailWindow.validate(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if in.Limit == 0 {
+				in.Limit = 20
+			}
+			if in.ID <= 0 || in.Before < 0 || in.Limit < 1 || in.Limit > 100 {
+				return actool.Errorf("无效 digest 或分页参数"), nil
+			}
+			n, store, srcTaskID, resolveErr := t.resolveDigest(in.ID)
+			if resolveErr != nil {
+				return actool.Errorf(resolveErr.Error()), nil
+			}
 			if n == nil {
 				return jsonResult(map[string]any{"error": fmt.Sprintf("#%d 不是 digest 节点（本任务或直接关联任务里都没找到）", in.ID)})
 			}
@@ -274,17 +327,28 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 			if ownerTaskID == 0 {
 				ownerTaskID = t.taskID
 			}
-			if !t.digestAuthorized(store, ownerTaskID, n.ID) {
+			allowed, _, authErr := t.digestAuthorizationBatch(store, ownerTaskID, []int64{n.ID})
+			if authErr != nil {
+				return actool.Errorf(authErr.Error()), nil
+			}
+			if !allowed[n.ID] {
 				return actool.Errorf("digest 包含未授权资产，无法展开"), nil
 			}
 			var p struct {
 				Body string `json:"body"`
 			}
 			_ = json.Unmarshal(n.Payload, &p)
-			members, _ := store.DigestMembers(in.ID)
+			members, err := store.ToolDigestMemberPage(in.ID, in.Before, in.Limit)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			more := len(members) > in.Limit
+			if more {
+				members = members[:in.Limit]
+			}
 			list := make([]map[string]any, 0, len(members))
 			for _, m := range members {
-				entry := t.digestMemberEntry(store, m)
+				entry := compactFact(m)
 				if srcTaskID > 0 { // 关联任务的成员：只读，带继承标记（§2）
 					entry["inherited"] = true
 					entry["source_task_id"] = srcTaskID
@@ -292,14 +356,51 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 				list = append(list, entry)
 			}
 			out := map[string]any{
-				"id":      in.ID,
-				"state":   n.State, // active / superseded
-				"body":    p.Body,
-				"members": list,
+				"id":       in.ID,
+				"state":    n.State, // active / superseded
+				"members":  list,
+				"has_more": more,
+			}
+			if more && len(list) > 0 {
+				out["next_before"] = list[len(list)-1]["id"]
+			}
+			body, total, next := textWindow(p.Body, in.detailWindow)
+			out["body"] = body
+			out["body_total_chars"] = total
+			out["body_truncated"] = next < total
+			if next < total {
+				out["next_offset"] = next
 			}
 			if srcTaskID > 0 {
 				out["inherited"] = true
 				out["source_task_id"] = srcTaskID
+			}
+			window := in.detailWindow
+			for {
+				encoded, err := json.Marshal(out)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				if len([]rune(string(encoded))) <= toolListBudget {
+					break
+				}
+				out["truncated"] = true
+				if len(list) > 1 {
+					list = list[:max(1, len(list)/2)]
+					out["members"] = list
+					out["has_more"] = true
+					out["next_before"] = list[len(list)-1]["id"]
+				} else if window.MaxChars > 1 {
+					window.MaxChars = max(1, window.MaxChars/2)
+					body, total, next := textWindow(p.Body, window)
+					out["body"] = body
+					out["body_truncated"] = next < total
+					if next < total {
+						out["next_offset"] = next
+					}
+				} else {
+					return actool.Errorf("摘要元数据超出响应预算"), nil
+				}
 			}
 			return jsonResult(out)
 		})
@@ -309,36 +410,44 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 // with its body + member count — so the planner can drill an asset directory down
 // to its directions without reading every digest globally.
 func (t *ToolSet) expandIndex() actool.CoreTool {
-	return writeTool("expand_index",
-		"展开冷区某个资产条目（来自概览 cold_index）：返回该资产名下的 cold digest 列表（id/body/member_count）。再往下看某个 digest 的成员用 expand_digest(id)。",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"asset_id": map[string]any{"type": "integer", "description": "资产 id（来自概览 cold_index 的 asset_id；传 0 或省略取未锚定资产桶）"},
-			},
-		},
+	return writeTool("expand_index", "按资产展开冷摘要索引（0为未锚定桶）。默认20，最大100；before续页，正文详情使用 expand_digest。",
+		obj(map[string]any{"asset_id": idp("资产 ID，默认0"), "before": intp("next_before 续页"), "limit": intp("默认20，最大100")}),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
+			if t.ts == nil {
+				return actool.Errorf("缺少任务探索上下文"), nil
+			}
 			var in struct {
 				AssetID int64 `json:"asset_id"`
+				Before  int64 `json:"before"`
+				Limit   int   `json:"limit"`
 			}
-			_ = json.Unmarshal(raw, &in)
-			digests, index := t.coldDigestOverview()
-			selected := map[int64]bool{}
-			for _, entry := range index {
-				assetID, _ := entry["asset_id"].(int64) // missing means unanchored
-				if assetID == in.AssetID {
-					for _, id := range entry["digest_ids"].([]int64) {
-						selected[id] = true
-					}
-					break
-				}
+			if err := decodeToolInput(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
-			out := make([]map[string]any, 0)
-			for _, d := range digests {
-				if selected[d["id"].(int64)] {
-					out = append(out, d)
-				}
+			if in.Limit == 0 {
+				in.Limit = 20
 			}
-			return jsonResult(map[string]any{"asset_id": in.AssetID, "digests": out})
+			if in.AssetID < 0 || in.Before < 0 || in.Limit < 1 || in.Limit > 100 {
+				return actool.Errorf("无效索引分页参数"), nil
+			}
+			page, err := t.ts.ToolDigestIndexPage(ctx, in.AssetID, in.Before, in.Limit)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			more := len(page.Digests) > in.Limit
+			if more {
+				page.Digests = page.Digests[:in.Limit]
+			}
+			rows := []map[string]any{}
+			for _, d := range page.Digests {
+				rows = append(rows, map[string]any{"id": d.ID, "kind": db.KindDigest, "state": "active", "body": d.Body, "member_count": d.MemberCount, "body_is_summary": true})
+			}
+			rows, cut := budgetRows(rows)
+			more = more || cut
+			out := map[string]any{"asset_id": in.AssetID, "digests": rows, "total": page.Total, "has_more": more}
+			if more && len(rows) > 0 {
+				out["next_before"] = rows[len(rows)-1]["id"]
+			}
+			return jsonResult(out)
 		})
 }

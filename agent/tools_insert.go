@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -502,96 +503,196 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 
 // listAssets lets an agent query the asset table.
 func (t *ToolSet) listAssets() actool.CoreTool {
-	return readTool(
-		"list_assets",
-		"查询资产库。支持 DSL 表达式搜索、按 id/ids 直接取，分页。\n"+
-			"DSL 语法：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | port>80 数字比较 | 裸词=全文模糊。\n"+
-			"逻辑运算：AND / OR（关键字，AND 优先级高于 OR），括号分组。\n"+
-			"资产类型用独立的 type 参数过滤，DSL 里不含 type 字段。\n"+
-			"约束：未传 id/ids 时 dsl 必须非空——不允许无条件查询全部资产，必须带查询条件。\n"+
-			"字段一览：\n"+
-			"  domain      域名（根域名/子域名/服务域名）\n"+
-			"  root_domain 根域名（仅子域名/服务资产有）\n"+
-			"  ip          IPv4/IPv6 地址\n"+
-			"  url         完整 URL（服务/接口）\n"+
-			"  page_title  页面标题（HTTP 服务）\n"+
-			"  icp         ICP 备案号（根域名）\n"+
-			"  service_name 服务名称（非 HTTP 服务）\n"+
-			"  app_name    应用名称（app 类型）\n"+
-			"  method      HTTP 方法（接口类型，如 GET/POST）\n"+
-			"  service_type HTTP 服务类型：http|other\n"+
-			"  record_type DNS 解析类型（子域名，如 A/CNAME）\n"+
-			"  technology  指纹/技术栈（数组字段，= 模糊 == 精确）\n"+
-			"  port        端口号（整数，支持 > >= < <=）\n"+
-			"  status_code HTTP 状态码（整数，支持 > >= < <=）\n"+
-			"  company_id  归属企业 id（整数）\n"+
-			"  task_id     来源任务 id（整数）\n"+
-			"示例：status_code>=400 AND technology=shiro\n"+
-			"      method==POST AND url=/api/admin\n"+
-			"      icp=京 OR icp=沪\n"+
-			"      (port==80 OR port==443) AND technology=nginx",
+	return readTool("list_assets", "查询已授权资产摘要。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
-			"dsl":    str(`DSL 查询表达式，参见工具描述。未传 id/ids 时必须非空。例：status_code>=400 technology=shiro / method==POST url=/api/admin`),
-			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
-			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
-			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
-			"limit":  intp("返回上限，默认 10（可选）"),
-			"offset": intp("分页偏移，默认 0（可选）"),
-		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			"dsl": str("DSL，如 port==443 AND technology=nginx"), "type": str("可选资产类型，仅用于 DSL"),
+			"id": idp("单个资产 ID"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "最多50个 ID；详情最多5个"},
+			"limit": intp("默认10，最大50"), "offset": intp("列表偏移"), "detail": map[string]any{"type": "boolean"},
+			"fields": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "详情字段组，默认 identity/fingerprint"},
+			"field":  str("详情延期字段 JSON Pointer"), "index": intp("详情集合续页"), "text_offset": intp("详情文本字符偏移"), "max_chars": intp("详情字符预算，默认8000，最大24000"),
+		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
-				return actool.Errorf("list_assets 未启用: AssetStore 未初始化"), nil
+				return actool.Errorf("AssetStore 未初始化"), nil
 			}
 			var a struct {
-				DSL    string  `json:"dsl"`
-				Type   string  `json:"type"`
-				ID     int64   `json:"id"`
-				IDs    []int64 `json:"ids"`
-				Limit  int     `json:"limit"`
-				Offset int     `json:"offset"`
+				DSL        string   `json:"dsl"`
+				Type       string   `json:"type"`
+				ID         int64    `json:"id"`
+				IDs        []int64  `json:"ids"`
+				Limit      int      `json:"limit"`
+				Offset     int      `json:"offset"`
+				Detail     bool     `json:"detail"`
+				Fields     []string `json:"fields"`
+				Field      string   `json:"field"`
+				Index      int      `json:"index"`
+				TextOffset int      `json:"text_offset"`
+				MaxChars   int      `json:"max_chars"`
 			}
-			_ = json.Unmarshal(in, &a)
-			if a.Limit <= 0 {
+			if err := decodeToolInput(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if a.Limit == 0 {
 				a.Limit = 10
 			}
-
+			if a.Limit < 1 || a.Limit > 50 || a.Offset < 0 || a.ID < 0 || len(a.IDs) > 50 {
+				return actool.Errorf("无效分页范围或资产 ID 数量"), nil
+			}
+			if a.Index<0{return actool.Errorf("index 不能为负数"),nil}
+			if a.Type!=""{switch a.Type{case "root_domain","subdomain","ip","service","endpoint","app":default:return actool.Errorf("无效资产类型"),nil}}
+			modes := 0
+			if a.ID > 0 {
+				modes++
+			}
+			if len(a.IDs) > 0 {
+				modes++
+			}
+			a.DSL = strings.TrimSpace(a.DSL)
+			if a.DSL != "" {
+				modes++
+			}
+			if modes != 1 || (a.DSL == "" && a.Type != "") {
+				return actool.Errorf("id、ids、dsl 必须三选一；type 仅用于 DSL"), nil
+			}
+			for _, id := range a.IDs {
+				if id <= 0 {
+					return actool.Errorf("ids 必须为正整数"), nil
+				}
+			}
+			ids := a.IDs
+			if a.ID > 0 {
+				ids = []int64{a.ID}
+			}
+			w := detailWindow{a.TextOffset, a.MaxChars}
+			if err := w.validate(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if a.Detail && (len(ids) == 0 || len(ids) > 5 || a.Offset != 0) {
+				return actool.Errorf("详细模式必须指定1..5个 ID，且不得指定列表 offset"), nil
+			}
+			if !a.Detail && (len(a.Fields) > 0 || a.Field != "" || a.Index != 0 || a.TextOffset != 0 || a.MaxChars != 0) {
+				return actool.Errorf("字段组与详情分页参数需要 detail=true"), nil
+			}
+			if len(a.Fields) == 0 {
+				a.Fields = []string{"identity", "fingerprint"}
+			}
+			for _, group := range a.Fields {
+				switch group {
+				case "identity", "fingerprint", "dns", "params", "auth", "extra":
+				default:
+					return actool.Errorf("未知字段组: " + group), nil
+				}
+			}
+			store := t.as.WithReadContext(ctx).WithToolReadFields(a.Detail, a.Fields)
 			var assets []*db.Asset
 			var err error
-			switch {
-			case a.ID > 0:
-				assets, err = t.as.GetByIDs([]int64{a.ID})
-			case len(a.IDs) > 0:
-				assets, err = t.as.GetByIDs(a.IDs)
-			case a.DSL != "":
-				if t.taskID > 0 {
-					// Apply authorization before LIMIT/OFFSET. Filtering a global page
-					// afterwards can return a short/empty page even when later approved
-					// matches exist, and needlessly reads disallowed rows into the task
-					// agent's process.
-					assets, err = t.as.QueryDSLByTaskApproval(
-						t.taskID, a.DSL, a.Type, "all", db.ApprovalApproved, a.Limit, a.Offset,
-					)
-				} else {
-					assets, err = t.as.QueryDSL(a.DSL, a.Type, a.Limit, a.Offset)
-				}
-			default:
-				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部资产，请提供查询条件"), nil
+			if len(ids) > 0 {
+				assets, err = store.ToolAssetsByIDs(t.taskID, ids)
+			} else if t.taskID > 0 {
+				assets, err = store.QueryDSLByTaskApproval(t.taskID, a.DSL, a.Type, "all", db.ApprovalApproved, a.Limit+1, a.Offset)
+			} else {
+				assets, err = store.QueryDSL(a.DSL, a.Type, a.Limit+1, a.Offset)
 			}
 			if err != nil {
-				return actool.Errorf("DSL 错误: " + err.Error()), nil
+				return actool.Errorf(err.Error()), nil
 			}
-			if t.taskID > 0 && a.DSL == "" {
-				assets, err = t.as.FilterApprovedAssets(t.taskID, assets)
-				if err != nil {
-					return actool.Errorf("查询资产授权状态失败: " + err.Error()), nil
+			more := false
+			if !a.Detail {
+				if len(ids) > 0 {
+					start := min(a.Offset, len(assets))
+					assets = assets[start:]
+				}
+				if len(assets) > a.Limit {
+					more = true
+					assets = assets[:a.Limit]
 				}
 			}
-			return jsonResult(map[string]any{
-				"count":  len(assets),
-				"assets": assets,
-			})
-		},
-	)
+			rows := make([]map[string]any, 0, len(assets))
+			for _, asset := range assets {
+				row := assetSummary(asset, t.taskID > 0)
+				if a.Detail {
+					data := assetFieldGroups(asset, a.Fields)
+					window := w
+					budget := (toolListBudget - 512) / max(1, len(assets))
+					for {
+						projection, err := projectDetail(data, window, a.Field, a.Index)
+						if err != nil {
+							return actool.Errorf(err.Error()), nil
+						}
+						row["details"] = projection
+						encoded, _ := json.Marshal(row)
+						if len([]rune(string(encoded))) <= budget {
+							break
+						}
+						if window.MaxChars <= 1 {
+							return actool.Errorf("详情元数据超出预算，请减少资产数量或指定更具体的 field"), nil
+						}
+						window.MaxChars = max(1, window.MaxChars/2)
+					}
+				}
+				rows = append(rows, row)
+			}
+			cut := false
+			if !a.Detail {
+				rows, cut = budgetRows(rows)
+				more = more || cut
+			}
+			out := map[string]any{"assets": rows, "count": len(rows), "has_more": more, "truncated": cut}
+			if more {
+				out["next_offset"] = a.Offset + len(rows)
+			}
+			return jsonResult(out)
+		})
+}
+
+func assetSummary(a *db.Asset, task bool) map[string]any {
+	identity := *a
+	if u, err := url.Parse(identity.URL); err == nil && u.Host != "" {
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		identity.URL = u.String()
+	}
+	row := map[string]any{"id": a.ID, "type": a.Type, "target": firstLine(assetValue(&identity), 500)}
+	if a.PageTitle != "" {
+		row["page_title"] = firstLine(a.PageTitle, 160)
+	}
+	if a.StatusCode != nil {
+		row["status_code"] = a.StatusCode
+	}
+	if len(a.Technologies) > 0 {
+		tech := make([]string, 0, min(5, len(a.Technologies)))
+		for _, v := range a.Technologies[:min(5, len(a.Technologies))] {
+			tech = append(tech, firstLine(v, 80))
+		}
+		row["technologies"] = tech
+	}
+	if task {
+		row["approval_state"] = db.ApprovalApproved
+		row["task_inherited"] = a.TaskInherited
+		row["task_read_only"] = a.TaskReadOnly
+	}
+	return row
+}
+
+func assetFieldGroups(a *db.Asset, groups []string) map[string]any {
+	out := map[string]any{}
+	for _, g := range groups {
+		switch g {
+		case "identity":
+			out[g] = map[string]any{"domain": a.Domain, "ip": a.IP, "url": a.URL, "port": a.Port, "method": a.Method, "app_name": a.AppName, "bundle_id": a.BundleID}
+		case "fingerprint":
+			out[g] = map[string]any{"page_title": a.PageTitle, "status_code": a.StatusCode, "technologies": a.Technologies, "service_name": a.ServiceName, "favicon_mmh3": a.FaviconMMH3}
+		case "dns":
+			out[g] = map[string]any{"record_type": a.RecordType, "record_value": a.RecordValue, "bound_domains": a.BoundDomains, "open_ports": a.OpenPorts}
+		case "params":
+			out[g] = a.Params
+		case "auth":
+			out[g] = a.Auth
+		case "extra":
+			out[g] = a.Extra
+		}
+	}
+	return out
 }
 
 // listCompanies lets an agent enumerate companies (企业) with their scope + asset count.

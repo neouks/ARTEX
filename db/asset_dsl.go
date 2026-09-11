@@ -511,7 +511,7 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
 	args = append(args, limit, offset)
-	q := assetSelectCols + " WHERE " + where +
+	q := s.selectAssetColumns() + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.query(q, args...)
 	if err != nil {
@@ -547,7 +547,7 @@ func (s *AssetStore) QueryDSLByTaskApproval(taskID int64, dsl, typ, tested, appr
 		return nil, err
 	}
 	args = append(args, limit, offset)
-	query := assetSelectCols + " WHERE " + where +
+	query := s.selectAssetColumns() + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.query(query, args...)
 	if err != nil {

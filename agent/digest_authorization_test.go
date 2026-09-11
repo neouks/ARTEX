@@ -40,7 +40,10 @@ func TestExpandIndexUsesOverviewRepresentative(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := &ToolSet{ts: store, as: as, taskID: task.ID}
-	_, index := tools.coldDigestOverview()
+	_, index, err := tools.coldDigestOverview()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(index) != 1 || index[0]["asset_id"] != assets[0] {
 		t.Fatalf("unexpected representative: %+v", index)
 	}
@@ -96,7 +99,11 @@ func TestDigestAuthorizationAcrossTasks(t *testing.T) {
 	inherited := &ToolSet{ts: d.Exploration(current.ExplorationID), as: as, taskID: current.ID}
 	check := func(tools *ToolSet, allowed bool) {
 		t.Helper()
-		if got := tools.digestAuthorized(store, source.ID, digest); got != allowed {
+		permissions, _, err := tools.digestAuthorizationBatch(store, source.ID, []int64{digest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := permissions[digest]; got != allowed {
 			t.Fatalf("authorized=%v want %v", got, allowed)
 		}
 		if got := len(tools.activeDigestBodies(store, source.ID)) > 0; got != allowed {
@@ -127,7 +134,7 @@ func TestDigestAuthorizationAcrossTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(local, false)
-	if cds, idx := local.coldDigestOverview(); len(cds) != 0 || len(idx) != 0 {
+	if cds, idx, err := local.coldDigestOverview(); err != nil || len(cds) != 0 || len(idx) != 0 {
 		t.Fatal("blocked digest leaked through index")
 	}
 	n, err := store.GetNode(member)
