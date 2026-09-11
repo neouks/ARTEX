@@ -273,35 +273,6 @@ func (s *AssetStore) isTaskAssetBlocked(taskID, assetID int64) (bool, string, er
 	return blocked, reason, err
 }
 
-func (s *AssetStore) taskAssetLinkState(taskID, assetID int64) (state string, exists bool, err error) {
-	err = s.db.QueryRow(`SELECT approval_state FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, taskID, assetID).Scan(&state)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	return state, err == nil, err
-}
-
-// validateTaskAssetApprovedInTask validates one concrete authorization owner.
-// Services and endpoints are never more permissive than a linked parent
-// root-domain, subdomain, or IP in that same task.
-func (s *AssetStore) validateTaskAssetApprovedInTask(taskID int64, asset *Asset) error {
-	var state string
-	if err := s.db.QueryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, asset.ID).Scan(&state); err != nil {
-		return err
-	}
-	switch state {
-	case ApprovalApproved:
-		return nil
-	case "blocked":
-		return fmt.Errorf("%w: asset %d 或其父域名/IP已封禁", ErrTaskAssetBlocked, asset.ID)
-	default:
-		if asset.Type == "service" || asset.Type == "endpoint" {
-			return fmt.Errorf("%w: asset %d 父域名/IP未授权或缺少可确认父主机（%s）", ErrTaskAssetNotApproved, asset.ID, state)
-		}
-		return fmt.Errorf("%w: asset %d 状态为 %s", ErrTaskAssetNotApproved, asset.ID, state)
-	}
-}
-
 // ValidateTaskAssetsApproved is the common admission check used by Planner,
 // Worker and write-back tools. Empty ids are valid for global directions. A
 // current-task link is authoritative; when none exists, a directly inherited
@@ -314,63 +285,42 @@ func (s *AssetStore) ValidateTaskAssetsApproved(taskID int64, assetIDs []int64) 
 	if err != nil {
 		return err
 	}
+	states, err := s.taskAssetStates(taskID, ids)
+	if err != nil {
+		return err
+	}
 	for _, id := range ids {
-		asset, err := s.taskAssetRow(id)
-		if err != nil {
-			return err
-		}
-		// A task-local deletion tombstone always wins, including over an
-		// otherwise-approved inherited source asset.
-		if blocked, reason, err := s.isTaskAssetBlocked(taskID, id); err != nil {
-			return err
-		} else if blocked {
-			return fmt.Errorf("%w: asset %d: %s", ErrTaskAssetBlocked, id, reason)
-		}
-		if _, exists, err := s.taskAssetLinkState(taskID, id); err != nil {
-			return err
-		} else if exists {
-			if err := s.validateTaskAssetApprovedInTask(taskID, asset); err != nil {
-				return err
-			}
-			continue
-		}
-
-		sourceRows, err := s.db.Query(`SELECT relation.source_task_id
-FROM task_relations relation
-JOIN task_asset_links link ON link.task_id=relation.source_task_id AND link.asset_id=$2
-WHERE relation.task_id=$1 ORDER BY relation.source_task_id`, taskID, id)
-		if err != nil {
-			return err
-		}
-		var sourceIDs []int64
-		for sourceRows.Next() {
-			var sourceID int64
-			if err := sourceRows.Scan(&sourceID); err != nil {
-				sourceRows.Close()
-				return err
-			}
-			sourceIDs = append(sourceIDs, sourceID)
-		}
-		if err := sourceRows.Close(); err != nil {
-			return err
-		}
-		var sourceErr error
-		for _, sourceID := range sourceIDs {
-			if err := s.validateTaskAssetApprovedInTask(sourceID, asset); err == nil {
-				sourceErr = nil
-				break
-			} else {
-				sourceErr = err
-			}
-		}
-		if len(sourceIDs) == 0 {
-			return fmt.Errorf("%w: asset %d 未关联当前任务或直接来源任务", ErrTaskAssetNotApproved, id)
-		}
-		if sourceErr != nil {
-			return fmt.Errorf("%w: asset %d 的来源任务授权无效: %v", ErrTaskAssetNotApproved, id, sourceErr)
+		switch states[id] {
+		case ApprovalApproved:
+		case "":
+			return ErrTaskAssetAssetNotFound
+		case ApprovalBlocked:
+			return fmt.Errorf("%w: asset %d 或其父资产已封禁", ErrTaskAssetBlocked, id)
+		default:
+			return fmt.Errorf("%w: asset %d 状态为 %s", ErrTaskAssetNotApproved, id, states[id])
 		}
 	}
 	return nil
+}
+
+// taskAssetStates batches admission reads in one statement and one MVCC snapshot.
+func (s *AssetStore) taskAssetStates(taskID int64, ids []int64) (map[int64]string, error) {
+	rows, err := s.query(`SELECT id,task_asset_effective_approval_state($1,id)
+FROM assets WHERE id=ANY($2::bigint[])`, taskID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make(map[int64]string, len(ids))
+	for rows.Next() {
+		var id int64
+		var state string
+		if err := rows.Scan(&id, &state); err != nil {
+			return nil, err
+		}
+		states[id] = state
+	}
+	return states, rows.Err()
 }
 
 // FilterApprovedAssets removes task assets that are pending, revoked, or
@@ -380,12 +330,21 @@ func (s *AssetStore) FilterApprovedAssets(taskID int64, assets []*Asset) ([]*Ass
 	if taskID <= 0 || len(assets) == 0 {
 		return assets, nil
 	}
+	ids := make([]int64, 0, len(assets))
+	for _, asset := range assets {
+		ids = append(ids, asset.ID)
+	}
+	states, err := s.taskAssetStates(taskID, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]*Asset, 0, len(assets))
 	for _, asset := range assets {
-		if err := s.ValidateTaskAssetsApproved(taskID, []int64{asset.ID}); err == nil {
+		if states[asset.ID] == "" {
+			return nil, ErrTaskAssetAssetNotFound
+		}
+		if states[asset.ID] == ApprovalApproved {
 			out = append(out, asset)
-		} else if !errors.Is(err, ErrTaskAssetBlocked) && !errors.Is(err, ErrTaskAssetNotApproved) {
-			return nil, err
 		}
 	}
 	return out, nil
@@ -422,7 +381,7 @@ func (s *AssetStore) ValidateTaskHostsApproved(taskID int64, hosts []string) err
 func (s *AssetStore) validateTaskHostApproved(taskID int64, host string) error {
 	var template, blockReason, deniedState string
 	var templateAllows, exactPending, exactApproved, ancestorPending bool
-	err := s.db.QueryRow(`WITH task_policy AS (
+	err := s.queryRow(`WITH task_policy AS (
  SELECT asset_approval_template FROM tasks WHERE id=$1 AND deleted_at IS NULL
 ), context_tasks AS (
  SELECT $1::bigint AS task_id
@@ -534,7 +493,7 @@ func (s *AssetStore) markAgentSideEffectParentsPending(taskID int64, discovered 
 			ips[ip] = true
 		}
 	}
-	rows, err := s.db.Query(`SELECT a.id,a.type,COALESCE(a.domain,''),COALESCE(a.ip,''),
+	rows, err := s.query(`SELECT a.id,a.type,COALESCE(a.domain,''),COALESCE(a.ip,''),
 l.source,l.approval_state,COALESCE(l.approved_by,''),COALESCE(l.approval_reason,'')
 FROM task_asset_links l JOIN assets a ON a.id=l.asset_id
 WHERE l.task_id=$1 AND a.type IN ('root_domain','subdomain','ip')`, taskID)
@@ -603,7 +562,7 @@ func (s *AssetStore) RegisterAgentDiscoveredAsset(taskID, assetID int64, agentKe
 			return "", err
 		}
 		var state string
-		if err := s.db.QueryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
+		if err := s.queryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
 			return "", err
 		}
 		if state == "blocked" {
@@ -618,7 +577,7 @@ func (s *AssetStore) RegisterAgentDiscoveredAsset(taskID, assetID int64, agentKe
 	// approves it again. Agent rediscovery must not turn that decision into a
 	// pending or approved link merely because the global asset row still exists.
 	var existingState, existingSource, existingActor string
-	err = s.db.QueryRow(`SELECT approval_state,source,COALESCE(approved_by,'') FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, taskID, assetID).
+	err = s.queryRow(`SELECT approval_state,source,COALESCE(approved_by,'') FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, taskID, assetID).
 		Scan(&existingState, &existingSource, &existingActor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
@@ -658,7 +617,7 @@ FROM assets a WHERE l.task_id=$1 AND l.asset_id=a.id AND l.approval_state='appro
 	  AND l.source NOT IN ('manual','direct','company','api','task','legacy') AND a.type IN ('root_domain','subdomain','ip')
   AND (a.domain=$2 OR ($3<>'' AND a.ip=$3) OR ($4<>'' AND (a.domain=$4 OR a.root_domain=$4)))`, taskID, asset.RootDomain, asset.IP, host)
 	}
-	if err := s.db.QueryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
+	if err := s.queryRow(`SELECT task_asset_owner_approval_state($1,$2)`, taskID, assetID).Scan(&state); err != nil {
 		return "", err
 	}
 	return state, nil
@@ -825,7 +784,7 @@ func (s *AssetStore) RunningIntentIDsForAssets(taskID int64, assetIDs []int64) (
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`WITH selected AS (
+	rows, err := s.query(`WITH selected AS (
  SELECT task_asset_host(assets) AS host FROM assets WHERE id=ANY($2::bigint[]) AND type IN ('root_domain','subdomain','ip')
 ), targets AS (
  SELECT a.id FROM assets a WHERE a.id=ANY($2::bigint[])
@@ -855,7 +814,7 @@ WHERE t.id=$1`, taskID, ids)
 // ListTaskAssetApprovals returns all links plus tombstone-only rows for the
 // current task. It is intentionally task-scoped and never used by global assets.
 func (s *AssetStore) ListTaskAssetApprovals(taskID int64) ([]TaskAssetApproval, error) {
-	rows, err := s.db.Query(`WITH inherited_link AS (
+	rows, err := s.query(`WITH inherited_link AS (
   SELECT DISTINCT ON (l.asset_id)
          l.asset_id,l.source,l.source_summary,l.source_node_id,
          l.task_id AS source_task_id,l.created_at,task_asset_owner_approval_state(l.task_id,l.asset_id) AS approval_state,
@@ -920,6 +879,16 @@ ORDER BY 8,1,7`, taskID)
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	// Most tasks have no tombstones. Avoid one detail query per approval row
+	// (and another per inherited row) in that common case.
+	var hasBlocks bool
+	if err := s.queryRow(`SELECT EXISTS(SELECT 1 FROM task_asset_blocks
+WHERE task_id=$1 OR task_id IN (SELECT source_task_id FROM task_relations WHERE task_id=$1))`, taskID).Scan(&hasBlocks); err != nil {
+		return nil, err
+	}
+	if !hasBlocks {
+		return out, nil
+	}
 	for i := range out {
 		if out[i].Blocked || out[i].AssetID <= 0 {
 			continue
@@ -954,7 +923,7 @@ ORDER BY 8,1,7`, taskID)
 func (s *AssetStore) taskAssetBlockInfo(taskID, assetID int64) (bool, *time.Time, string, string, error) {
 	var at time.Time
 	var reason, actor string
-	err := s.db.QueryRow(`SELECT b.blocked_at,b.reason,b.blocked_by
+	err := s.queryRow(`SELECT b.blocked_at,b.reason,b.blocked_by
 FROM task_asset_blocks b JOIN assets a ON a.id=$2
 WHERE b.task_id=$1 AND (b.asset_id=a.id OR b.asset_key=task_asset_identity_key(a)
  OR (b.asset_type IN ('root_domain','subdomain','ip') AND task_asset_host_within(task_asset_host(a),b.host_key)))
@@ -1298,7 +1267,7 @@ func (s *AssetStore) hydrateTaskAssetSources(taskID int64, assets []*Asset) erro
 		ids = append(ids, asset.ID)
 		byID[asset.ID] = asset
 	}
-	rows, err := s.db.Query(`WITH candidates AS (
+	rows, err := s.query(`WITH candidates AS (
   SELECT link.asset_id,link.task_id AS source_task_id,false AS inherited,
          link.source,link.source_summary,link.source_node_id,link.tested,link.tested_at,
          COALESCE(link.tested_by,'') AS tested_by,task_asset_owner_approval_state(link.task_id,link.asset_id) AS approval_state,link.approved_at,
@@ -1385,7 +1354,7 @@ FROM ranked WHERE ordinal=1`, taskID, ids)
 		key, assetType, host, reason, kind string
 		at                                 time.Time
 	}
-	blockRows, err := s.db.Query(`SELECT asset_key,asset_type,host_key,blocked_at,reason,block_kind FROM task_asset_blocks WHERE task_id=$1`, taskID)
+	blockRows, err := s.query(`SELECT asset_key,asset_type,host_key,blocked_at,reason,block_kind FROM task_asset_blocks WHERE task_id=$1`, taskID)
 	if err != nil {
 		return err
 	}
@@ -1469,7 +1438,7 @@ FROM ranked WHERE ordinal=1`, taskID, ids)
 // task's direct sources. Inherited non-terminal intents remain hidden, matching
 // the existing source-aware session contract.
 func (s *AssetStore) IntentAssets(taskID int64) ([]IntentAsset, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 WITH context AS (
     SELECT task.id AS task_id, task.exploration_id, false AS inherited
     FROM tasks task

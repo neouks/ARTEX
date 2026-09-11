@@ -64,6 +64,8 @@ type Task struct {
 	Store                 *pgdb.ExplorationStore `json:"-"`
 	Guard                 *guard.Guard           `json:"-"`
 	notify                chan struct{}
+	workerWakeMu          sync.Mutex
+	workerWake            chan struct{}
 	lifecycleMu           sync.RWMutex
 	llmMu                 sync.RWMutex
 
@@ -1771,10 +1773,31 @@ func (m *Manager) List() []*Task {
 // Notify signals that the asset/exploration graph changed (debounced consumer
 // wakes the planner). Non-blocking.
 func (t *Task) Notify() {
+	t.wakeWorkers()
 	select {
 	case t.notify <- struct{}{}:
 	default:
 	}
+}
+
+// Each waiter captures a generation before checking the frontier. Closing that
+// generation broadcasts changes without stealing the Planner's notification.
+func (t *Task) workerSignal() <-chan struct{} {
+	t.workerWakeMu.Lock()
+	defer t.workerWakeMu.Unlock()
+	if t.workerWake == nil {
+		t.workerWake = make(chan struct{})
+	}
+	return t.workerWake
+}
+
+func (t *Task) wakeWorkers() {
+	t.workerWakeMu.Lock()
+	defer t.workerWakeMu.Unlock()
+	if t.workerWake != nil {
+		close(t.workerWake)
+	}
+	t.workerWake = make(chan struct{})
 }
 
 // NotifyDone is Notify plus a hint: a worker just finished intentID and that is

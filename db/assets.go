@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -106,6 +107,31 @@ type AssetStore struct {
 	db      *DB
 	company *CompanyStore
 	tx      *sql.Tx
+	readCtx context.Context
+}
+
+// WithReadContext returns a request-local store; shared stores are never mutated.
+// The context bounds read queries and connection-pool waits, not write transactions.
+func (s *AssetStore) WithReadContext(ctx context.Context) *AssetStore {
+	copy := *s
+	copy.readCtx = ctx
+	return &copy
+}
+
+func (s *AssetStore) query(query string, args ...any) (*sql.Rows, error) {
+	ctx := s.readCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.db.QueryContext(ctx, query, args...)
+}
+
+func (s *AssetStore) queryRow(query string, args ...any) *sql.Row {
+	ctx := s.readCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.db.QueryRowContext(ctx, query, args...)
 }
 
 // Assets returns the asset store.
@@ -1260,7 +1286,7 @@ func (s *AssetStore) QueryByType(typ string, limit, offset int) ([]*Asset, error
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 SELECT id, type, company_id, array_to_json(task_ids)::text,
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
@@ -1285,7 +1311,7 @@ LIMIT $2 OFFSET $3`, typ, limit, offset)
 // CountByType returns the total number of assets of a type (for server-side pagination).
 func (s *AssetStore) CountByType(typ string) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT count(*) FROM assets WHERE type = $1`, typ).Scan(&n)
+	err := s.queryRow(`SELECT count(*) FROM assets WHERE type = $1`, typ).Scan(&n)
 	return n, err
 }
 
@@ -1309,7 +1335,7 @@ FROM assets WHERE company_id = $1`
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
 	}
 	q += pageClause(&args, limit, offset)
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1325,7 +1351,7 @@ func (s *AssetStore) CountByCompany(companyID int64, typ string) (int, error) {
 		q += fmt.Sprintf(` AND type = $%d`, len(args))
 	}
 	var n int
-	err := s.db.QueryRow(q, args...).Scan(&n)
+	err := s.queryRow(q, args...).Scan(&n)
 	return n, err
 }
 
@@ -1430,7 +1456,7 @@ FROM assets WHERE ` + taskAssetContextAssociationSQL("assets", "$1")
 		q += ` AND ` + taskAssetBlockedSQL("assets", "$1")
 	}
 	q += pageClause(&args, limit, offset)
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1473,12 +1499,12 @@ func (s *AssetStore) CountByTaskApproval(taskID int64, typ, tested, approval str
 		q += ` AND ` + taskAssetBlockedSQL("assets", "$1")
 	}
 	var n int
-	err := s.db.QueryRow(q, args...).Scan(&n)
+	err := s.queryRow(q, args...).Scan(&n)
 	return n, err
 }
 
 func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE `+taskAssetContextAssociationSQL("assets", "$1")+` GROUP BY type`, taskID)
+	rows, err := s.query(`SELECT type, COUNT(*) FROM assets WHERE `+taskAssetContextAssociationSQL("assets", "$1")+` GROUP BY type`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1506,7 +1532,7 @@ func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
 // assets. Domain/IP columns cover root domains, subdomains and non-HTTP
 // services; URL covers HTTP services and endpoints.
 func (s *AssetStore) HostsByTask(taskID int64) ([]string, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 SELECT COALESCE(domain,''), COALESCE(ip,''), COALESCE(url,'')
 FROM assets WHERE $1 = ANY(task_ids)`, taskID)
 	if err != nil {
@@ -1655,7 +1681,7 @@ func (s *AssetStore) GetByIDs(ids []int64) ([]*Asset, error) {
 		args[i] = id
 	}
 	sql := assetSelectCols + " WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY last_seen DESC"
-	rows, err := s.db.Query(sql, args...)
+	rows, err := s.query(sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1685,7 +1711,7 @@ func (s *AssetStore) DeleteByHost(host string) (map[string]int64, error) {
 	if h == "" {
 		return nil, fmt.Errorf("host is required")
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 DELETE FROM assets
 WHERE domain = $1 OR root_domain = $1 OR ip = $1
 RETURNING type`, h)
@@ -1724,7 +1750,7 @@ func (s *AssetStore) DeleteByIDs(ids []int64) (int64, error) {
 
 // CountsByType returns asset counts per type.
 func (s *AssetStore) CountsByType() (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets GROUP BY type`)
+	rows, err := s.query(`SELECT type, COUNT(*) FROM assets GROUP BY type`)
 	if err != nil {
 		return nil, err
 	}

@@ -181,13 +181,19 @@ func TestAppendIPPort(t *testing.T) {
 func TestUpsertSubdomain(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
+	// DNS evidence requires a real task; don't depend on task 1 left by another test.
+	task, err := d.CreateTaskWithOptions("subdomain test", "test", TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
 
 	id, err := av2.UpsertSubdomain(UpsertSubdomainReq{
 		Domain:      "sub.subdtest.com",
 		RecordType:  "A",
 		RecordValue: []string{"1.2.3.4"},
 		ICP:         "B99",
-		TaskID:      1,
+		TaskID:      task.ID,
 	})
 	if err != nil {
 		t.Fatal(err)

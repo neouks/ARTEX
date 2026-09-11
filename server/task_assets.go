@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -57,13 +59,21 @@ func (s *Server) listTaskAssetApprovals(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	as = as.WithReadContext(ctx)
 	id, _ := parseTaskID(task.ID)
 	if groupBy := r.URL.Query().Get("group_by"); groupBy != "" && groupBy != "host" {
 		writeErr(w, 400, "group_by 必须是 host 或省略")
 		return
 	}
 	if r.URL.Query().Get("group_by") == "host" {
-		items, err := s.m.Assets().ListTaskAssetApprovalGroups(id)
+		items, err := as.ListTaskAssetApprovalGroups(id)
 		if err != nil {
 			writeTaskAssetError(w, err)
 			return
@@ -71,7 +81,7 @@ func (s *Server) listTaskAssetApprovals(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 		return
 	}
-	items, err := s.m.Assets().ListTaskAssetApprovals(id)
+	items, err := as.ListTaskAssetApprovals(id)
 	if err != nil {
 		writeTaskAssetError(w, err)
 		return

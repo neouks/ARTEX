@@ -876,6 +876,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.BeginLLMCall(t.ID)
 		planCtx := agent.WithRunInfo(ectx, agent.RunInfo{Trigger: src})
 		met, reason, err := planner.Plan(planCtx, taskIDInt, e.m.assets, t.Guard, t.Store, t.Goal, triggers, emit)
+		t.wakeWorkers()
 		e.EndLLMCall(t.ID)
 		if err == nil && observedRevisionErr == nil {
 			e.plannerRevision.Store(t.ID, observedRevision)
@@ -915,47 +916,65 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 }
 
 func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
+	idle := false
+	wake := t.workerSignal()
 	for {
+		if idle {
+			timer := time.NewTimer(30 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-wake:
+			case <-timer.C:
+			}
+			timer.Stop()
+			wake = t.workerSignal()
+		}
+		if !idle {
+			wake = t.workerSignal()
+		}
+		idle = true
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		_, worker := e.snapshotFor(t)
-		if worker == nil {
-			if sleepCtx(ctx, 1500*time.Millisecond) {
-				return
-			}
-			continue
-		}
 		if e.IsPaused(t.ID) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
 			continue // user-paused: don't claim/execute intents
 		}
 		if e.IsDeleting(t.ID) {
 			return
 		}
 		if e.isSettling(t.ID) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
 			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
 			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
+		}
+		// Provider resolution reads configuration. Do it only when work exists.
+		if active, err := t.Store.HasOpenIntent(); err != nil || !active {
+			select {
+			case <-wake:
+				idle = false
+			default:
+			}
+			continue
+		}
+		_, worker := e.snapshotFor(t)
+		if worker == nil {
+			continue
 		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
 		claimed := e.runWorkerStep(ctx, t, name, worker)
 		e.decInflight(t.ID)
-		if !claimed && sleepCtx(ctx, 800*time.Millisecond) {
-			return
+		idle = !claimed
+		select {
+		case <-wake:
+			idle = false
+		default:
 		}
 	}
 }

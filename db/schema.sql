@@ -14,9 +14,16 @@ $$ LANGUAGE plpgsql;
 -- 不用 pg_input_is_valid 是因为那要 PG16+，这里要兼容更老的存量库。
 CREATE OR REPLACE FUNCTION try_inet(value text) RETURNS inet AS $$
 BEGIN
-    RETURN value::inet;
-EXCEPTION WHEN others THEN
-    RETURN NULL;
+    -- Ordinary DNS names are not inet candidates. Avoid opening/rolling back a
+    -- PL/pgSQL exception subtransaction for every domain in authorization scans.
+    IF strpos(value, ':')=0 AND value !~ '^[[:space:]0-9./]+$' THEN
+        RETURN NULL;
+    END IF;
+    BEGIN
+        RETURN value::inet;
+    EXCEPTION WHEN others THEN
+        RETURN NULL;
+    END;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
@@ -699,10 +706,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
+-- Identity normalization depends only on asset fields, not task authorization.
+-- Compute it on writes so task-wide reads don't normalize every parent for
+-- every endpoint. Generated storage also stays correct for imports and SQL writes.
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS authorization_host TEXT GENERATED ALWAYS AS (
+    task_asset_normalized_host(COALESCE(NULLIF(btrim(domain),''),
+    NULLIF(btrim(ip),''), CASE WHEN url ~ '^[a-zA-Z][a-zA-Z0-9+.-]*://' THEN url END,''))
+) STORED;
+
 CREATE OR REPLACE FUNCTION task_asset_host(asset assets)
 RETURNS TEXT AS $$
-SELECT task_asset_normalized_host(COALESCE(NULLIF(btrim(asset.domain),''),
-    NULLIF(btrim(asset.ip),''), CASE WHEN asset.url ~ '^[a-zA-Z][a-zA-Z0-9+.-]*://' THEN asset.url END,''));
+SELECT asset.authorization_host;
 $$ LANGUAGE SQL IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION task_asset_host_within(child_host TEXT, parent_host TEXT)
@@ -733,7 +747,11 @@ $$ LANGUAGE SQL IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION task_asset_blocked(p_task_id BIGINT, p_asset_id BIGINT)
 RETURNS BOOLEAN AS $$
-SELECT EXISTS (
+BEGIN
+IF NOT EXISTS (SELECT 1 FROM task_asset_blocks WHERE task_id=p_task_id) THEN
+    RETURN false;
+END IF;
+RETURN EXISTS (
     SELECT 1 FROM task_asset_blocks block JOIN assets t ON t.id=p_asset_id
     WHERE block.task_id=p_task_id
       AND (block.asset_id=p_asset_id
@@ -741,7 +759,8 @@ SELECT EXISTS (
            OR (block.asset_type IN ('root_domain','subdomain','ip') AND block.host_key<>''
                AND task_asset_host_within(task_asset_host(t),block.host_key)))
 );
-$$ LANGUAGE SQL STABLE;
+END;
+$$ LANGUAGE plpgsql STABLE;
 
 -- An owner's services/endpoints have no independent approval decision: all
 -- matching parent hosts must be approved, and a missing parent fails closed.
@@ -776,28 +795,25 @@ $$ LANGUAGE SQL STABLE;
 -- related source may supply authorization. Current-task tombstones always win.
 CREATE OR REPLACE FUNCTION task_asset_effective_approval_state(p_task_id BIGINT, p_asset_id BIGINT)
 RETURNS TEXT AS $$
-WITH auth_tasks AS (
-    SELECT p_task_id AS task_id
-    WHERE EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
-    UNION ALL
-    SELECT relation.source_task_id
-    FROM task_relations relation
-    WHERE relation.task_id=p_task_id
-      AND NOT EXISTS (SELECT 1 FROM task_asset_links l WHERE l.task_id=p_task_id AND l.asset_id=p_asset_id)
-), candidate_states AS (
-    SELECT task_asset_owner_approval_state(auth.task_id,p_asset_id) AS state
-    FROM auth_tasks auth
-    JOIN task_asset_links own ON own.task_id=auth.task_id AND own.asset_id=p_asset_id
-)
-SELECT CASE
-  WHEN task_asset_blocked(p_task_id,p_asset_id) THEN 'blocked'
-  ELSE COALESCE((
-    SELECT state FROM candidate_states
+DECLARE result TEXT;
+BEGIN
+    IF EXISTS (SELECT 1 FROM task_asset_links WHERE task_id=p_task_id AND asset_id=p_asset_id) THEN
+        -- The owner check already enforces this task's tombstones.
+        RETURN task_asset_owner_approval_state(p_task_id,p_asset_id);
+    END IF;
+    IF task_asset_blocked(p_task_id,p_asset_id) THEN RETURN 'blocked'; END IF;
+    WITH candidate_states AS MATERIALIZED (
+        SELECT task_asset_owner_approval_state(relation.source_task_id,p_asset_id) AS state
+        FROM task_relations relation
+        JOIN task_asset_links own ON own.task_id=relation.source_task_id AND own.asset_id=p_asset_id
+        WHERE relation.task_id=p_task_id
+    )
+    SELECT state INTO result FROM candidate_states
     ORDER BY CASE state WHEN 'approved' THEN 0 WHEN 'pending' THEN 1 WHEN 'revoked' THEN 2 ELSE 3 END
-    LIMIT 1
-  ), 'revoked')
+    LIMIT 1;
+    RETURN COALESCE(result,'revoked');
 END;
-$$ LANGUAGE SQL STABLE;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE OR REPLACE FUNCTION task_asset_effectively_approved(p_task_id BIGINT, p_asset_id BIGINT)
 RETURNS BOOLEAN AS $$

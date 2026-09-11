@@ -485,7 +485,7 @@ func (s *AssetStore) CountDSL(dsl, typ string) (int, error) {
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
 	var n int
-	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
+	err = s.queryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
 	return n, err
 }
 
@@ -513,7 +513,7 @@ func (s *AssetStore) QueryDSL(dsl, typ string, limit, offset int) ([]*Asset, err
 	args = append(args, limit, offset)
 	q := assetSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +530,7 @@ func (s *AssetStore) CountDSLByTaskApproval(taskID int64, dsl, typ, tested, appr
 		return 0, err
 	}
 	var count int
-	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&count)
+	err = s.queryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&count)
 	return count, err
 }
 
@@ -549,7 +549,7 @@ func (s *AssetStore) QueryDSLByTaskApproval(taskID int64, dsl, typ, tested, appr
 	args = append(args, limit, offset)
 	query := assetSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.query(query, args...)
 	if err != nil {
 		return nil, err
 	}

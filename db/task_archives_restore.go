@@ -479,6 +479,12 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 	}
 	mapping := make(map[int64]int64, len(rows))
 	warnings := []string{}
+	// Generated identity fields must be recomputed, including for old archives.
+	var assetColumns string
+	if err := tx.QueryRow(`SELECT string_agg(quote_ident(attname),',' ORDER BY attnum)
+FROM pg_attribute WHERE attrelid='assets'::regclass AND attnum>0 AND NOT attisdropped AND attgenerated=''`).Scan(&assetColumns); err != nil {
+		return nil, nil, err
+	}
 	for _, row := range rows {
 		oldID, ok := jsonInt64(row["id"])
 		if !ok || oldID <= 0 {
@@ -508,7 +514,7 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 		}
 		row["task_ids"] = mergeJSONTaskID(row["task_ids"], taskID)
 		assetRaw, _ := json.Marshal(row)
-		res, err := tx.Exec(`INSERT INTO assets SELECT * FROM json_populate_record(NULL::assets,$1::json) ON CONFLICT DO NOTHING`, string(assetRaw))
+		res, err := tx.Exec(`INSERT INTO assets (`+assetColumns+`) SELECT `+assetColumns+` FROM json_populate_record(NULL::assets,$1::json) ON CONFLICT DO NOTHING`, string(assetRaw))
 		if err != nil {
 			return nil, nil, err
 		}

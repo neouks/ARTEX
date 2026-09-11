@@ -1129,6 +1129,25 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running')`, s.expID).Scan(&
 	return exists, err
 }
 
+// HasOpenIntent is a cheap preflight before resolving a Worker's model config.
+// ClaimIntent remains responsible for the authoritative execution checks.
+func (s *ExplorationStore) HasOpenIntent() (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='open')`, s.expID).Scan(&exists)
+	return exists, err
+}
+
+// ExecutionCounts avoids loading node payloads just to render task status.
+func (s *ExplorationStore) ExecutionCounts() (running, goals, met int, err error) {
+	err = s.db.QueryRow(`SELECT
+count(*) FILTER (WHERE kind='intent' AND state='running'),
+count(*) FILTER (WHERE kind='goal'),
+count(*) FILTER (WHERE kind='goal' AND state='met')
+FROM exploration_nodes WHERE exploration_id=$1 AND kind IN ('intent','goal')`, s.expID).Scan(&running, &goals, &met)
+	return
+}
+
 // BlackboardRevision returns a deterministic hash of the blackboard visible to
 // this exploration (local plus direct source tasks). Activity transcripts remain
 // excluded, but task-visible assets and scope are included because asynchronous
@@ -1403,7 +1422,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
 			FROM activity
 			WHERE exploration_id=task.exploration_id
-			ORDER BY created_at DESC
+			ORDER BY activity.created_at DESC
 			LIMIT 1
 		) latest_activity ON true
 		LEFT JOIN LATERAL (

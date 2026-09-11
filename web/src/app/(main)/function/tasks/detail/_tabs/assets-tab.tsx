@@ -424,7 +424,10 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit reload nonce.
   React.useEffect(() => {
     let active = true;
+    let inFlight = false;
     const load = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
       try {
         const [current, nextCounts] = await Promise.all([
           api.taskAssets(taskId, tab, size, page * size, testedFilter, approvalFilter),
@@ -437,6 +440,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       } catch (reason) {
         if (active) toast.error(`加载任务资产失败：${String((reason as Error)?.message ?? reason)}`);
       } finally {
+        inFlight = false;
         if (active) setLoaded(true);
       }
     };

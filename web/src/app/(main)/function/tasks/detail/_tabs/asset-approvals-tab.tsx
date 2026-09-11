@@ -98,10 +98,17 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
   React.useEffect(() => {
     let active = true;
-    const refresh = () => {
-      if (active) void load();
+    let inFlight = false;
+    const refresh = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
+      try {
+        await load();
+      } finally {
+        inFlight = false;
+      }
     };
-    refresh();
+    void refresh();
     const timer = setInterval(refresh, 10_000);
     return () => {
       active = false;

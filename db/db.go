@@ -136,6 +136,12 @@ func Open(dsn string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound runtime pressure and retain enough idle connections to avoid the
+	// default two-connection pool repeatedly reconnecting during request bursts.
+	sqlDB.SetMaxOpenConns(20)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	if err := sqlDB.Ping(); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)

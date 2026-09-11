@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -324,6 +326,9 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	as = as.WithReadContext(ctx)
 	typ := q.Get("type")
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -415,6 +420,9 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var counts map[string]int
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	as = as.WithReadContext(ctx)
 	var err error
 	if taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64); taskID > 0 {
 		counts, err = as.CountsByTypeForTask(taskID)
