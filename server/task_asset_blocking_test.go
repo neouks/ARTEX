@@ -30,6 +30,7 @@ func TestAssetBlockAPICancelsOnlyCurrentTaskWorkers(t *testing.T) {
 	s := &Server{m: manager, engine: engine}
 	var tasks []*db.Task
 	var contexts []context.Context
+	var observedContext context.Context
 	var root int64
 	for i := 0; i < 2; i++ {
 		task, err := pg.CreateTask("block API", "goal", nil, 0, 0)
@@ -60,6 +61,26 @@ func TestAssetBlockAPICancelsOnlyCurrentTaskWorkers(t *testing.T) {
 		defer cancel(nil)
 		contexts = append(contexts, ctx)
 		engine.registerWork(intent, cancel)
+		if i == 0 {
+			other, err := assets.UpsertRootDomain(db.UpsertRootDomainReq{Domain: fmt.Sprintf("other-plan-%d.test", task.ID), TaskID: task.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observing, err := pg.Exploration(task.ExplorationID).AddIntent(map[string]any{"summary": "another approved plan"}, 5, []int64{other}, "planner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := pg.Exploration(task.ExplorationID).ClaimIntent(observing, "worker"); err != nil || !ok {
+				t.Fatal("claim observing worker", err)
+			}
+			if err := assets.RememberWorkerAccess(task.ID, observing, []string{host}, nil); err != nil {
+				t.Fatal(err)
+			}
+			var cancelObserved context.CancelCauseFunc
+			observedContext, cancelObserved = context.WithCancelCause(context.Background())
+			defer cancelObserved(nil)
+			engine.registerWork(observing, cancelObserved)
+		}
 	}
 	for _, operation := range []string{"block", "approve"} {
 		body, _ := json.Marshal(map[string]any{"asset_ids": []int64{root}})
@@ -90,6 +111,9 @@ func TestAssetBlockAPICancelsOnlyCurrentTaskWorkers(t *testing.T) {
 	}
 	if contexts[1].Err() != nil {
 		t.Fatal("other task worker was cancelled")
+	}
+	if observedContext.Err() == nil {
+		t.Fatal("worker that accessed host without planning anchor was not cancelled")
 	}
 	if err := assets.ValidateTaskAssetsApproved(tasks[1].ID, []int64{root}); err != nil {
 		t.Fatal(err)

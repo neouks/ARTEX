@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -29,13 +30,25 @@ type TaskAssetPolicy struct {
 // Intent identity survives worker slot reuse and transcript compaction.
 func AssetSkipScope(ctx context.Context) string {
 	ri := llmrec.RunInfoFrom(ctx)
-	if ri.IntentID > 0 {
+	if ri.AgentKey == "worker" && ri.IntentID > 0 {
 		return fmt.Sprintf("worker:%d", ri.IntentID)
 	}
 	if ri.AgentKey == "planner" {
 		return "planner"
 	}
 	return "mainagent"
+}
+
+// Worker scope is emitted only from trusted run context / signed proxy tags.
+func WorkerScopeIntent(scope string) int64 {
+	if !strings.HasPrefix(scope, "worker:") {
+		return 0
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(scope, "worker:"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // AssetPolicyHooks wraps an existing hook runner and blocks pending, revoked or
@@ -73,6 +86,13 @@ type assetPolicyHooks struct {
 
 func (h assetPolicyHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
 	h.policy.Scope = AssetSkipScope(ctx)
+	ri := llmrec.RunInfoFrom(ctx)
+	if ri.AgentKey != "worker" || ri.TaskID != h.policy.TaskID {
+		h.policy.Scope = "mainagent"
+		if ri.AgentKey == "planner" {
+			h.policy.Scope = "planner"
+		}
+	}
 	if reason, audit := h.policy.check(name, input); reason != "" {
 		if h.audit != nil && audit {
 			h.audit.record(name, "block", reason, assetPolicyAuditSubject(name, input))
@@ -153,7 +173,14 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	if json.Unmarshal(input, &value) == nil {
 		ids := collectAssetIDs(value)
 		if len(ids) > 0 {
-			if err := p.Store.ValidateTaskAssetsApproved(p.TaskID, ids); err != nil {
+			validate := p.Store.ValidateTaskAssetsApproved
+			if intent := WorkerScopeIntent(p.Scope); intent > 0 {
+				if err := p.Store.RememberWorkerAccess(p.TaskID, intent, nil, ids); err != nil {
+					return err.Error(), true
+				}
+				validate = p.Store.ValidateWorkerAssets
+			}
+			if err := validate(p.TaskID, ids); err != nil {
 				return p.denial(err, nil, ids)
 			}
 		}
@@ -164,7 +191,14 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 		return "", false
 	}
 	hosts := collectHosts(string(input))
-	if err := p.Store.ValidateTaskHostsApproved(p.TaskID, hosts); err != nil {
+	validate := p.Store.ValidateTaskHostsApproved
+	if intent := WorkerScopeIntent(p.Scope); intent > 0 {
+		if err := p.Store.RememberWorkerAccess(p.TaskID, intent, hosts, nil); err != nil {
+			return err.Error(), true
+		}
+		validate = p.Store.ValidateWorkerHosts
+	}
+	if err := validate(p.TaskID, hosts); err != nil {
 		return p.denial(err, hosts, nil)
 	}
 	return "", false

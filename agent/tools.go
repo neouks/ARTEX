@@ -128,13 +128,13 @@ type ToolSet struct {
 	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
 	// are filtered out of the agent's tool list. The scope field stays regardless.
 	coverageDisabled bool
-	// ownerNode is the exploration node that writes attach to: assets this run
-	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
-	// graph is global and shared). Worker = its claimed intent; planner = begin root.
-	ownerNode int64
-	GoalMet   bool
-	Reason    string
-	writes    WriteCounts
+	// Worker discoveries are tracked separately from the claimed intent's plan
+	// anchors. Planner discoveries retain their exploration lineage.
+	ownerNode       int64
+	GoalMet         bool
+	Reason          string
+	writes          WriteCounts
+	workerExecution bool // set only by Worker.execute, never by tool arguments/catalog
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -327,13 +327,16 @@ func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
 // ownerNode is set are anchored to it as lineage (not visibility).
 func (t *ToolSet) SetOwnerNode(id int64) { t.ownerNode = id }
 
-// anchorOwner records a lineage edge from this run's owner node to an asset
-// (no-op if unset). Provenance only — the asset graph is global and shared, so
-// this no longer affects which assets a task can read.
-func (t *ToolSet) anchorOwner(assetID int64) {
-	if t.ownerNode > 0 && assetID > 0 {
-		_ = t.ts.Anchor(t.ownerNode, assetID)
+// anchorOwner records Worker execution provenance separately from plan anchors.
+// Other roles retain their existing exploration lineage.
+func (t *ToolSet) anchorOwner(assetID int64) error {
+	if t.workerExecution && t.as != nil {
+		return t.as.RememberWorkerAccess(t.taskID, t.ownerNode, nil, []int64{assetID})
 	}
+	if t.ownerNode > 0 && assetID > 0 {
+		return t.ts.Anchor(t.ownerNode, assetID)
+	}
+	return nil
 }
 
 // pid parses an id that may arrive as a JSON number or string ("" / 0 → 0).
@@ -1356,7 +1359,11 @@ func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
 			if t.ts == nil {
 				return actool.Errorf("缺少任务探索上下文"), nil
 			}
-			page, err := t.ts.ToolNodePage(ctx, kind, strings.TrimSpace(q.Q), q.Severity, q.AssetID, q.Before, q.Limit)
+			store := t.ts
+			if t.workerExecution {
+				store = store.WithWorkerRead()
+			}
+			page, err := store.ToolNodePage(ctx, kind, strings.TrimSpace(q.Q), q.Severity, q.AssetID, q.Before, q.Limit)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1723,13 +1730,21 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				anchors = t.ownerAssetIDs()
 			}
 			if t.as != nil && t.taskID > 0 {
-				if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+				if err := t.validateResultAssets(anchors); err != nil {
 					return actool.Errorf("漏洞资产未获授权：" + err.Error()), nil
 				}
 			}
 			var id int64
 			if t.ts != nil {
 				intent := pid(a.IntentID)
+				if t.workerExecution {
+					if intent == 0 {
+						intent = t.ownerNode
+					}
+					if intent != t.ownerNode {
+						return actool.Errorf("Worker 只能向当前意图写回"), nil
+					}
+				}
 				if intent > 0 {
 					node, err := t.ts.GetNode(intent)
 					if err != nil || node == nil || node.Kind != db.KindIntent {
@@ -1750,7 +1765,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				_, _ = t.ts.AddStandaloneFinding(t.taskID, id, a.VulnClass, a.Name, a.Severity, a.Summary, a.Evidence, t.worker, anchors)
 				// 确证漏洞落库 → 当场唤醒本任务 planner（不等 worker 收工，debounce 合并）。
 				// 优先带上下文(哪个意图+finding摘要);intent 用工具参数,缺省回退到 owner 意图。
-				if t.notifyFinding != nil {
+				if t.notifyFinding != nil && (!t.workerExecution || t.as == nil || t.as.ValidateTaskAssetsApproved(t.taskID, anchors) == nil) {
 					iid := pid(a.IntentID)
 					if iid <= 0 {
 						iid = t.ownerNode
@@ -1764,7 +1779,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				return actool.Errorf("report_finding 需要任务上下文（exploration store 未初始化）"), nil
 			}
 			if t.as != nil && t.taskID > 0 {
-				_ = t.as.MarkTaskAssetsTested(t.taskID, anchors, t.worker)
+				if err := t.markResultAssetsTested(anchors); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
 			}
 			t.writes.Findings++
 			return actool.Text(fmt.Sprintf("finding recorded: %d", id)), nil
@@ -1806,6 +1823,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	if intent <= 0 {
 		intent = defaultIntent
 	}
+	if t.workerExecution && intent != t.ownerNode {
+		return 0, fmt.Errorf("Worker 只能向当前意图写回")
+	}
 	if intent > 0 {
 		node, err := t.ts.GetNode(intent)
 		if err != nil || node == nil || node.Kind != db.KindIntent {
@@ -1820,7 +1840,7 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		anchors = t.ownerAssetIDs()
 	}
 	if t.as != nil && t.taskID > 0 {
-		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+		if err := t.validateResultAssets(anchors); err != nil {
 			return 0, fmt.Errorf("事实资产未获授权：%w", err)
 		}
 	}
@@ -1833,7 +1853,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
 	if t.as != nil && t.taskID > 0 {
-		_ = t.as.MarkTaskAssetsTested(t.taskID, anchors, t.worker)
+		if err := t.markResultAssetsTested(anchors); err != nil {
+			return 0, err
+		}
 	}
 	t.writes.Facts++
 	return id, nil

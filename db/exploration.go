@@ -131,8 +131,15 @@ func (d *DB) TokenDailyAll(days int) ([]DailyTokenBucket, error) {
 
 // ExplorationStore is a handle onto one exploration's reasoning graph + activity.
 type ExplorationStore struct {
-	db    *DB
-	expID int64
+	db         *DB
+	expID      int64
+	workerRead bool
+}
+
+func (s *ExplorationStore) WithWorkerRead() *ExplorationStore {
+	copy := *s
+	copy.workerRead = true
+	return &copy
 }
 
 // CreateExploration creates a new exploration root and returns its id.

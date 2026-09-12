@@ -13,7 +13,11 @@ type overviewReadScope struct {
 
 func (t *ToolSet) readApprovalStates(taskID int64, ids []int64) (map[int64]string, error) {
 	if t.overviewReads == nil {
-		return t.as.TaskAssetApprovalStates(taskID, ids)
+		states, err := t.as.TaskAssetApprovalStates(taskID, ids)
+		if t.workerExecution {
+			states = workerVisibility(states)
+		}
+		return states, err
 	}
 	known := t.overviewReads.states[taskID]
 	if known == nil {

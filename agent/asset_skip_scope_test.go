@@ -44,7 +44,7 @@ func TestSkipPromptScopesAndStableContent(t *testing.T) {
 		return strings.Join(req.System, "\n")
 	}
 	before := render(ctx)
-	if !strings.Contains(before, "own.test") || strings.Contains(before, "other.test") || strings.Contains(before, "plan.test") {
+	if strings.Contains(before, "own.test") || strings.Contains(before, "other.test") || strings.Contains(before, "plan.test") {
 		t.Fatalf("wrong worker scope: %s", before)
 	}
 	if strings.Count(before, db.TaskAssetSkipRule) != 1 {

@@ -254,8 +254,8 @@ SET source=CASE WHEN task_asset_links.source IN ('manual','direct','company','ap
 	return nil
 }
 
-// ValidateTaskAssetsApproved is the common admission check used by Planner,
-// Worker and write-back tools. Empty ids are valid for global directions. A
+// ValidateTaskAssetsApproved is the strict planning/startup admission check.
+// Running Worker write-back uses ValidateWorkerAssets. Empty ids are valid for global directions. A
 // current-task link is authoritative; when none exists, a directly inherited
 // source link may authorize the asset using that source task's read-only state.
 func (s *AssetStore) ValidateTaskAssetsApproved(taskID int64, assetIDs []int64) error {
@@ -364,7 +364,10 @@ func (s *AssetStore) projectApprovedAssetHosts(taskID int64, assets []*Asset) ([
 	if err != nil {
 		return nil, err
 	}
-	allowed := func(host string) bool { return states[normalizeTaskAssetHost(host)] == ApprovalApproved }
+	allowed := func(host string) bool {
+		state := states[normalizeTaskAssetHost(host)]
+		return state == ApprovalApproved || (s.workerRead && state == ApprovalPending)
+	}
 	filter := func(values []string) []string {
 		var result []string
 		for _, host := range values {
@@ -663,7 +666,13 @@ SELECT DISTINCT n.id
 FROM tasks t JOIN exploration_nodes n ON n.exploration_id=t.exploration_id AND n.kind='intent' AND n.state='running'
 JOIN exploration_anchors ea ON ea.node_id=n.id
 JOIN targets target ON target.id=ea.asset_id
-WHERE t.id=$1`, taskID, ids)
+WHERE t.id=$1
+UNION
+SELECT DISTINCT access.intent_id FROM task_worker_asset_access access
+JOIN tasks t ON t.id=access.task_id
+JOIN exploration_nodes n ON n.id=access.intent_id AND n.exploration_id=t.exploration_id AND n.state='running'
+WHERE access.task_id=$1 AND (access.asset_id IN (SELECT id FROM targets)
+ OR EXISTS(SELECT 1 FROM selected WHERE host<>'' AND task_asset_host_within(access.host,selected.host)))`, taskID, ids)
 	if err != nil {
 		return nil, err
 	}

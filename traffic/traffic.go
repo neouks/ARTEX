@@ -233,7 +233,14 @@ func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request)
 	if host == "" {
 		host = hostOnly(req.Host)
 	}
-	if err := t.assets.ValidateTaskHostsApproved(taskID, []string{host}); err != nil {
+	validate := t.assets.ValidateTaskHostsApproved
+	if intent := guard.WorkerScopeIntent(scope); intent > 0 {
+		if err := t.assets.RememberWorkerAccess(taskID, intent, []string{host}, nil); err != nil {
+			return false, err
+		}
+		validate = t.assets.ValidateWorkerHosts
+	}
+	if err := validate(taskID, []string{host}); err != nil {
 		rows, saveErr := t.assets.RememberTaskAssetDenials(taskID, []string{host}, nil, scope)
 		if saveErr != nil {
 			log.Printf("[traffic] task %d 跳过记录失败: %v", taskID, saveErr)

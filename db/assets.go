@@ -109,6 +109,7 @@ type AssetStore struct {
 	tx         *sql.Tx
 	readCtx    context.Context
 	toolSelect string
+	workerRead bool // request-local execution view; never used for intent admission
 }
 
 // WithReadContext returns a request-local store; shared stores are never mutated.
@@ -167,7 +168,7 @@ func (s *AssetStore) query(query string, args ...any) (*sql.Rows, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return s.db.QueryContext(ctx, query, args...)
+	return s.db.QueryContext(ctx, workerReadSQL(query, s.workerRead), args...)
 }
 
 func (s *AssetStore) queryRow(query string, args ...any) *sql.Row {
@@ -175,7 +176,7 @@ func (s *AssetStore) queryRow(query string, args ...any) *sql.Row {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return s.db.QueryRowContext(ctx, query, args...)
+	return s.db.QueryRowContext(ctx, workerReadSQL(query, s.workerRead), args...)
 }
 
 // Assets returns the asset store.

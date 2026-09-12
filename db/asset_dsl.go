@@ -561,6 +561,9 @@ func (s *AssetStore) QueryDSLByTaskApproval(taskID int64, dsl, typ, tested, appr
 	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
 		return nil, err
 	}
+	if s.workerRead {
+		return s.projectApprovedAssetHosts(taskID, assets)
+	}
 	return assets, nil
 }
 

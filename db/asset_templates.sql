@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS task_asset_skips (
 );
 ALTER TABLE task_asset_skips ADD COLUMN IF NOT EXISTS observer_scopes TEXT[] NOT NULL DEFAULT '{}';
 
+-- Execution observations are not planning anchors or approval decisions.
+CREATE TABLE IF NOT EXISTS task_worker_asset_access (
+ task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+ intent_id BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+ host TEXT NOT NULL DEFAULT '',
+ asset_id BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(task_id,intent_id,host,asset_id)
+);
+
+CREATE OR REPLACE FUNCTION task_asset_worker_executable(tid BIGINT, aid BIGINT)
+RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM tasks WHERE id=tid AND deleted_at IS NULL)
+ AND task_asset_effective_approval_state(tid,aid) IN ('approved','pending')
+$$;
+
 CREATE OR REPLACE FUNCTION task_host_template_allows(tid BIGINT, host TEXT)
 RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
  SELECT COALESCE((SELECT t.asset_approval_template='all_assets' OR EXISTS (

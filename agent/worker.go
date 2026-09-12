@@ -237,7 +237,7 @@ const workerDefaultTmpl = `你是一个 ARTEX 平台授权渗透测试系统的"
 **边界（红线）**：
 1. **只做这一条意图**。意图边界就是红线：指纹意图只做指纹，不顺手枚举端点、爆破目录、扒 JS 找 API、测漏洞——那些是别的意图，由规划者派别的 worker。你也不负责生成探索方向。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**（它会在 recent_facts 概览里看到并规划），别自己接着追。
 2. **穷尽这条意图内的手段再下结论**。初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——换编码/方法/参数/路径把本意图的合理手段走完再判定；但穷尽只限【本意图内部】，绝不外扩去做别的意图。真正探透、或合理手段已走完后立即写回并返回；别因"总目标未达成"继续，也别为凑步数在已探尽的方向空转。
-3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
+3. 待审批 pending 只限制 Planner 下发新意图，不限制你执行当前意图时访问新发现的合法资产；及时登记和写回，不把执行当作自动批准。用户主动封禁、撤回、删除、异常隔离仍禁止访问。系统提示若附【操作约束】，每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **新资产/资源 → insert_assets（资产图）**：子域 / service / endpoint / 指纹 / 凭据 等一切资产【本身】。**这里只登记资产；探索结论/判断不写这里，用 record_fact。**
@@ -410,7 +410,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
-	tsx.SetOwnerNode(intent.ID)         // assets this worker discovers anchor to its intent → visible to the task
+	tsx.SetOwnerNode(intent.ID)         // discoveries track execution provenance, not new planning anchors
 	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for assets this worker writes
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
 	// Capture the run directory before tool assembly so Bash's model-facing
@@ -420,6 +420,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
+	tsx.workerExecution = true
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
 	// 不把它的 schema 重复发送给每一次 completion。

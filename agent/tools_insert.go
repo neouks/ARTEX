@@ -88,7 +88,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"• service(other)：service_name(必填)、ip或domain(至少一个)、port(必填)、auth([...])\n"+
 			"• endpoint：url(必填)、method(必填)、params([{location,name,value,type}])、service_ip\n"+
 			"auth/technologies/params 都是【追加合并】(append)，不会覆盖原有值。\n"+
-			"返回可执行资产 results、错误 errors 及待审批/受限数量。未返回的候选资产由系统等待用户审批，不得继续测试或反复尝试；端口、服务和接口只继承主机授权。",
+			"返回当前角色可用资产 results、错误 errors 及待审批/受限数量。Planner 只能对 approved 资产下发意图；Worker 在当前意图执行中可使用 pending 资产，不因未审批反复等待，也不会自动批准。封禁、撤回、删除和非法资产仍禁止访问；端口、服务和接口继承主机限制。",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
 			"assets": map[string]any{
@@ -315,11 +315,16 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					} else {
 						restrictedCount++
 					}
+					if !t.workerExecution || approvalState != db.ApprovalPending {
+						continue
+					}
+				}
+				if err := t.anchorOwner(id); err != nil {
+					errs = append(errs, errEntry{Index: i, Error: err.Error()})
 					continue
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ, ApprovalState: approvalState})
 				t.writes.Assets++
-				t.anchorOwner(id)
 				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
 				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
 				// 资产覆盖度功能关闭时不再累积测试范围(分母)；related=false(与当前任务无关)
@@ -503,7 +508,7 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 
 // listAssets lets an agent query the asset table.
 func (t *ToolSet) listAssets() actool.CoreTool {
-	return readTool("list_assets", "查询已授权资产摘要。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
+	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
 			"dsl": str("DSL，如 port==443 AND technology=nginx"), "type": str("可选资产类型，仅用于 DSL"),
 			"id": idp("单个资产 ID"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "最多50个 ID；详情最多5个"},
@@ -537,8 +542,16 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			if a.Limit < 1 || a.Limit > 50 || a.Offset < 0 || a.ID < 0 || len(a.IDs) > 50 {
 				return actool.Errorf("无效分页范围或资产 ID 数量"), nil
 			}
-			if a.Index<0{return actool.Errorf("index 不能为负数"),nil}
-			if a.Type!=""{switch a.Type{case "root_domain","subdomain","ip","service","endpoint","app":default:return actool.Errorf("无效资产类型"),nil}}
+			if a.Index < 0 {
+				return actool.Errorf("index 不能为负数"), nil
+			}
+			if a.Type != "" {
+				switch a.Type {
+				case "root_domain", "subdomain", "ip", "service", "endpoint", "app":
+				default:
+					return actool.Errorf("无效资产类型"), nil
+				}
+			}
 			modes := 0
 			if a.ID > 0 {
 				modes++
@@ -583,6 +596,9 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				}
 			}
 			store := t.as.WithReadContext(ctx).WithToolReadFields(a.Detail, a.Fields)
+			if t.workerExecution {
+				store = store.WithWorkerRead()
+			}
 			var assets []*db.Asset
 			var err error
 			if len(ids) > 0 {
@@ -667,7 +683,7 @@ func assetSummary(a *db.Asset, task bool) map[string]any {
 		row["technologies"] = tech
 	}
 	if task {
-		row["approval_state"] = db.ApprovalApproved
+		row["approval_state"] = a.ApprovalState
 		row["task_inherited"] = a.TaskInherited
 		row["task_read_only"] = a.TaskReadOnly
 	}

@@ -156,6 +156,8 @@ func filterStructuredRows(value any, states map[int64]string, collect map[int64]
 }
 
 func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, error) {
+	ri := RunInfoFrom(ctx)
+	worker := ri.AgentKey == "worker" && ri.TaskID == p.taskID && ri.IntentID > 0
 	req = deduplicateToolHistory(req)
 	var refreshErr error
 	req, refreshErr = p.refreshApprovalManagementHistory(ctx, req)
@@ -176,6 +178,16 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 		policy = "所有合法新发现域名/IP由系统自动批准，可直接测试，无需申请审批。"
 	case "related_assets":
 		policy = "用户目标同根域的子域名及有本任务DNS解析依据的IP由系统自动批准，可直接测试；其他发现登记后等待用户审批。"
+	}
+	if worker {
+		policy = "你只执行当前已下发意图，不创建新计划。执行中可访问并登记待审批或尚未登记的合法资产、写回事实和漏洞；pending 不限制执行，也不代表自动批准。历史 pending 拦截或等待审批提示已失效。用户封禁、撤回、删除、异常隔离及独立操作约束仍必须遵守。"
+		filtered := skips[:0]
+		for _, skip := range skips {
+			if skip.State != db.ApprovalPending {
+				filtered = append(filtered, skip)
+			}
+		}
+		skips = filtered
 	}
 	req.System = append(append([]string(nil), req.System...), "资产模板："+policy+"审批仅作用于域名/IP，获准主机的所有端口、服务和接口无需单独审批。用户封禁、撤回及删除限制优先。"+db.TaskAssetSkipRule)
 	if list := db.TaskAssetSkipList(skips); list != "" {
@@ -226,11 +238,18 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	if err != nil {
 		return req, err
 	}
+	if worker {
+		states = workerVisibility(states)
+	}
 	list = list[:0]
 	for id := range nodeIDs {
 		list = append(list, id)
 	}
-	nodeStates, err := p.assets.WithReadContext(ctx).TaskNodeApprovalStates(p.taskID, list)
+	nodeStore := p.assets.WithReadContext(ctx)
+	if worker {
+		nodeStore = nodeStore.WithWorkerRead()
+	}
+	nodeStates, err := nodeStore.TaskNodeApprovalStates(p.taskID, list)
 	if err != nil {
 		return req, err
 	}

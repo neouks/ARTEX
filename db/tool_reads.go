@@ -181,7 +181,7 @@ func (s *ExplorationStore) ToolLocalNodePage(ctx context.Context, kind string, l
 
 func (s *ExplorationStore) toolNodePage(ctx context.Context, kind, q, severity string, assetID, before int64, limit int, sources bool) (ToolNodePage, error) {
 	var raw []byte
-	err := s.db.QueryRowContext(ctx, toolNodeVisibilitySQL+`, page AS (SELECT v.*,n.payload FROM visible v JOIN exploration_nodes n ON n.id=v.id WHERE $6::bigint=0 OR v.id<$6 ORDER BY v.id DESC LIMIT $7)
+	err := s.db.QueryRowContext(ctx, workerReadSQL(toolNodeVisibilitySQL, s.workerRead)+`, page AS (SELECT v.*,n.payload FROM visible v JOIN exploration_nodes n ON n.id=v.id WHERE $6::bigint=0 OR v.id<$6 ORDER BY v.id DESC LIMIT $7)
  SELECT jsonb_build_object('total',(SELECT count(*) FROM visible),'nodes',COALESCE((SELECT jsonb_agg(jsonb_build_object(
  'id',id,'kind',kind,'state',state,'created_at',created_at,'source_task_id',owner,
  'inherited',exploration_id<>$1,'payload',jsonb_strip_nulls(jsonb_build_object(
