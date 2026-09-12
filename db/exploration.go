@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -22,8 +23,9 @@ var ErrIntentStateConflict = errors.New("intent state changed concurrently")
 // UTF8 encoding rejects ("invalid byte sequence for encoding UTF8"); without this
 // the INSERT fails and the activity record is silently lost. NUL is *valid* UTF-8
 // (U+0000) so ToValidUTF8 leaves it in place, yet PostgreSQL text still rejects it
-// (SQLSTATE 22021) — so it must be removed separately. JSONB payloads are fine
-// (json.Marshal already sanitizes), so only the plain text columns need it.
+// (SQLSTATE 22021) — so it must be removed separately. JSONB columns need the
+// separate jsonbClean below: json.Marshal encodes a NUL as the escape backslash-u-0000,
+// which the text-type json accepts but jsonb rejects (SQLSTATE 22P05).
 func utf8Clean(s string) string {
 	if strings.IndexByte(s, 0) >= 0 {
 		s = strings.ReplaceAll(s, "\x00", "")
@@ -31,8 +33,42 @@ func utf8Clean(s string) string {
 	return strings.ToValidUTF8(s, "�")
 }
 
+// jsonbClean makes marshaled JSON safe for a PostgreSQL jsonb column. json.Marshal
+// faithfully encodes a NUL byte (U+0000) as the 6-byte escape sequence \u0000; the
+// json type stores it, but jsonb rejects it with "unsupported Unicode escape
+// sequence" (SQLSTATE 22P05). Captured HTTP/tool bytes can carry NULs, so drop the
+// escape — this also covers NULs nested inside json.RawMessage fields, which are
+// copied verbatim into the output. Only a *real* escape is stripped: a \u0000 is
+// genuine when preceded by an even number of backslashes, so an escaped-backslash
+// run such as \\u0000 (the literal text u0000) is left intact.
+func jsonbClean(b []byte) []byte {
+	if !bytes.Contains(b, []byte("\\u0000")) {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	bs := 0 // consecutive backslashes already emitted before position i
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\\' && bs%2 == 0 && i+5 < len(b) &&
+			b[i+1] == 'u' && b[i+2] == '0' && b[i+3] == '0' && b[i+4] == '0' && b[i+5] == '0' {
+			i += 5 // skip the whole \u0000
+			bs = 0
+			continue
+		}
+		if b[i] == '\\' {
+			bs++
+		} else {
+			bs = 0
+		}
+		out = append(out, b[i])
+	}
+	return out
+}
+
 // Node is a typed reasoning node (= old task_nodes). kind ∈ goal|intent|finding|hint.
 type Node struct {
+	FindingID     int64           `json:"finding_id,omitempty"` // populated by finding-aware reads; never inferred from ID
+	FindingNodeID int64           `json:"finding_node_id,omitempty"`
+	TrafficCount  int             `json:"traffic_count,omitempty"`
 	ID            int64           `json:"id"`
 	Kind          string          `json:"kind"`
 	Payload       json.RawMessage `json:"payload"`
@@ -67,6 +103,9 @@ type Activity struct {
 	CacheWriteTokens *int  `json:"cache_write_tokens,omitempty"`
 	SourceTaskID     int64 `json:"source_task_id,omitempty"`
 	Inherited        bool  `json:"inherited,omitempty"`
+	// MainSeg is the main-agent conversation segment (nil for non-mainagent rows;
+	// nil/0 == the original session). Lets the UI route a mainagent row to its segment.
+	MainSeg *int `json:"main_seg,omitempty"`
 }
 
 // TokenUsage is a per-worker token aggregate (TokenStatsByWorker).
@@ -583,6 +622,11 @@ func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string)
 	newPayload, _ := json.Marshal(ip)
 	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL
 		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
+		return 0, err
+	}
+	// Soft deletion retains the main intent audit trail, but side conversations
+	// are removed atomically with the stopped state. Delayed snapshots reject it.
+	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE intent_id=$1`, id); err != nil {
 		return 0, err
 	}
 
@@ -1356,10 +1400,10 @@ func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
 	}
 	var id int64
 	err := s.db.QueryRow(`
-INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14)
+INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15)
 RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError, utf8Clean(a.Summary), utf8Clean(a.Detail),
-		metadata, a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens).Scan(&id)
+		metadata, a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, a.MainSeg).Scan(&id)
 	return id, err
 }
 
@@ -1571,7 +1615,7 @@ func (s *ExplorationStore) TokenStatsByWorker() ([]TokenUsage, error) {
 func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
 	rows, err := s.db.Query(`SELECT
 		CASE
-			WHEN COALESCE(a.worker,'')='mainagent' THEN 'main'
+			WHEN COALESCE(a.worker,'')='mainagent' THEN 'main:' || COALESCE(a.main_seg,0)::text
 			WHEN COALESCE(a.worker,'')='planner' THEN 'plan'
 			WHEN n.id IS NOT NULL THEN 'intent:' || n.id::text
 			ELSE ''
@@ -1613,7 +1657,7 @@ func (s *ExplorationStore) ActivityListContext(ctx context.Context, nodeID *int6
 	}
 	var rows *sql.Rows
 	var err error
-	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg`
 	if nodeID != nil {
 		rows, err = s.db.QueryContext(ctx, `SELECT `+cols+`
 FROM activity WHERE exploration_id=$1 AND node_id=$2 AND id>$3 ORDER BY id LIMIT $4`, s.expID, *nodeID, sinceID, limit)
@@ -1630,7 +1674,7 @@ FROM activity WHERE exploration_id=$1 AND id>$2 ORDER BY id LIMIT $3`, s.expID, 
 	for rows.Next() {
 		var a Activity
 		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt,
-			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.MainSeg); err != nil {
 			return nil, sinceID, err
 		}
 		if a.ID > cursor {
@@ -1680,20 +1724,33 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 
 // ActivitySessionFilter selects one UI "session" within a task's activity stream.
 // Exactly one field is meaningful:
-//   - Worker != ""  → filter by worker name (Main = "mainagent", Plan = "planner").
+//   - Main == true  → the main-agent session (worker="mainagent") for one segment
+//     (MainSeg; nil/0 = the original segment, which also matches legacy NULL rows).
+//   - Worker != ""  → filter by worker name (Plan = "planner").
 //     Goal Agent 的第 0 轮拆解也以 worker="planner" 落库，故 Plan 会话完整覆盖 Goal+Planner。
 //   - NodeID != nil → a Worker session, filtered by node_id (= intent id).
 //
-// A zero value (both empty) matches the whole task (no session filter).
+// A zero value (all empty) matches the whole task (no session filter).
 type ActivitySessionFilter struct {
-	Worker string
-	NodeID *int64
+	Worker  string
+	NodeID  *int64
+	Main    bool // main-agent session
+	MainSeg *int // segment for the main session (nil == current, resolved by caller; 0 == original)
 }
 
 func (f ActivitySessionFilter) cond(argStart int) (string, []any) {
 	switch {
 	case f.NodeID != nil:
 		return fmt.Sprintf(" AND node_id=$%d", argStart), []any{*f.NodeID}
+	case f.Main:
+		seg := 0
+		if f.MainSeg != nil {
+			seg = *f.MainSeg
+		}
+		if seg == 0 { // original segment also owns legacy rows with NULL main_seg
+			return " AND worker='mainagent' AND COALESCE(main_seg,0)=0", nil
+		}
+		return fmt.Sprintf(" AND worker='mainagent' AND main_seg=$%d", argStart), []any{seg}
 	case f.Worker != "":
 		return fmt.Sprintf(" AND worker=$%d", argStart), []any{f.Worker}
 	default:
@@ -1710,7 +1767,7 @@ func (s *ExplorationStore) ActivityPage(f ActivitySessionFilter, before int64, l
 	if limit <= 0 {
 		limit = 200
 	}
-	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), metadata, created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg`
 	args := []any{s.expID}
 	cond, cargs := f.cond(len(args) + 1)
 	args = append(args, cargs...)
@@ -1730,7 +1787,7 @@ ORDER BY id DESC LIMIT $%d`, cond, beforeArg, beforeArg, limitArg)
 	for rows.Next() {
 		var a Activity
 		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt,
-			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.MainSeg); err != nil {
 			return nil, false, err
 		}
 		desc = append(desc, a)
@@ -1805,6 +1862,57 @@ func (s *ExplorationStore) ActivityMaxID() (int64, error) {
 		return 0, err
 	}
 	return max.Int64, nil
+}
+
+// MainSession is one resettable main-agent conversation segment of a task. Segment 0
+// is the original session (implicit, never stored); further segments are created by
+// "新建会话" to start the main agent on a clean transcript while the task's graph,
+// assets and goal stay shared.
+type MainSession struct {
+	Seq       int       `json:"seq"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// CurrentMainSeg returns the highest main-session segment (0 when none created yet).
+func (s *ExplorationStore) CurrentMainSeg() (int, error) {
+	var seg int
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM main_sessions WHERE exploration_id=$1`, s.expID).Scan(&seg)
+	return seg, err
+}
+
+// ListMainSessions returns every main-session segment newest-first, always including
+// the implicit original segment 0. Segment 0 carries no stored timestamp.
+func (s *ExplorationStore) ListMainSessions() ([]MainSession, error) {
+	rows, err := s.db.Query(`SELECT seq, created_at FROM main_sessions WHERE exploration_id=$1 ORDER BY seq DESC`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MainSession{}
+	for rows.Next() {
+		var m MainSession
+		if err := rows.Scan(&m.Seq, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out = append(out, MainSession{Seq: 0}) // implicit original session (oldest)
+	return out, nil
+}
+
+// NewMainSession creates the next main-session segment (seq = current+1) and returns
+// it. It touches only main_sessions — the task's exploration graph/assets/goal are
+// untouched, so the new session starts with a clean transcript over the same task.
+func (s *ExplorationStore) NewMainSession() (MainSession, error) {
+	var m MainSession
+	err := s.db.QueryRow(`
+INSERT INTO main_sessions(exploration_id, seq)
+VALUES ($1, COALESCE((SELECT MAX(seq) FROM main_sessions WHERE exploration_id=$1),0)+1)
+RETURNING seq, created_at`, s.expID).Scan(&m.Seq, &m.CreatedAt)
+	return m, err
 }
 
 // ActivityDetail lazily returns the full detail blob for one step.

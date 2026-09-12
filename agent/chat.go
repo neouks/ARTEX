@@ -34,6 +34,17 @@ type ChatAgent struct {
 	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
 	shellProfile   actool.ShellProfile
+	taskAssets     *db.AssetStore
+	taskID         int64
+}
+
+// WithTaskPolicy returns a per-run copy; shared independent chat configuration
+// must never acquire another conversation's task scope.
+func (c *ChatAgent) WithTaskPolicy(as *db.AssetStore, taskID int64, proxy, ca string, g *guard.Guard) *ChatAgent {
+	out := *c
+	out.taskAssets, out.taskID, out.guard = as, taskID, g
+	out.proxyAddr, out.proxyCACert = TaskProxyAddr(proxy, ca, taskID), ca
+	return &out
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -115,13 +126,13 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// have no tools-table rows, so they always pass through.
 	runProfile := shellProfileFor(c.shellProfile, sessionWorkDir)
 	base := actool.DefaultToolsWithProfile(runProfile)
-	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID, AgentKey: agentKey, Trigger: "human_message"})
+	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID, AgentKey: agentKey, TaskID: c.taskID, Trigger: "human_message"})
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
 	opts := agentcore.Options{
-		Provider:        c.prov,
+		Provider:        withAssetContext(c.prov, c.taskAssets, c.taskID),
 		SystemPrompt:    system,
 		DynamicBoundary: boundary,
 		Tools:           tools,
@@ -133,18 +144,21 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		WebFetchCACert:  c.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:    ws.Enabled,
-		WebSearchBackend:   ws.Backend,
-		BraveSearchAPIKey:  ws.BraveKey,
-		TavilySearchAPIKey: ws.TavilyKey,
-		WebSearchProxy:     ws.Proxy,
-		BashEnv:            proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		ShellProfile:       runProfile,
-		WorkingDir:         sessionWorkDir,
-		MaxTurns:           maxTurns,
-		MaxDuration:        maxDuration,
-		Compaction:         compactionConfig(c.window),
-		Todos:              actool.NewTodoStore(),
+		EnableWebSearch:       ws.Enabled,
+		WebSearchBackend:      ws.Backend,
+		BraveSearchAPIKey:     ws.BraveKey,
+		TavilySearchAPIKey:    ws.TavilyKey,
+		WebSearchProxy:        ws.Proxy,
+		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		ShellProfile:          runProfile,
+		WorkingDir:            sessionWorkDir,
+		MaxTurns:              maxTurns,
+		MaxDuration:           maxDuration,
+		Compaction:            compactionConfig(c.window),
+		Todos:                 actool.NewTodoStore(),
+		DeepSeekSearchBaseURL: ws.DeepSeekBaseURL,
+		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
+		DeepSeekSearchModel:   ws.DeepSeekModel,
 		// large tool output spills to cmd-output/ under the session dir.
 		// 截断上限用 SDK 默认(tool.Capture 的 30000 字符)。
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),
@@ -154,13 +168,16 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
-	if c.guard != nil {
+	if c.taskAssets != nil && c.taskID > 0 {
+		opts.Hooks = guard.AssetPolicyHooksWithGuard(c.guard, c.taskAssets, c.taskID)
+	} else if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()
 	}
 	if c.tx != nil { // persist raw human↔AI conversation; one accumulating file per thread
 		opts.Transcript = c.tx
 		opts.SessionID = sessionID
 	}
+	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()
 	// reload prior conversation so the agent has context across turns (each Chat is

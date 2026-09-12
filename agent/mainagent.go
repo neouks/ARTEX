@@ -18,20 +18,21 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	prov           llm.Provider
-	model          string
-	tx             *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window         int                                    // context window in tokens (for compaction)
-	windowFn       func() int                             // optional dynamic task-chain minimum
-	maxTurns       int                                    // max agent turns per run (0 = unlimited)
-	proxyAddr      string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert    string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch      WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
-	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
-	shellProfile   actool.ShellProfile
+	findingRecorder FindingRecorder
+	prov            llm.Provider
+	model           string
+	tx              *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window          int                                    // context window in tokens (for compaction)
+	windowFn        func() int                             // optional dynamic task-chain minimum
+	maxTurns        int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr       string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert     string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch       WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir         string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork       func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	shellProfile    actool.ShellProfile
 }
 
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
@@ -105,8 +106,9 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 // non-nil, receives each execution step (thinking / tool_use / tool_result /
 // text / result) so the main-agent session shows its work — exactly like the
 // worker/planner sessions — not just the final answer.
-func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
+func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
+	tsx.SetFindingRecorder(m.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -142,18 +144,21 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, g
 		WebFetchCACert:  m.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:    m.webSearch.Enabled,
-		WebSearchBackend:   m.webSearch.Backend,
-		BraveSearchAPIKey:  m.webSearch.BraveKey,
-		TavilySearchAPIKey: m.webSearch.TavilyKey,
-		WebSearchProxy:     m.webSearch.Proxy,
-		BashEnv:            proxyEnv(runProxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		ShellProfile:       runProfile,
-		WorkingDir:         mainDir, // 本任务工作目录 <workDir>/tasks/<taskID>
-		ToolOutputDir:      cmdOutDir(mainDir),
-		MaxTurns:           m.maxTurns,                             // 0 = unlimited (configurable in agent management)
-		Compaction:         compactionConfig(m.compactionWindow()), // long chats stay within the window
-		Todos:              actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		EnableWebSearch:       m.webSearch.Enabled,
+		WebSearchBackend:      m.webSearch.Backend,
+		BraveSearchAPIKey:     m.webSearch.BraveKey,
+		TavilySearchAPIKey:    m.webSearch.TavilyKey,
+		WebSearchProxy:        m.webSearch.Proxy,
+		BashEnv:               proxyEnv(runProxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		ShellProfile:          runProfile,
+		WorkingDir:            mainDir, // 本任务工作目录 <workDir>/tasks/<taskID>
+		ToolOutputDir:         cmdOutDir(mainDir),
+		MaxTurns:              m.maxTurns,                             // 0 = unlimited (configurable in agent management)
+		Compaction:            compactionConfig(m.compactionWindow()), // long chats stay within the window
+		Todos:                 actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		DeepSeekSearchBaseURL: m.webSearch.DeepSeekBaseURL,
+		DeepSeekSearchAPIKey:  m.webSearch.DeepSeekAPIKey,
+		DeepSeekSearchModel:   m.webSearch.DeepSeekModel,
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
@@ -164,10 +169,16 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, as *db.AssetStore, g
 	if as != nil {
 		opts.Hooks = guard.AssetPolicyHooksWithGuard(g, as, taskID)
 	}
-	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per task
+	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx
+		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
+		// load; each new session (seg>=1) gets its own file for a clean context.
 		opts.SessionID = fmt.Sprintf("exp%d-main", ts.ID())
+		if mainSeg > 0 {
+			opts.SessionID = fmt.Sprintf("exp%d-main-s%d", ts.ID(), mainSeg)
+		}
 	}
+	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)
 	defer s.Close()
 	// reload the prior conversation from the transcript so the agent has context

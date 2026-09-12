@@ -59,6 +59,21 @@ func withAssetContext(provider llm.Provider, assets *db.AssetStore, taskID int64
 	return assetContextProvider{Provider: provider, assets: assets, taskID: taskID}
 }
 
+// WithTaskAssetContext reuses the role-aware model boundary for host-provided
+// task-bound entry points, including read-only side questions.
+func WithTaskAssetContext(provider llm.Provider, assets *db.AssetStore, taskID int64) llm.Provider {
+	return withAssetContext(provider, assets, taskID)
+}
+
+// FilterTaskAssetRequest runs before a host compresses a stored task snapshot.
+// It returns a model-view copy; the source transcript remains unchanged.
+func FilterTaskAssetRequest(ctx context.Context, assets *db.AssetStore, taskID int64, req llm.CompletionRequest) (llm.CompletionRequest, error) {
+	if assets == nil || taskID <= 0 {
+		return req, nil
+	}
+	return (assetContextProvider{assets: assets, taskID: taskID}).filter(ctx, req)
+}
+
 func (p assetContextProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	filtered, err := p.filter(ctx, req)
 	if err != nil {

@@ -16,6 +16,7 @@ import (
 // skill loads. Even without a global block, the static system segment remains a
 // valid cache prefix, so the boundary is always the number of returned segments.
 func deferredSystem(sysText string, def DeferredInfo) (system []string, boundary int) {
+	sysText += def.FindingGuidance
 	block := actool.RenderDeferredToolsBlock(def.GlobalNames)
 	if block == "" {
 		return []string{sysText}, 1

@@ -6,6 +6,7 @@
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+  ActiveFindingRetest,
   Activity,
   Agent,
   AgentDetail,
@@ -28,17 +29,22 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  EvidenceBodyPreview,
   Finding,
   FindingAssetTree,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
+  FindingRetest,
   FindingStats,
   FindingStatus,
   FindingsPage,
+  FindingTraffic,
+  FindingTrafficDetail,
   GlobalProxyProbeResult,
   IntentAsset,
   InterceptApprovalRow,
+  InterceptDetail,
   InterceptPending,
   InterceptRule,
   JudgeConfig,
@@ -86,8 +92,11 @@ import type {
   Tool,
   ToolStat,
   TrafficDetail,
+  TrafficEvidenceRef,
+  TrafficEvidenceRole,
   TrafficHost,
   TrafficResp,
+  UpdateCheck,
   UsageStats,
   WorkspaceFile,
   WorkspaceListing,
@@ -98,7 +107,7 @@ function getToken(): string | null {
   return localStorage.getItem("artex_token");
 }
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
+export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
   const token = getToken();
   const r = await fetch(`/api${path}`, {
@@ -442,6 +451,20 @@ export const api = {
     get<{ count: number; total: number; assets: Asset[] }>(
       `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&tested=${encodeURIComponent(tested)}&approval_state=${encodeURIComponent(approval)}&limit=${limit}&offset=${offset}`,
     ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
+  // DSL search scoped to a task — the backend forces the task_id filter, so it
+  // always stays within that task's assets (same DSL grammar as `searchAssets`).
+  searchTaskAssets: (
+    taskId: string,
+    dsl: string,
+    type = "",
+    limit = 50,
+    offset = 0,
+    tested = "all",
+    approval = "all",
+  ) =>
+    get<{ count: number; total: number; assets: Asset[] }>(
+      `/assets?task_id=${encodeURIComponent(taskId)}&dsl=${encodeURIComponent(dsl)}&type=${encodeURIComponent(type)}&tested=${encodeURIComponent(tested)}&approval_state=${encodeURIComponent(approval)}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
   attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
     post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
       asset_ids: assetIds,
@@ -561,6 +584,73 @@ export const api = {
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
     ),
+  findingTraffic: (id: string, contextTask?: string) =>
+    get<FindingTraffic>(
+      `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  bindFindingTraffic: (id: string, traffic_refs: TrafficEvidenceRef[], contextTask?: string) =>
+    post<FindingTraffic>(
+      `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { traffic_refs },
+    ),
+  editFindingTraffic: (
+    id: string,
+    bindingId: string,
+    version: number,
+    fields: { role: TrafficEvidenceRole; note: string },
+    contextTask?: string,
+  ) =>
+    patch<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { version, ...fields },
+    ),
+  removeFindingTraffic: (id: string, bindingId: string, version: number, contextTask?: string) =>
+    del<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { version },
+    ),
+  orderFindingTraffic: (id: string, binding_ids: string[], version: number, contextTask?: string) =>
+    http<FindingTraffic>(
+      `/exploration/findings/${id}/traffic/order${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ binding_ids, version }) },
+    ),
+  findingTrafficDetail: (id: string, bindingId: string, contextTask?: string) =>
+    get<FindingTrafficDetail>(
+      `/exploration/findings/${id}/traffic/${bindingId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  findingTrafficBody: (
+    id: string,
+    bindingId: string,
+    side: "request" | "response",
+    offset: number,
+    contextTask?: string,
+  ) =>
+    get<EvidenceBodyPreview>(
+      `/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&offset=${offset}${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ),
+  downloadFindingTrafficBody: async (
+    id: string,
+    bindingId: string,
+    side: "request" | "response",
+    contextTask?: string,
+  ) => {
+    const token = getToken();
+    const response = await fetch(
+      `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: "下载失败" }));
+      throw new Error(error.error ?? "下载失败");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `evidence-${bindingId}-${side}.bin`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
   // 漏洞链路:该漏洞节点回溯到任务初始节点的子图(节点 + 关系)。
   findingLineage: (id: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/findings/${id}/lineage`),
   setFindingStatus: (id: string, status: FindingStatus) => patch<Finding>(`/exploration/findings/${id}`, { status }),
@@ -572,6 +662,16 @@ export const api = {
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // 删除漏洞:移除 findings 记录 + 来源探索节点(从发现列表/任务发现 Tab/探索图一并消失)。
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
+  findingRetests: (id: string) =>
+    get<{ retests: FindingRetest[] }>(`/exploration/findings/${encodeURIComponent(id)}/retests`).then((r) =>
+      arr(r.retests),
+    ),
+  activeFindingRetests: () =>
+    get<{ retests: ActiveFindingRetest[] }>("/exploration/findings/retests/active").then((r) => arr(r.retests)),
+  startFindingRetest: (id: string, notes: string) =>
+    post<{ retest: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/retests`, {
+      notes,
+    }),
   deepenFinding: (id: string, description: string) =>
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
@@ -632,6 +732,16 @@ export const api = {
     }));
   },
 
+  // Main-agent conversation segments of a task. Each segment is a resettable session
+  // (clean transcript/context) over the same task; `current` is the writable one.
+  mainSessions: (task: string) =>
+    get<{ sessions: { seq: number; created_at: string }[]; current: number }>(
+      `/exploration/main-sessions${tq(task)}`,
+    ).then((r) => ({ sessions: arr(r.sessions), current: r.current ?? 0 })),
+  // Start a fresh main-agent session segment (does not touch the task's graph/assets/goal).
+  newMainSession: (task: string) =>
+    post<{ seq: number; created_at: string; current: number }>(`/exploration/main-session/new${tq(task)}`),
+
   // ---- traffic / audit / report / chat ----
   audit: (task?: string) => get<Audit>(`/audit${tq(task)}`),
   traffic: (page = 0, size = 100, host = "", method = "", q = "") =>
@@ -666,8 +776,8 @@ export const api = {
     if (!r.ok) throw new Error(`report: ${r.status}`);
     return r.text();
   },
-  chat: (message: string, task?: string, attachments?: ChatAttachment[]) =>
-    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments }),
+  chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
+    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
@@ -729,6 +839,7 @@ export const api = {
     reasoning_effort = "",
     profile_id?: number,
     streaming = true, // 用该配置真实的收发模式来测，别让"流式能通、非流式不通"漏到会话里
+    session_header_key = "", // 非空=测试请求也带该自定义会话头（值为一次性 session id）
   ) =>
     // reply = 模型实际回复(已截断);一个字都不回的配置后端直接判失败
     post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
@@ -741,6 +852,7 @@ export const api = {
       reasoning_effort,
       profile_id,
       streaming,
+      session_header_key,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
@@ -1032,6 +1144,7 @@ export const api = {
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
@@ -1098,4 +1211,15 @@ export const api = {
   // per-agent 绑定 / 轮询 / 中断消耗都覆盖）。
   tokensByModel: (task: string) =>
     get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
+
+  // ---- 一键更新 ----
+  // 检查以后端为准：下载是后端做的，浏览器能连 GitHub 而服务器连不上的情况很常见
+  // （服务器在内网、代理只配在浏览器上），那时点更新必然失败。
+  // 后端对 GitHub 的查询结果有 30 分钟缓存（未认证的 GitHub API 是 60 次/小时/IP，
+  // 顶栏每次整页加载都会查一次，不缓存会很快耗光配额）。force=true 强制回源，
+  // 留给用户显式点「检查更新」时用。
+  checkUpdate: (force = false) => get<UpdateCheck>(`/update/check${force ? "?force=1" : ""}`),
+  // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
+  applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
+  rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
 };

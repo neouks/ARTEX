@@ -369,9 +369,9 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 				assets, err = as.QueryDSLByTaskApproval(taskID, dsl, typ, tested, approval, limit, offset)
 			}
 		} else {
-			total, err = as.CountDSL(dsl, typ)
+			total, err = as.CountDSL(dsl, typ, 0)
 			if err == nil && offset < total {
-				assets, err = as.QueryDSL(dsl, typ, limit, offset)
+				assets, err = as.QueryDSL(dsl, typ, 0, limit, offset)
 			}
 		}
 	} else {

@@ -52,12 +52,14 @@ const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTa
 const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
 const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
 const ReportTab = dynamic(() => import("./_tabs/report-tab").then((m) => m.ReportTab));
+const RetestsTab = dynamic(() => import("./_tabs/retests-tab").then((m) => m.RetestsTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
   { value: "overview", label: "总览" },
   { value: "graph", label: "探索链路" },
   { value: "findings", label: "发现" },
+  { value: "retests", label: "复测" },
   { value: "assets", label: "测试资产" },
   { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
@@ -487,6 +489,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="findings" className="mt-0">
           <FindingsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="retests" className="mt-0">
+          <RetestsTab key={id} taskId={id} />
         </TabsContent>
         <TabsContent value="assets" className="mt-0">
           <AssetsTab taskId={id} />

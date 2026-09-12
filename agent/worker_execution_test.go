@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/evidence"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/llm"
 )
@@ -47,6 +48,7 @@ func TestWorkerPendingExecutionKeepsPlannerBoundary(t *testing.T) {
 	worker.SetTaskID(task.ID)
 	worker.SetOwnerNode(intent)
 	worker.workerExecution = true
+	worker.SetFindingRecorder(evidence.New(d, nil, t.TempDir()))
 	ctx := WithRunInfo(t.Context(), RunInfo{TaskID: task.ID, IntentID: intent, AgentKey: "worker"})
 	hooks := guard.AssetPolicyHooks(nil, as, task.ID)
 	command := []byte(`{"command":"curl https://new.worker.test/x"}`)
@@ -177,6 +179,10 @@ func TestWorkerPendingExecutionKeepsPlannerBoundary(t *testing.T) {
 		}
 		if err := worker.validateResultAssets([]int64{b}); err == nil {
 			t.Fatalf("%s write allowed", operation)
+		}
+		denied, err := worker.addFinding().Call(ctx, json.RawMessage(fmt.Sprintf(`{"summary":"restricted finding","vulnclass":"test","severity":"high","intent_id":%d,"asset_ids":[%d]}`, intent, b)), nil)
+		if err != nil || !denied.IsError {
+			t.Fatalf("%s evidence recorder bypass: %v %s", operation, err, denied.Flatten())
 		}
 		if err := as.ValidateWorkerAssets(task.ID, []int64{service}); err == nil {
 			t.Fatalf("%s parent service bypass", operation)

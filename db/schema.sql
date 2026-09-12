@@ -318,11 +318,20 @@ CREATE TABLE IF NOT EXISTS activity (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
+-- main_seg segments the main-agent session into resettable conversations: a new
+-- main session bumps the segment so its transcript + activity start clean while the
+-- task's graph/assets/goal are untouched. NULL == legacy rows == segment 0 (the
+-- original session). Only worker='mainagent' rows carry it.
+ALTER TABLE activity ADD COLUMN IF NOT EXISTS main_seg INTEGER;
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 -- Main/Plan history pages filter by worker (both carry NULL node_id, so idx_act_node
 -- can't distinguish them); this covers reverse pagination of those sessions.
 CREATE INDEX IF NOT EXISTS idx_act_worker ON activity(exploration_id, worker, id);
+-- Main-session pages filter by segment on top of worker='mainagent'; this partial
+-- index covers reverse pagination within one segment.
+CREATE INDEX IF NOT EXISTS idx_act_main_seg ON activity(exploration_id, main_seg, id)
+    WHERE worker='mainagent';
 -- Task-list polls aggregate result usage and find the latest event repeatedly.
 -- Cover the token columns for index-only aggregation and the timestamp order for
 -- per-exploration latest-activity lookups.
@@ -335,6 +344,18 @@ CREATE INDEX IF NOT EXISTS idx_act_latest ON activity(exploration_id, created_at
 CREATE INDEX IF NOT EXISTS idx_act_worker_output ON activity
     (node_id, (CASE WHEN kind='result' THEN 0 ELSE 1 END), id DESC)
     WHERE kind IN ('result','text');
+
+-- main_sessions records the resettable main-agent conversation segments of a task.
+-- Segment 0 (the original session) is implicit and never stored; this table holds
+-- only the extra segments created by "新建会话" (seq >= 1). The current segment is
+-- MAX(seq) or 0. Each segment gets its own transcript file + activity slice; the
+-- task's exploration graph/assets/goal are shared and never reset.
+CREATE TABLE IF NOT EXISTS main_sessions (
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    seq            INTEGER NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (exploration_id, seq)
+);
 
 -- =====================================================================
 -- C. LLM profiles
@@ -1087,9 +1108,12 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     env         JSONB NOT NULL DEFAULT '{}',
     url         TEXT,
     enabled     BOOLEAN NOT NULL DEFAULT true,
+    insecure    BOOLEAN NOT NULL DEFAULT false,  -- http: 跳过 TLS 证书校验(自签证书场景, issue #108)
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 旧库补列(schema.sql 每次启动都会 Exec)。
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS insecure BOOLEAN NOT NULL DEFAULT false;
 DROP TRIGGER IF EXISTS trg_mcp_upd ON mcp_servers;
 CREATE TRIGGER trg_mcp_upd BEFORE UPDATE ON mcp_servers
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -1332,6 +1356,11 @@ CREATE INDEX IF NOT EXISTS idx_intercept_pending_status ON intercept_pending(sta
 CREATE INDEX IF NOT EXISTS idx_intercept_pending_task   ON intercept_pending(task_id, created_at DESC);
 -- 补旧库:reason 列(已发版,加列要带 IF NOT EXISTS)。
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
+-- Detail payloads are lazy-loaded; NULL preserves the meaning of legacy history.
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS audit JSONB;
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT '';
+UPDATE intercept_pending SET decision_source=CASE WHEN rule_id IS NOT NULL THEN 'rule'
+ WHEN reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END WHERE decision_source='';
 
 -- =====================================================================
 -- L. 漏洞发现持久化
@@ -1349,7 +1378,7 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence    TEXT NOT NULL DEFAULT '',
     worker      TEXT NOT NULL DEFAULT '',
     asset_ids   JSONB NOT NULL DEFAULT '[]',
-    -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 /
+    -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 / fixed 已修复 /
     -- false_positive 误报 / ignored 忽略 / duplicate 重复 / risk_accepted 风险接受。
     -- 取值不加 CHECK：旧库靠下面的 ALTER 补列,CHECK 无法回填,统一由 server 侧白名单校验。
     status      TEXT NOT NULL DEFAULT 'pending',
@@ -1366,6 +1395,71 @@ CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DE
 -- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
 CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
 
+-- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
+CREATE TABLE IF NOT EXISTS finding_retests (
+    id BIGSERIAL PRIMARY KEY,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    conversation_id BIGINT UNIQUE REFERENCES conversations(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','stopped')),
+    verdict TEXT NOT NULL DEFAULT '' CHECK (verdict IN ('','reproduced','fixed','inconclusive')),
+    notes TEXT NOT NULL DEFAULT '',
+    snapshot JSONB NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_finding_retests_history ON finding_retests(finding_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_retests_active ON finding_retests(finding_id)
+    WHERE status IN ('pending','running');
+
+-- 删除会话保留复测记录，同时解除尚未结束的复测占用。
+CREATE OR REPLACE FUNCTION stop_deleted_conversation_retest() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE finding_retests SET status='stopped', error='复测会话已删除', finished_at=now()
+    WHERE conversation_id=OLD.id AND status IN ('pending','running');
+    RETURN OLD;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_conversation_retest_delete ON conversations;
+CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION stop_deleted_conversation_retest();
+
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS traffic_evidence_snapshots (
+    id TEXT PRIMARY KEY,
+    source_traffic_id TEXT NOT NULL,
+    captured_at BIGINT NOT NULL,
+    url TEXT NOT NULL,
+    method TEXT NOT NULL,
+    status INTEGER NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    req_head TEXT NOT NULL,
+    resp_head TEXT NOT NULL,
+    req_hash TEXT NOT NULL,
+    resp_hash TEXT NOT NULL,
+    req_len BIGINT NOT NULL,
+    resp_len BIGINT NOT NULL,
+    unreferenced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS finding_traffic_bindings (
+    id BIGSERIAL PRIMARY KEY,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL REFERENCES traffic_evidence_snapshots(id),
+    role TEXT NOT NULL DEFAULT 'supporting',
+    note TEXT NOT NULL DEFAULT '',
+    position INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(finding_id, snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_traffic_order ON finding_traffic_bindings(finding_id, position, id);
+CREATE INDEX IF NOT EXISTS idx_finding_traffic_snapshot ON finding_traffic_bindings(snapshot_id);
+
 -- =====================================================================
 -- M. 后端日志持久化
 -- =====================================================================
@@ -1377,3 +1471,46 @@ CREATE TABLE IF NOT EXISTS server_logs (
     text       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_server_logs_id ON server_logs(id DESC);
+
+-- Independent /btw history and the latest provider-ready main checkpoint.
+CREATE TABLE IF NOT EXISTS side_question_sessions (
+    session_key TEXT PRIMARY KEY,
+    conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,
+    task_id BIGINT REFERENCES tasks(id) ON DELETE CASCADE,
+    exploration_id BIGINT REFERENCES explorations(id) ON DELETE CASCADE,
+    intent_id BIGINT REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+    run_id BIGINT NOT NULL,
+    version BIGINT NOT NULL,
+    snapshot JSONB NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 0,
+    CHECK ((conversation_id IS NOT NULL AND task_id IS NULL AND exploration_id IS NULL AND intent_id IS NULL)
+        OR (conversation_id IS NULL AND task_id IS NOT NULL AND exploration_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_side_sessions_conv ON side_question_sessions(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_side_sessions_task ON side_question_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_side_sessions_exp ON side_question_sessions(exploration_id);
+CREATE INDEX IF NOT EXISTS idx_side_sessions_intent ON side_question_sessions(intent_id);
+
+CREATE TABLE IF NOT EXISTS side_question_requests (
+    id TEXT PRIMARY KEY,
+    ordinal BIGSERIAL UNIQUE,
+    session_key TEXT NOT NULL REFERENCES side_question_sessions(session_key) ON DELETE CASCADE,
+    generation BIGINT NOT NULL,
+    client_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled','interrupted')),
+    error TEXT NOT NULL DEFAULT '',
+    model JSONB NOT NULL,
+    snapshot_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sequence BIGINT NOT NULL DEFAULT 0,
+    usage JSONB NOT NULL DEFAULT '{}',
+    UNIQUE(session_key,generation,client_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_side_request_running ON side_question_requests(session_key) WHERE status='running';
+CREATE INDEX IF NOT EXISTS idx_side_requests_history ON side_question_requests(session_key,ordinal DESC);
+
+-- Additive v3 archive fields; old archives restore these as empty objects.
+ALTER TABLE side_question_sessions ADD COLUMN IF NOT EXISTS memory JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE side_question_requests ADD COLUMN IF NOT EXISTS context_info JSONB NOT NULL DEFAULT '{}';

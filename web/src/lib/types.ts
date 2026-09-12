@@ -454,12 +454,12 @@ export interface Company {
 }
 
 // ---- Exploration graph (per task) ----
-export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint";
+export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
-export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves";
+export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
 
 export interface TaskNode {
   id: string;
@@ -496,12 +496,13 @@ export interface TaskConstraint {
 // ---- Findings ----
 export type Severity = "critical" | "high" | "medium" | "low";
 
-// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 误报 / 忽略 / 重复 / 风险接受。
+// 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受。
 export type FindingStatus =
   | "pending"
   | "in_progress"
   | "confirmed"
   | "resolved"
+  | "fixed"
   | "false_positive"
   | "ignored"
   | "duplicate"
@@ -515,6 +516,10 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  traffic_count?: number;
+  evidence_version?: number;
+  report_evidence_version?: number;
+  report_stale?: boolean;
   id: string;
   finding_id?: string; // 独立 findings 表的行 id,状态更新的句柄(任务内旧节点可能缺失)
   vulnclass: string;
@@ -675,6 +680,7 @@ export interface Activity {
   };
   source_task_id?: string;
   inherited?: boolean;
+  main_seg?: number; // main-agent conversation segment (present only on worker="mainagent" rows)
   // token usage (present only on kind='result')
   input_tokens?: number;
   output_tokens?: number;
@@ -734,8 +740,31 @@ export interface AgentTrigger {
 }
 
 // ---- Conversations (chat page) ----
+export interface ActiveFindingRetest {
+  id: number;
+  finding_id: string;
+  conversation_id: number;
+  status: "pending" | "running";
+}
+
+export interface FindingRetest {
+  id: number;
+  finding_id: number;
+  conversation_id: number | null;
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
+  verdict: "" | "reproduced" | "fixed" | "inconclusive";
+  notes: string;
+  summary: string;
+  evidence: string;
+  error: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Conversation {
   id: number;
+  running?: boolean; // live server state, returned with the conversation list
   agent_key: string;
   title: string;
   llm_profile_id?: number;
@@ -854,6 +883,7 @@ export interface Session {
   intent_id?: string;
   source_task_id?: string;
   inherited?: boolean;
+  seg?: number; // main-agent session: which conversation segment (0 = original)
 }
 
 // ---- Security ----
@@ -907,11 +937,12 @@ export interface TrafficHost {
 // ---- App settings (runtime toggles) ----
 export interface Settings {
   traffic_capture: boolean;
+  agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
   llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;
-  web_search_backend: string; // "ddgs" | "brave-free" | "tavily"
+  web_search_backend: string; // "ddgs" | "brave-free" | "tavily" | "deepseek"
   brave_key_set: boolean;
   tavily_key_set: boolean;
   // write-only: only sent on PUT to store/clear the key.
@@ -1111,6 +1142,7 @@ export interface MCPServer {
   env: Record<string, string>;
   url?: string;
   enabled: boolean;
+  insecure?: boolean; // http: skip TLS cert verification (self-signed servers)
   tools?: string[]; // mcp_tools_cache (names only, for the count)
   calls: number;
   tasks: number;
@@ -1245,6 +1277,7 @@ export interface InterceptRule {
 }
 
 export interface InterceptPending {
+  decision_source?: "rule" | "model" | "unknown" | "";
   id: number;
   rule_id?: number;
   conversation_id?: number;
@@ -1357,4 +1390,126 @@ export interface LLMRecordDetail extends LLMRecordItem {
 export interface LLMTask {
   task_id: string;
   count: number;
+}
+
+// Immutable review snapshot plus separately recorded execution outcome.
+export interface InterceptAudit {
+  run_id?: string;
+  tool_use_id?: string;
+  correlation: "exact" | "ambiguous" | "unavailable";
+  input_digest: string;
+  user_message: string;
+  user_truncated?: boolean;
+  context:
+    | { kind: string; tool?: string; tool_use_id?: string; text: string; is_error?: boolean; truncated?: boolean }[]
+    | null;
+  context_truncated?: boolean;
+  captured_at: string;
+  model_fallback?: boolean;
+  initial_action: "allow" | "ask" | "deny";
+  initial_reason: string;
+  effective_action?: "allow" | "deny";
+  decision_reason?: string;
+  rule_name?: string;
+  config_digest?: string;
+  profile_id?: number;
+  execution_status: "not_started" | "not_executed" | "awaiting_result" | "succeeded" | "failed" | "unknown";
+  output?: string;
+  output_truncated?: boolean;
+  execution_ended_at?: string;
+}
+export interface InterceptDetail extends InterceptApprovalRow {
+  audit: InterceptAudit | null;
+}
+
+export type TrafficEvidenceRole = "baseline" | "proof" | "verification" | "supporting";
+export interface TrafficEvidenceRef {
+  traffic_id: string;
+  role?: TrafficEvidenceRole;
+  note?: string;
+}
+export interface TrafficEvidenceSnapshot {
+  id: string;
+  source_traffic_id: string;
+  captured_at: number;
+  url: string;
+  method: string;
+  status: number;
+  content_type: string;
+  req_head?: string;
+  resp_head?: string;
+  req_hash: string;
+  resp_hash: string;
+  req_len: number;
+  resp_len: number;
+}
+export interface FindingTrafficBinding {
+  id: string;
+  finding_id: string;
+  snapshot_id: string;
+  role: TrafficEvidenceRole;
+  note: string;
+  position: number;
+  created_at: string;
+  snapshot: TrafficEvidenceSnapshot;
+}
+export interface FindingTraffic {
+  finding_id: string;
+  version: number;
+  report_version: number;
+  bindings: FindingTrafficBinding[];
+}
+export interface EvidenceBodyPreview {
+  content: string;
+  offset: number;
+  total: number;
+  next_offset: number;
+  truncated: boolean;
+  binary: boolean;
+}
+export interface FindingTrafficDetail {
+  binding: FindingTrafficBinding;
+  request: EvidenceBodyPreview;
+  response: EvidenceBodyPreview;
+}
+
+/** GET /api/update/check —— 当前版本与 GitHub 最新正式版的比较结果。 */
+export interface UpdateCheck {
+  /** 当前运行的版本；开发构建为 "dev" 或 git describe 的带后缀形式。 */
+  current: string;
+  /** 运行形态。docker 下换装只作用于容器可写层，重建容器会退回镜像版本。 */
+  mode: "docker" | "binary";
+  os: string;
+  arch: string;
+  repo: string;
+  /** 是否存在可回滚的上一版本（artex.old）。 */
+  has_backup: boolean;
+  /** 本次启动时自更新自举的结论（换装失败 / 已回滚等），无事发生时为空。 */
+  boot_notice?: string;
+  rolled_back?: boolean;
+  /** 查询 GitHub 失败时给出原因，此时下面的字段都不会有。 */
+  error?: string;
+  latest?: string;
+  notes?: string;
+  html_url?: string;
+  published_at?: string;
+  /** 当前平台对应的发布包名，以及该 Release 是否真的带了它。 */
+  asset?: string;
+  asset_available?: boolean;
+  size?: number;
+  has_update?: boolean;
+  /** 双方版本号是否可比较；开发构建为 false，此时禁用一键更新。 */
+  comparable?: boolean;
+  /** comparable 为 false 时的说明。 */
+  reason?: string;
+}
+
+/** /api/update/stream 推送的一条更新进度。 */
+export interface UpdateProgress {
+  phase: "idle" | "downloading" | "verifying" | "extracting" | "staged" | "failed";
+  /** 仅下载阶段有意义（0-100）；其余阶段为 -1。 */
+  percent: number;
+  message: string;
+  version?: string;
+  error?: string;
 }

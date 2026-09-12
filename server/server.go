@@ -1,7 +1,6 @@
 package server
 
 import (
-	"archive/zip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -55,10 +55,11 @@ type Server struct {
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	// llmProv is the fully-decorated global provider (recorder + failover chain)
 	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
-	llmProv llm.Provider
-	llmCfg  agent.Config // current LLM config (key not exposed)
-	llmOn   bool
-	llmProf string // active LLM profile name (for llmrec tagging)
+	llmProv   llm.Provider
+	llmDirect llm.Provider // concrete global provider, before any failover pool
+	llmCfg    agent.Config // current LLM config (key not exposed)
+	llmOn     bool
+	llmProf   string // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -121,6 +122,7 @@ type Server struct {
 	// channel coalesces enqueue bursts; the database remains the source of truth.
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
+	side        *sideQuestionState
 }
 
 // profBundle is a planner/worker pair built from one LLM profile.
@@ -141,9 +143,11 @@ type provEntry struct {
 type triggeredRun struct {
 	agentKey  string
 	title     string
-	message   string
-	taskID    int64 // source task for finding/goal triggers; 0 for interval/none
-	mergeable bool  // true for finding/goal event triggers (merge by taskID)
+	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
+	taskID    int64  // source task for finding/goal triggers; 0 for interval/none
+	taskDesc  string // 任务描述(任务级,同任务相同);合并时只渲染一次
+	taskGoal  string // 任务目标(任务级,同任务相同);合并时只渲染一次
+	mergeable bool   // true for finding/goal event triggers (merge by taskID)
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
@@ -157,6 +161,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		profAgents: map[int64]*profBundle{}, profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
 	s.applyRetryPolicy()
@@ -217,9 +222,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
-		wireTools(m.pg, domainReg)    // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
-		seedPrompts(m.pg)             // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		s.seedOrchestrationTools()    // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
+		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		if err := s.seedFindingRetester(); err != nil {
+			log.Printf("[retester] seed: %v", err)
+		}
+		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
@@ -243,6 +252,17 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	s.restoreTaskRuntimes()
+	go s.reconcileConcurrency()
+	s.startTaskArchiveWorker()
+	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+	return s
+}
+
+// Restored deadline and worker loops must inherit the same context as new tasks,
+// including the side-question checkpoint publisher installed during startup.
+func (s *Server) restoreTaskRuntimes() {
+	m := s.m
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
@@ -258,7 +278,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
 		if !isTerminalStatus(lifecycle.Status) {
-			s.engine.startDeadlineCoordinator(ctx, t)
+			s.engine.startDeadlineCoordinator(s.ctx, t)
 		}
 	}
 	// Restore every task that had already been admitted before shutdown. Starting
@@ -268,13 +288,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	for _, t := range m.List() {
 		lifecycle := t.lifecycleSnapshot()
 		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
-			s.engine.Run(ctx, t)
+			s.engine.Run(s.ctx, t)
 		}
 	}
-	go s.reconcileConcurrency()
-	s.startTaskArchiveWorker()
-	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
-	return s
 }
 
 // agentMaxTurns returns the configured max_turns for an agent key (0 = unlimited,
@@ -415,6 +431,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	// the tools-table binding (default = worker), so worker behavior is unchanged.
 	wProv, wCfg := s.providerForAgent("worker", pinID, gProv, gCfg)
 	wk := agent.NewWorker(wProv, wCfg.Model, s.m.dir, tx, wCfg.CompactionWindow(), s.agentMaxTurns("worker"))
+	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert())
 	wk.SetTrafficRecording(s.m.TrafficEnabled())
@@ -426,6 +443,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetKillWork(s.engine.KillWork)                       // planner kill_work → terminate a running work
 	pl.SetSteerWork(s.engine.SteerWork)                     // planner steer_work → inject mid-run course-correction
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
@@ -479,7 +497,11 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		profName := s.llmProf
 		s.cfgMu.Unlock()
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = bindSideProvider(prov, cfg, 0, profName)
 	}
+	s.cfgMu.Lock()
+	s.llmDirect = prov
+	s.cfgMu.Unlock()
 	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
 	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
 	// 默认仍然独占该配置(见 poolForBinding)。关闭或无备选时返回原 provider,行为不变。
@@ -498,6 +520,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	mProv, mCfg := s.providerForAgent("mainagent", nil, prov, cfg)
 	s.cfgMu.Lock()
 	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	s.mainAgent.SetFindingRecorder(s.evidenceStore())
 	s.mainAgent.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
 	s.mainAgent.SetShellProfile(shellProfile)
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
@@ -616,6 +639,7 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
 		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = bindSideProvider(prov, cfg, id, p.Name)
 	}
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
@@ -735,6 +759,7 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerSideRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -747,6 +772,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
+
+	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
+	// /api/health），所以这几个改动程序自身的接口天然需要登录。
+	mux.HandleFunc("GET /api/update/check", s.updateCheck)
+	mux.HandleFunc("POST /api/update/apply", s.updateApply)
+	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
+	mux.HandleFunc("GET /api/update/stream", s.updateStream)
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
@@ -835,15 +867,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
+	s.registerFindingTraffic(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
+	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
+	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
 	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
+	mux.HandleFunc("GET /api/exploration/main-sessions", s.mainSessions)
+	mux.HandleFunc("POST /api/exploration/main-session/new", s.newMainSession)
 	mux.HandleFunc("GET /api/exploration/activity/stream", s.streamActivity)
 	mux.HandleFunc("GET /api/exploration/activity/{seq}", s.activityDetail)
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
@@ -977,6 +1015,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/decide", s.interceptDecide)
 	mux.HandleFunc("GET /api/intercept/history", s.interceptHistory)
+	mux.HandleFunc("GET /api/intercept/history/{id}", s.interceptDetail)
 	mux.HandleFunc("GET /api/intercept/task/{taskID}", s.interceptListTaskItems)
 	mux.HandleFunc("GET /api/intercept/tool-config", s.interceptGetToolConfig)
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
@@ -1411,15 +1450,16 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 // testLLM makes a real minimal completion to verify the config works.
 func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider        string `json:"provider"`
-		Model           string `json:"model"`
-		BaseURL         string `json:"base_url"`
-		Proxy           string `json:"proxy"`
-		APIKey          string `json:"api_key"`
-		ThinkingType    string `json:"thinking_type"`
-		ReasoningEffort string `json:"reasoning_effort"`
-		ProfileID       *int64 `json:"profile_id"` // 测已存 profile 时传入：api_key 为空则用它存的 key
-		Streaming       *bool  `json:"streaming"`  // 省略=流式，与保存 profile 时同一套默认
+		Provider         string `json:"provider"`
+		Model            string `json:"model"`
+		BaseURL          string `json:"base_url"`
+		Proxy            string `json:"proxy"`
+		APIKey           string `json:"api_key"`
+		ThinkingType     string `json:"thinking_type"`
+		ReasoningEffort  string `json:"reasoning_effort"`
+		ProfileID        *int64 `json:"profile_id"`         // 测已存 profile 时传入：api_key 为空则用它存的 key
+		Streaming        *bool  `json:"streaming"`          // 省略=流式，与保存 profile 时同一套默认
+		SessionHeaderKey string `json:"session_header_key"` // 非空=测试时也带该自定义会话头，值为一次性随机 session id
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1435,11 +1475,21 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	if req.Streaming != nil {
 		cfg.Stream = *req.Streaming
 	}
+	// 自定义会话头名照该配置来：非空则测试请求也发这个头(值为一次性随机 session id，
+	// 见 TestConnection)。opencode zen 等强制要求 x-opencode-session 的端点，缺了它
+	// 直接 400，必须在测试路径上也带上，否则"对话通、测试 400"。
+	cfg.SessionHeaderKey = req.SessionHeaderKey
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
-	if cfg.APIKey == "" && req.ProfileID != nil {
+	// 会话头名同理：表单未带时用已存 profile 的值兜底。
+	if req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "") {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
-			cfg.APIKey = p.APIKey
+			if cfg.APIKey == "" {
+				cfg.APIKey = p.APIKey
+			}
+			if cfg.SessionHeaderKey == "" {
+				cfg.SessionHeaderKey = p.SessionHeaderKey
+			}
 		}
 	}
 	if cfg.APIKey == "" {
@@ -2186,6 +2236,16 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stage, err := os.MkdirTemp("", "artex-finding-export-")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	defer os.RemoveAll(stage)
+	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip"); err != nil {
+		evidenceError(w, err)
+		return
+	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")
 	setDownload := func(contentType, filename string) {
@@ -2198,27 +2258,19 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
 		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
 	case "md-zip":
+		path := filepath.Join(stage, "findings.zip")
+		if err := buildFindingsEvidenceZip(path, fs, stage, now); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		defer file.Close()
 		setDownload("application/zip", "findings-"+stamp+".zip")
-		zw := zip.NewWriter(w)
-		used := map[string]int{}
-		for _, f := range fs {
-			base := report.FindingFilename(f)
-			name := base
-			// 去重:同名文件追加 -2、-3……
-			if n := used[base]; n > 0 {
-				name = fmt.Sprintf("%s-%d.md", strings.TrimSuffix(base, ".md"), n+1)
-			}
-			used[base]++
-			fw, werr := zw.Create(name)
-			if werr != nil {
-				log.Printf("[findings-export] zip create %s: %v", name, werr)
-				continue
-			}
-			_, _ = fw.Write([]byte(report.SingleFindingMarkdown(f, now)))
-		}
-		if cerr := zw.Close(); cerr != nil {
-			log.Printf("[findings-export] zip close: %v", cerr)
-		}
+		http.ServeContent(w, r, "findings.zip", now, file)
 	case "csv":
 		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
 		_, _ = w.Write(report.FindingsCSV(fs))
@@ -2226,6 +2278,10 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		assets := s.resolveFindingAssets(fs)
 		out := make([]FindingDTO, 0, len(fs))
 		for _, f := range fs {
+			for i := range f.TrafficBindings {
+				f.TrafficBindings[i].Snapshot.ReqHead = ""
+				f.TrafficBindings[i].Snapshot.RespHead = ""
+			}
 			out = append(out, findingFromDB(f, assets))
 		}
 		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
@@ -2574,7 +2630,14 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 	switch {
 	case sess == "" || sess == "main":
-		return db.ActivitySessionFilter{Worker: "mainagent"}, true
+		// bare "main" = the current segment; caller resolves MainSeg via the store.
+		return db.ActivitySessionFilter{Main: true}, true
+	case strings.HasPrefix(sess, "main:"):
+		seg, err := strconv.Atoi(strings.TrimPrefix(sess, "main:"))
+		if err != nil || seg < 0 {
+			return db.ActivitySessionFilter{}, false
+		}
+		return db.ActivitySessionFilter{Main: true, MainSeg: &seg}, true
 	case sess == "plan":
 		return db.ActivitySessionFilter{Worker: "planner"}, true
 	case strings.HasPrefix(sess, "intent:"):
@@ -2636,6 +2699,14 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeErr(w, 400, "bad session")
 		return
+	}
+	if filter.Main && filter.MainSeg == nil { // bare "main" → the current segment
+		seg, err := t.Store.CurrentMainSeg()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		filter.MainSeg = &seg
 	}
 	before := int64(atoiDefault(q.Get("before"), 0))
 	limit := min(atoiDefault(q.Get("limit"), 200), 500) // cap so one request can't pull an unbounded slice
@@ -3158,6 +3229,7 @@ func (s *Server) settingsPayload() map[string]any {
 	}
 	return map[string]any{
 		"traffic_capture":          s.m.TrafficEnabled(),
+		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
 		"llm_record":               s.m.LLMRecordEnabled(),
 		"web_search_enabled":       on,
 		"web_search_backend":       backend,
@@ -3214,8 +3286,9 @@ func (s *Server) pgDetectPython(w http.ResponseWriter, r *http.Request) {
 // off, agents get no proxy config, no traffic tools, and no proxy prompt content.
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TrafficCapture *bool `json:"traffic_capture"`
-		LLMRecord      *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
+		TrafficCapture      *bool `json:"traffic_capture"`
+		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
+		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -3313,6 +3386,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// built under the OLD switch state — drop them so they pick up the new one.
 		s.invalidateProfileAgents()
 	}
+	if req.AgentTrafficBinding != nil {
+		if err := s.m.pg.SetBool(settingAgentTrafficBinding, *req.AgentTrafficBinding); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	if req.TrafficCapture != nil {
 		if err := s.m.SetTrafficEnabled(*req.TrafficCapture); err != nil {
 			writeErr(w, 500, err.Error())
@@ -3402,10 +3481,22 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.TavilyKey) != "" {
 		tavilyKey = req.TavilyKey
 	}
+	cfg := actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}
 	// Hard cap so a slow/blocked proxy can't hang the request.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	wall := 30 * time.Second
+	// deepseek 的凭据不在表单里，来自当前激活的 LLM 配置；同时它每次搜索都跑一次
+	// 模型推理，30s 的通用上限偏紧，单独放宽。这里不预判配置能不能用——测这一下
+	// 本来就是给用户自己确认的手段，真跑不通时下面的报错比预判更有信息量。
+	probeQuery := "test"
+	if strings.TrimSpace(backend) == deepSeekWebSearchBackend {
+		cfg.DeepSeekBaseURL, cfg.DeepSeekAPIKey, cfg.DeepSeekModel = s.m.deepSeekSearchCreds()
+		wall = 120 * time.Second
+		// 搜索词由 DeepSeek 端的模型自行决定，"test" 太空泛会让它跳过搜索直接作答。
+		probeQuery = "DeepSeek company official website"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), wall)
 	defer cancel()
-	results, err := actool.WebSearchProbe(ctx, actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}, "test", 3)
+	results, err := actool.WebSearchProbe(ctx, cfg, probeQuery, 3)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "backend": backend})
 		return
@@ -3415,6 +3506,47 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "count": len(results), "backend": backend})
+}
+
+// mainSessions lists the task's main-agent conversation segments (newest-first) and
+// the current one. The frontend renders these as switchable sessions under 主 Agent.
+func (s *Server) mainSessions(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	if t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	list, err := t.Store.ListMainSessions()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	current := 0
+	if len(list) > 0 {
+		current = list[0].Seq // newest-first
+	}
+	writeJSON(w, 200, map[string]any{"sessions": list, "current": current})
+}
+
+// newMainSession starts a fresh main-agent conversation segment. Only the segment
+// counter advances — the task's exploration graph, assets and goal are untouched, so
+// the main agent continues over the same task with a clean transcript/context.
+func (s *Server) newMainSession(w http.ResponseWriter, r *http.Request) {
+	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	if t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if s.engine.IsDeleting(t.ID) {
+		writeErr(w, 409, "任务正在删除，无法新建会话")
+		return
+	}
+	m, err := t.Store.NewMainSession()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"seq": m.Seq, "created_at": rfc3339(m.CreatedAt), "current": m.Seq})
 }
 
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
@@ -3432,6 +3564,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message     string           `json:"message"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
+		Seg         *int             `json:"seg,omitempty"`         // 目标主会话分段;缺省=最新段
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3456,12 +3589,26 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	s.chatCancel[t.ID] = cancel
 	s.chatMu.Unlock()
 
+	// The turn belongs to whichever main-agent segment the user is chatting in (any
+	// segment is interactive, like the top-level chat conversations). Stamp every
+	// mainagent row with it so this turn's transcript + activity land in that segment.
+	// Missing seg (older clients) falls back to the newest segment.
+	mainSeg := 0
+	if req.Seg != nil && *req.Seg >= 0 {
+		mainSeg = *req.Seg
+	} else {
+		mainSeg, _ = t.Store.CurrentMainSeg()
+	}
+	segPtr := &mainSeg
+
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
 	// reloads and updates live: the conversation lives in the activity stream as
 	// worker="mainagent" (the per-task activity table, replayed via SSE). With
 	// attachments, the activity's Detail carries {text, attachments} so the transcript
 	// renders attachment cards.
-	s.engine.emitActivity(t, userActivityWithAttachments("mainagent", req.Message, req.Attachments))
+	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
+	humanTurn.MainSeg = segPtr
+	s.engine.emitActivity(t, humanTurn)
 	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
 		ma = s.agentsForTask(t).main
@@ -3479,7 +3626,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// emit every step (thinking/tool_use/tool_result/text/result) so the main
 			// agent session shows its work live, like worker/planner. The final answer
 			// is the captured "result" step — no separate reply emit (would duplicate).
-			emit := func(rec db.Activity) { s.engine.emitActivity(t, rec) }
+			emit := func(rec db.Activity) {
+				rec.MainSeg = segPtr
+				s.engine.emitActivity(t, rec)
+			}
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			resume := func() { s.reviveTask(t) } // set_goals 新增目标 → 把任务拉回 running
 			// 把上传附件的【绝对路径】清单拼进发给 agent 的消息,它据此用 Read/Bash 打开文件。
@@ -3487,17 +3637,17 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(req.Message, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, s.m.Assets(), t.Guard, t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
+			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Guard, t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
-				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）"})
+				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
 			}
 		}()
 		writeJSON(w, 202, map[string]any{"status": "accepted", "mode": "llm"})
 		return
 	}
 	reply := s.fallbackChat(t, req.Message)
-	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply})
+	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})
 }

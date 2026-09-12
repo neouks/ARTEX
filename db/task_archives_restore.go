@@ -78,6 +78,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
@@ -94,6 +97,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
+		{`DELETE FROM main_sessions WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM exploration_nodes WHERE exploration_id=$1`, []any{expID}},
 	} {
 		if _, err := tx.Exec(statement.query, statement.args...); err != nil {
@@ -236,9 +240,13 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err != nil {
 		return nil, err
 	}
+	remappedTables["findings"], err = normalizeArchivedFindingVersions(remappedTables["findings"])
+	if err != nil {
+		return nil, err
+	}
 	// Insert graph rows in foreign-key order. The archived stub has no graph rows,
 	// so an ID conflict signals external corruption and must stop the restore.
-	for _, table := range []string{"exploration_nodes", "exploration_edges", "exploration_anchors", "task_constraints", "activity"} {
+	for _, table := range []string{"exploration_nodes", "exploration_edges", "exploration_anchors", "task_constraints", "activity", "main_sessions"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -247,6 +255,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, err
 	} else {
 		warnings = append(warnings, warning...)
+	}
+	for _, table := range []string{"side_question_sessions", "side_question_requests"} {
+		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
 	}
 	if warning, err := restoreTaskScopes(tx, remappedTables["task_scope"]); err != nil {
 		return nil, err
@@ -258,7 +271,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_blocks", "task_asset_grants", "task_asset_links", "task_asset_dns_evidence", "task_asset_skips", "findings"} {
+	for _, table := range []string{"task_asset_blocks", "task_asset_grants", "task_asset_links", "task_asset_dns_evidence", "task_asset_skips", "findings", "finding_retests"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -273,6 +286,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if err := seedUserAssetGrants(tx, taskID); err != nil {
 		return nil, err
+	}
+	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
+		return nil, fmt.Errorf("restore finding traffic: %w", err)
 	}
 	if streamedLLMRecords != "" {
 		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
@@ -363,6 +379,52 @@ func rowExists(tx *sql.Tx, table string, id int64) bool {
 }
 
 func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
+	if table == "finding_retests" && len(raw) > 0 {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if id, ok := jsonInt64(row["conversation_id"]); ok && id > 0 {
+				var exists bool
+				if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1)`, id).Scan(&exists); err != nil {
+					return err
+				}
+				if !exists {
+					row["conversation_id"] = nil
+				}
+			}
+			if row["status"] == "pending" || row["status"] == "running" {
+				row["status"], row["error"], row["finished_at"] = "stopped", "任务归档期间复测已停止", time.Now().UTC()
+			}
+		}
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+	}
+	// json_populate_recordset inserts NULL for absent columns, bypassing SQL
+	// defaults. Preserve compatibility with v3 archives predating side memory.
+	if (table == "side_question_sessions" || table == "side_question_requests") && len(raw) > 0 {
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return err
+		}
+		field := "memory"
+		if table == "side_question_requests" {
+			field = "context_info"
+		}
+		for _, row := range rows {
+			if len(row[field]) == 0 || string(row[field]) == "null" {
+				row[field] = json.RawMessage(`{}`)
+			}
+		}
+		var err error
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
+	}
 	allowed := map[string]bool{
 		"task_asset_skips":        true,
 		"task_asset_grants":       true,
@@ -370,6 +432,9 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"exploration_nodes":       true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "task_asset_blocks": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true, "mcp_usage": true,
+		"side_question_sessions": true, "side_question_requests": true,
+		"main_sessions":   true,
+		"finding_retests": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
@@ -754,10 +819,28 @@ func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
 		return err
 	}
 	for _, row := range rows {
+		// Archives predating approval snapshots lack this NOT NULL column.
+		if source, _ := row["decision_source"].(string); source == "" {
+			source = "unknown"
+			if row["rule_id"] != nil {
+				source = "rule"
+			} else if reason, _ := row["reason"].(string); strings.HasPrefix(reason, "[模型]") {
+				source = "model"
+			}
+			row["decision_source"] = source
+		}
 		if status, _ := row["status"].(string); status == "pending" {
 			row["status"] = "timeout"
 			row["reason"] = "任务归档期间审批已超时"
 			row["decided_at"] = time.Now().UTC()
+			if audit, ok := row["audit"].(map[string]any); ok {
+				audit["effective_action"] = "deny"
+				audit["decision_reason"] = "任务归档期间审批已超时"
+				audit["execution_status"] = "not_executed"
+			}
+		} else if audit, ok := row["audit"].(map[string]any); ok && audit["execution_status"] == "awaiting_result" {
+			// An archived run cannot resume its former result callback.
+			audit["execution_status"] = "unknown"
 		}
 	}
 	if len(rows) == 0 {

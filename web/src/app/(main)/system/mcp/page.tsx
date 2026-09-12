@@ -38,7 +38,15 @@ import { api } from "@/lib/api";
 import type { Agent, MCPCall, MCPServer, MCPTestResult, MCPTool, MCPUsageStat } from "@/lib/types";
 
 type Transport = "stdio" | "http";
-type FormState = { name: string; transport: Transport; command: string; args: string; url: string; env: string };
+type FormState = {
+  name: string;
+  transport: Transport;
+  command: string;
+  args: string;
+  url: string;
+  env: string;
+  insecure: boolean;
+};
 
 export type MCPImportItem = {
   name: string;
@@ -48,9 +56,10 @@ export type MCPImportItem = {
   env: Record<string, string>;
   url?: string;
   enabled: boolean;
+  insecure?: boolean;
 };
 
-const emptyForm: FormState = { name: "", transport: "stdio", command: "", args: "", url: "", env: "" };
+const emptyForm: FormState = { name: "", transport: "stdio", command: "", args: "", url: "", env: "", insecure: false };
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -116,6 +125,7 @@ export function normalizeMCPImportConfig(value: unknown): { servers: MCPImportIt
       env,
       url: transport === "http" ? url : "",
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
+      insecure: transport === "http" && item.insecure === true,
     };
   });
   return { servers };
@@ -188,6 +198,7 @@ export default function MCPPage() {
       ? {
           name: form.name.trim(),
           transport: "http",
+          insecure: form.insecure,
           url: form.url.trim(),
           command: "",
           args: [],
@@ -197,6 +208,7 @@ export default function MCPPage() {
       : {
           name: form.name.trim(),
           transport: "stdio",
+          insecure: false,
           command: form.command.trim(),
           args: form.args.trim() ? form.args.trim().split(/\s+/) : [],
           env: parseEnv(form.env),
@@ -229,6 +241,7 @@ export default function MCPPage() {
       args: s.args.join(" "),
       url: s.url ?? "",
       env: envToText(s.env),
+      insecure: s.insecure ?? false,
     });
     setTab("config");
     setTestResult(null);
@@ -422,16 +435,26 @@ export default function MCPPage() {
             </Field>
           </>
         ) : (
-          <Field>
-            <FieldLabel htmlFor="m-url">远程 URL</FieldLabel>
-            <Input
-              id="m-url"
-              className="font-mono"
-              placeholder="https://mcp.example.com/mcp"
-              value={form.url}
-              onChange={(e) => setF({ url: e.target.value })}
-            />
-          </Field>
+          <>
+            <Field>
+              <FieldLabel htmlFor="m-url">远程 URL</FieldLabel>
+              <Input
+                id="m-url"
+                className="font-mono"
+                placeholder="https://mcp.example.com/mcp"
+                value={form.url}
+                onChange={(e) => setF({ url: e.target.value })}
+              />
+            </Field>
+            <Field orientation="horizontal">
+              <Checkbox
+                id="mcp-insecure"
+                checked={form.insecure}
+                onCheckedChange={(v) => setF({ insecure: v === true })}
+              />
+              <FieldLabel htmlFor="mcp-insecure">跳过 TLS 证书校验（仅用于可信自签证书）</FieldLabel>
+            </Field>
+          </>
         )}
         <Field>
           <FieldLabel htmlFor="m-env">

@@ -46,6 +46,20 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
+## 审批记录详情
+
+全局「审批记录」和任务内「拦截审批」支持点击行或展开按钮查看详情。展示结构参考
+[AegisHook 的审批详情组件](https://github.com/RuoJi6/AegisHook/blob/main/web/src/components/CallDetail.vue)，沿用 ARTEX 的组件和主题：
+
+- 工具请求与审批裁决左右分栏，手机端上下排列；待审批记录可在详情中允许或拒绝。
+- 展开上下文可查看当前轮输入、会话记录片段、模型或规则初判、执行输出、调用 ID 与参数/审查配置的 SHA-256 指纹。
+- 审批状态和执行结果分别保存。模型直接允许也会记录；重复提交已处理审批返回 HTTP 409。
+- `GET /api/intercept/history/{id}` 按需读取详情，原列表接口不返回上下文和输出。数据库启动迁移自动补列；旧记录显示未记录，旧任务归档可正常恢复。
+
+上下文是工具请求产生时保存的会话记录片段，最多 24 条、每条 8 KiB；当前轮输入最多 32 KiB，执行输出最多 64 KiB，截断会明确标注。
+当前裁判模型仍只接收工具名称和参数，展示的会话上下文不代表模型已使用这些内容作出判断。
+当前 Norma SDK 的审批钩子不包含调用 ID，因此仅在当前运行中能够唯一匹配工具请求事件时关联结果；相同参数的并发调用无法唯一匹配时，会显示未关联，避免错误归属。
+
 ## 资产同步（ScopeSentry）
 
 支持从 [ScopeSentry](https://github.com/Autumn-27/ScopeSentry) 直接同步资产数据，免去重复收集：
@@ -89,12 +103,15 @@ docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
 
 ### 方式三：下载预编译二进制（Releases）
 
-到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `skills/` + `config.example.json`：
+到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
-./artex                              # → http://localhost:8787
+./start.sh                           # → http://localhost:8787
 ```
+
+> 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
+> 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
 
 ### 方式四：从源码编译单二进制
 
@@ -105,7 +122,7 @@ cd web && npm ci && npm run build:static && cd ..
 cp -r web/out server/webui/dist
 # 3) 编译（-tags embedui 才内嵌前端）
 CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
-./artex
+./start.sh
 ```
 
 ### 方式五：构建跨平台 Release 压缩包
@@ -130,7 +147,20 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
 
-### 方式一：一键更新脚本（推荐）
+### 方式一：页面一键更新（推荐）
+
+在 **系统配置** 页（侧边栏「系统配置」→ `/system/settings`）的**版本与更新**卡片里，可以直接检查并安装新版本，无需登录服务器。
+
+点「更新」后：下载当前平台的发布包 → 比对 Release 的 `SHA256SUMS` → 用 `-h` 冒烟测试新二进制 → 暂存为 `artex.new` → 程序退出，由 `start.sh` / `start.bat` 重新拉起并完成换装。页面会自动等到新版本上线后刷新。
+
+- **失败不会留下坏程序**：校验或冒烟不通过就丢弃暂存件、继续跑当前版本；换装后的新版若连续 3 次启动失败，会自动回滚到 `artex.old`（失败的那个留作 `artex.failed` 供排查）。
+- **随时可回退**：上一版本保留为 `artex.old`，卡片上有「回滚到上一版本」。注意数据库结构不会回退。
+- **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
+- **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
+- **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
+- 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
+
+### 方式二：一键更新脚本
 
 ```bash
 cd ARTEX
@@ -142,7 +172,7 @@ cd ARTEX
 - **① Docker**：可指定目标镜像 tag（回车沿用 `.env` 的 `ARTEX_TAG`，缺省 `latest`）→ `docker compose pull` → `docker compose up -d`（换新镜像重启即自动迁移）。
 - **② 本地**：重建前端静态产物 → 重新编译 `./artex`（完成后重启进程生效）。
 
-### 方式二：Docker Compose（手动）
+### 方式三：Docker Compose（手动）
 
 ```bash
 cd ARTEX
@@ -153,23 +183,23 @@ docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
 ```
 
-### 方式三：预编译二进制（Releases）
+### 方式四：预编译二进制（Releases）
 
 到 [Releases](https://github.com/Autumn-27/ARTEX/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
 
 ```bash
 cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
-./artex
+./start.sh
 ```
 
-### 方式四：从源码编译
+### 方式五：从源码编译
 
 ```bash
 git pull
 cd web && npm ci && npm run build:static && cd ..
 cp -r web/out server/webui/dist
 CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
-# 重启 ./artex
+# 重启 ./start.sh
 ```
 
 ---
@@ -193,13 +223,25 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
-**常用参数**：`./artex -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。
+**常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `artex`。
 
 ---
 
 
 
 ## 开发
+
+### 手动漏洞复测
+
+任务详情的「复测」页签可分页选择本任务的漏洞、查看历次结论和证据，并手动发起复测。启动后保留当前页签，显示转圈图标和「复测中」；确认修复后同步更新漏洞状态。
+
+在漏洞列表每行操作区点击「复测」，或在漏洞详情的「漏洞复测」区域点击「发起复测」，填写可选的修复版本、测试条件或限制，系统会创建独立的复测 Agent 会话，启动后保留当前页面。列表的平铺、按任务分组和资产视图均支持该入口；复测运行时显示转圈图标和「复测中」，需要查看时点击进入对应会话，结束后恢复「复测」。复测无需重新启动原扫描任务，结论分为「仍可复现」「已修复」「无法确认」，每次的结论、证据和会话链接保存在漏洞详情中。
+
+新版后端首次启动会预置可编辑的「漏洞复测」（`retester`）Agent，可在 Agent 管理中配置提示词、LLM、运行预算和工具。默认使用其绑定的 LLM，未绑定则使用全局激活配置。复测会话成功完成且结论为「已修复」时，系统自动将漏洞处置状态改为「已修复」；执行中、失败、停止或其他结论保留原状态。原始证据和报告始终保留。也可在状态下拉菜单中手动选择「已修复」。同一漏洞正在复测时复用已有会话，停止、失败或服务重启后可重新发起。
+
+本版历史记录通过漏洞详情和会话查看，暂未纳入漏洞报告导出或任务归档包，也未自动关联流量包。演示模式只生成明确标注的模拟记录，不请求真实目标。
+
+### 本地运行与测试
 
 ```bash
 ./dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(:5173) → http://localhost:5173

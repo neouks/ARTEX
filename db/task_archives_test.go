@@ -137,6 +137,10 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var companyID, llmProfileID int64
+	mainSession, err := d.Exploration(task.ExplorationID).NewMainSession()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := d.QueryRow(`INSERT INTO companies(name,nkey) VALUES($1,$2) RETURNING id`,
 		fmt.Sprintf("archive-company-%d", task.ID), fmt.Sprintf("archive-company-%d", task.ID)).Scan(&companyID); err != nil {
 		t.Fatal(err)
@@ -211,7 +215,11 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID}); err != nil {
+	findingID, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO finding_retests(finding_id,status,verdict,snapshot,summary) VALUES($1,'completed','inconclusive','{}','archived retest')`, findingID); err != nil {
 		t.Fatal(err)
 	}
 	archive, err := d.QueueTaskArchive(task.ID)
@@ -293,6 +301,12 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		t.Fatalf("missing deleted company warning: %v", warnings)
 	}
 	live, err := d.GetTask(task.ID)
+	if retests, err := d.ListFindingRetests(findingID); err != nil || len(retests) != 1 || retests[0].Summary != "archived retest" {
+		t.Fatalf("retest history lost on restore: %+v %v", retests, err)
+	}
+	if seg, err := d.Exploration(task.ExplorationID).CurrentMainSeg(); err != nil || seg != mainSession.Seq {
+		t.Fatalf("main session lost on restore: %d %v", seg, err)
+	}
 	if err != nil || live == nil {
 		t.Fatalf("restored task = %+v, %v", live, err)
 	}

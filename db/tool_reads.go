@@ -105,6 +105,7 @@ func (s *AssetStore) ToolAssetsByIDs(taskID int64, ids []int64) ([]*Asset, error
 // ToolNodesByIDs omits evidence and long bodies. Used by authorization and
 // compact member rendering; one query replaces one GetNode per list entry.
 const toolCompactNodeCols = `id,kind,jsonb_strip_nulls(jsonb_build_object('summary',left(payload->>'summary',360),'text',left(payload->>'text',500),
+ 'traffic_refs',CASE WHEN kind='hint' THEN jsonb_path_query_array(payload,'$.traffic_refs[0 to 19]') END,
  'confidence',left(payload->>'confidence',80),'vulnclass',left(payload->>'vulnclass',120),'severity',left(payload->>'severity',32),
  'asset_ids',payload->'asset_ids','target_ids',payload->'target_ids','target_id',payload->'target_id')),priority,state,COALESCE(origin,''),COALESCE(owner,''),COALESCE(blocked_reason,''),created_at`
 

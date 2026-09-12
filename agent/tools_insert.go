@@ -411,7 +411,7 @@ func (t *ToolSet) addCompanyScope() actool.CoreTool {
 func (t *ToolSet) addTaskScope() actool.CoreTool {
 	return writeTool(
 		"add_task_scope",
-		"把测试范围加入【本任务】——这是资产测试覆盖度的分母，也是本任务的授权边界。\n"+
+		"把测试范围加入【本任务】——这是本任务的授权边界，也是资产测试覆盖度的分母。\n"+
 			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword。\n"+
 			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
 			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词。\n"+
@@ -606,7 +606,7 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			} else if t.taskID > 0 {
 				assets, err = store.QueryDSLByTaskApproval(t.taskID, a.DSL, a.Type, "all", db.ApprovalApproved, a.Limit+1, a.Offset)
 			} else {
-				assets, err = store.QueryDSL(a.DSL, a.Type, a.Limit+1, a.Offset)
+				assets, err = store.QueryDSL(a.DSL, a.Type, 0, a.Limit+1, a.Offset)
 			}
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
