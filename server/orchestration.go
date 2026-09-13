@@ -495,7 +495,10 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
-	s.seedWorkerReadToolsUnbind() // list_facts/node_detail/list_companies/跨 work 检索从 worker 默认解绑(一次性)
+	s.seedWorkerReadToolsUnbind() // 规划专用读取工具从 worker 默认解绑(一次性)
+	if err := s.seedWorkerTraceBindings(); err != nil {
+		log.Printf("[worker] 跨 work 回看工具默认绑定失败: %v", err)
+	}
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.reseedGoalsPrompt()             // goals 提示词加入「抽操作约束」步 → 旧库追加一版新默认(一次性)
@@ -851,10 +854,11 @@ func (s *Server) seedCompanyScopeRebind() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// seedWorkerReadToolsUnbind strips the read-context / cross-work tools off worker's
+// seedWorkerReadToolsUnbind strips the planning-only read tools off worker's
 // default binding ONCE on existing DBs (guarded by a settings flag): a worker executes
 // one intent and writes back — reading facts/nodes/companies and pulling other workers'
-// traces is a planning/main concern, not the executor's. Fresh DBs already lack these via
+// trace directories is a planning/main concern. Targeted trace search/read is
+// available to workers via seedWorkerTraceBindings. Fresh DBs lack the tools below via
 // WorkerTools(); this only backfills old rows without overriding a user who deliberately
 // re-binds worker. Each RemoveAgentFromTool is per-tool + membership-guarded, so
 // planner/mainagent bindings of the same tool are untouched.
@@ -865,7 +869,7 @@ func (s *Server) seedWorkerReadToolsUnbind() {
 	}
 	for _, k := range []string{
 		"list_facts", "node_detail", "list_companies",
-		"search_all_worker_traces", "list_worker_traces", "get_worker_trace",
+		"list_worker_traces",
 	} {
 		if err := s.m.pg.RemoveAgentFromTool("worker", k); err != nil {
 			log.Printf("[worker] %s 从 worker 解绑失败: %v", k, err)
