@@ -500,7 +500,8 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 		if conf := nodeConfidence(n); conf != "" {
 			line += fmt.Sprintf(" (confidence=%s)", conf)
 		}
-		sb.WriteString(line + "\n")
+		sb.WriteString(line)
+		sb.WriteByte('\n')
 	}
 	// internal edges among members
 	var edgeLines []string
@@ -514,7 +515,8 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 	if len(edgeLines) > 0 {
 		sb.WriteString("\n【成员之间的血缘边（父→子）】：\n")
 		sort.Strings(edgeLines)
-		sb.WriteString(strings.Join(edgeLines, "\n") + "\n")
+		sb.WriteString(strings.Join(edgeLines, "\n"))
+		sb.WriteByte('\n')
 	}
 	if len(b.Anchors) > 0 {
 		sb.WriteString("\n【共同父 / 上下文锚（不是成员，只用于理解这些结果从哪个意图探出）】：\n")
@@ -524,7 +526,7 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 			if n != nil {
 				state = n.State
 			}
-			sb.WriteString(fmt.Sprintf("- #%d [%s] %s\n", a, state, nodeSummary(n)))
+			fmt.Fprintf(&sb, "- #%d [%s] %s\n", a, state, nodeSummary(n))
 		}
 	}
 	return sb.String()

@@ -171,7 +171,8 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	if s.m.Assets() != nil {
 		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
 	}
-	tsx.SetNotify(t.Notify) // hint writes wake this task's planner (no-op for read tools)
+	tsx.SetNotify(t.Notify)         // 通用唤醒（无专用回调的写操作走它；读工具为 no-op）
+	tsx.SetNotifyHint(t.NotifyHint) // add_hint → 记一条「人新增了 N 条战略提示：…」触发并唤醒 planner
 	return pick(tsx).Call(ctx, inner, nil)
 }
 
@@ -854,22 +855,25 @@ func (s *Server) seedCompanyScopeRebind() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// seedWorkerReadToolsUnbind strips the planning-only read tools off worker's
-// default binding ONCE on existing DBs (guarded by a settings flag): a worker executes
-// one intent and writes back — reading facts/nodes/companies and pulling other workers'
-// trace directories is a planning/main concern. Targeted trace search/read is
-// available to workers via seedWorkerTraceBindings. Fresh DBs lack the tools below via
-// WorkerTools(); this only backfills old rows without overriding a user who deliberately
-// re-binds worker. Each RemoveAgentFromTool is per-tool + membership-guarded, so
-// planner/mainagent bindings of the same tool are untouched.
+// seedWorkerReadToolsUnbind strips the read-context tools off worker's default
+// binding ONCE on existing DBs (guarded by a settings flag): a worker executes one
+// intent and writes back — reading facts/companies and listing all workers' traces is
+// a planning/main concern, not the executor's. Fresh DBs already lack these via
+// WorkerTools(); this only backfills old rows without overriding a user who
+// deliberately re-binds worker. Each RemoveAgentFromTool is per-tool +
+// membership-guarded, so planner/mainagent bindings of the same tool are untouched.
+//
+// NOTE: search_all_worker_traces / get_worker_trace / node_detail are intentionally NOT
+// unbound — worker owns them for cross-work look-back + node drill-down (see WorkerTools).
+// They used to be in this list back when worker lacked them; seedWorkerTraceBindings
+// repairs DBs whose old run stripped them.
 func (s *Server) seedWorkerReadToolsUnbind() {
 	const flag = "worker_readtools_unbind_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
 	for _, k := range []string{
-		"list_facts", "node_detail", "list_companies",
-		"list_worker_traces",
+		"list_facts", "list_companies", "list_worker_traces",
 	} {
 		if err := s.m.pg.RemoveAgentFromTool("worker", k); err != nil {
 			log.Printf("[worker] %s 从 worker 解绑失败: %v", k, err)
