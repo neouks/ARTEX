@@ -20,8 +20,8 @@ func TestWorkerTraceBindingsMigration(t *testing.T) {
 	}
 	t.Cleanup(func() { pg.Close() })
 	s := &Server{m: &Manager{pg: pg}}
-	const flag = "worker_targeted_trace_bindings_v1"
-	for _, key := range []string{flag, "worker_readtools_unbind_v1"} {
+	const flag = "worker_targeted_trace_bindings_v2"
+	for _, key := range []string{flag, "worker_targeted_trace_bindings_v1", "worker_readtools_unbind_v1"} {
 		value, exists, err := pg.GetSetting(key)
 		if err != nil {
 			t.Fatal(err)
@@ -53,7 +53,7 @@ func TestWorkerTraceBindingsMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, seed := range agent.BuiltinToolSeeds() {
-		if seed.Key != "search_all_worker_traces" && seed.Key != "get_worker_trace" {
+		if seed.Key != "search_all_worker_traces" && seed.Key != "get_worker_trace" && seed.Key != "node_detail" {
 			continue
 		}
 		schema, _ := json.Marshal(seed.Schema)
@@ -64,13 +64,17 @@ func TestWorkerTraceBindingsMigration(t *testing.T) {
 	if _, err := pg.Exec(`UPDATE tools SET enabled=false WHERE key='get_worker_trace'`); err != nil {
 		t.Fatal(err)
 	}
+	// v1 already ran, but v2 must still backfill node_detail.
+	if err := pg.SetSetting("worker_targeted_trace_bindings_v1", "true"); err != nil {
+		t.Fatal(err)
+	}
 	// Reproduce an old database before the unbind migration ran as well.
 	_, _ = pg.Exec(`DELETE FROM settings WHERE key='worker_readtools_unbind_v1'`)
 	s.seedWorkerReadToolsUnbind()
 	if err := s.seedWorkerTraceBindings(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"search_all_worker_traces", "get_worker_trace"} {
+	for _, name := range []string{"search_all_worker_traces", "get_worker_trace", "node_detail"} {
 		row, err := pg.GetTool(name)
 		if err != nil || row == nil {
 			t.Fatal(err)
