@@ -345,7 +345,7 @@ func (t *ToolSet) anchorOwner(assetID int64) error {
 	if t.workerExecution && t.as != nil {
 		return t.as.RememberWorkerAccess(t.taskID, t.ownerNode, nil, []int64{assetID})
 	}
-	if t.ownerNode > 0 && assetID > 0 {
+	if t.ts != nil && t.ownerNode > 0 && assetID > 0 {
 		return t.ts.Anchor(t.ownerNode, assetID)
 	}
 	return nil
@@ -416,6 +416,35 @@ func writeTool(name, desc string, schema map[string]any, run func(context.Contex
 	})
 }
 
+// readExpTool / writeExpTool build a domain tool whose handler dereferences the
+// task-bound ExplorationStore. Two ToolSets carry a nil store: the catalog's
+// seed-only shell (never called) and the server-level one behind buildDomainReg,
+// which the tools table can bind to ANY agent — including ones that never run
+// inside a task (auto/pentest/reporter/自定义 agent/旁路提问). Refusing there
+// keeps a mis-bound tool a bad tool call; without the guard it was a nil deref,
+// and tool handlers run on the harness's own goroutine, so the panic is out of
+// reach of every recover() in the server and kills the whole process.
+func (t *ToolSet) readExpTool(name, desc string, schema map[string]any, run func(context.Context, json.RawMessage) (actool.Result, error)) actool.CoreTool {
+	return readTool(name, desc, schema, t.needExploration(name, run))
+}
+
+func (t *ToolSet) writeExpTool(name, desc string, schema map[string]any, run func(context.Context, json.RawMessage) (actool.Result, error)) actool.CoreTool {
+	return writeTool(name, desc, schema, t.needExploration(name, run))
+}
+
+// needExploration wraps a handler so it only runs with an exploration store.
+// Tools that degrade more usefully than "unavailable" (report_finding points at
+// add_task_hint, set_goals/set_constraints at the task itself) keep their own
+// bespoke guard instead.
+func (t *ToolSet) needExploration(name string, run func(context.Context, json.RawMessage) (actool.Result, error)) func(context.Context, json.RawMessage) (actool.Result, error) {
+	return func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+		if t == nil || t.ts == nil {
+			return actool.Errorf(name + " 需要任务上下文（探索图）：当前 agent 不在某个任务内运行，取不到任务的探索图，该工具不可用。请在任务内使用它，或改用带 task_id 的跨任务读取工具（get_task_node_detail / list_task_findings / get_task_graph 等）。"), nil
+		}
+		return run(ctx, in)
+	}
+}
+
 func jsonResult(v any) (actool.Result, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -427,7 +456,7 @@ func jsonResult(v any) (actool.Result, error) {
 // --- read tools (planner + worker) ---
 
 func (t *ToolSet) graphOverview() actool.CoreTool {
-	return readTool("graph_overview",
+	return t.readExpTool("graph_overview",
 		"(探索链路图)探索态势蒸馏摘要：资产计数、无接口的站点、frontier、发现、hints(人类/主 agent 的战略提示，生成意图时须纳入)。Planner 每轮已预取；仅在需要刷新时调用。",
 		obj(map[string]any{}),
 		func(_ context.Context, raw json.RawMessage) (actool.Result, error) {
@@ -1343,7 +1372,7 @@ func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
 	} else {
 		description += "before 使用上一页 next_before，翻页保留筛选条件；失败不等于没有结果。"
 	}
-	return readTool(name, description,
+	return t.readExpTool(name, description,
 		obj(map[string]any{"limit": intp("1..100，默认20"), "before": intp("上一页 next_before"), "q": str("摘要关键词"), "severity": str("漏洞严重等级，仅漏洞列表适用"), "asset_id": idp("按关联资产筛选")}),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			var q struct {
@@ -1432,7 +1461,7 @@ func compactFact(n *db.Node) map[string]any {
 }
 
 func (t *ToolSet) nodeDetail() actool.CoreTool {
-	return readTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets。",
+	return t.readExpTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets。",
 		obj(map[string]any{"id": idp("探索图节点 id(非资产 id)"), "field": str("延期字段的 JSON Pointer，默认整个 payload"), "index": intp("集合 next_index 续页"), "offset": intp("文本 next_offset 续读"), "max_chars": intp("默认8000，最大24000")}, "id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
@@ -1585,7 +1614,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
-	return writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
+	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "maxItems": 4, "description": "【优先用这个】要新增的探索方向数组，最多 4 条，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
@@ -1658,7 +1687,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 }
 
 func (t *ToolSet) listGoals() actool.CoreTool {
-	return readTool("list_goals", "列出本任务的目标节点及其状态（open/met），用于判断是否达成。",
+	return t.readExpTool("list_goals", "列出本任务的目标节点及其状态（open/met），用于判断是否达成。",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
 			g, _ := t.ts.ListByKind(db.KindGoal, 100)
@@ -1668,7 +1697,7 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 }
 
 func (t *ToolSet) proveGoal() actool.CoreTool {
-	return writeTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
+	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
 		obj(map[string]any{
 			"goal_id":     idp("目标节点 id"),
 			"evidence_id": idp("证明它的发现/事实节点 id"),
@@ -1959,7 +1988,7 @@ func factSchema() map[string]any {
 }
 
 func (t *ToolSet) recordFact() actool.CoreTool {
-	return writeTool("record_fact", factWriteContract+"\n把探索【事实/结论】写入探索图，连到产生它的意图（intent_id）。用于记录探索结果——包括指纹/枚举等【正向结论】，和'端口关闭'/'参数不可注入'/'未发现登录入口'等【否定结论】。\n"+
+	return t.writeExpTool("record_fact", factWriteContract+"\n把探索【事实/结论】写入探索图，连到产生它的意图（intent_id）。用于记录探索结果——包括指纹/枚举等【正向结论】，和'端口关闭'/'参数不可注入'/'未发现登录入口'等【否定结论】。\n"+
 		"⚠️一次探索的多个观察要【汇总成一条事实】，不要拆成多条，可以合并成一条事实的就尽量用一条事实表示：summary=对本次结论的总结性一句话，detail=相关细节（可含多个具体项）。例：指纹意图→一条事实 {summary:'识别了 X 站点的技术栈与响应特征', detail:'nginx 1.25 / Vue3 / 200 / title=.. / body_len=..'}，而不是状态码、指纹、标题各记一条。一条意图通常只产出一条事实，拆太碎会让图谱无限膨胀。\n"+
 		"★facts 数组用于一次写多条【彼此不同】的结论（每条可省略 intent_id，默认用顶层 intent_id）。返回 ids 数组，与 facts 等长同序。\n"+
 		"⚠️只写你在工具输出里【真实看到】的结论，不要脑补。evidence 与 confidence 用来防止不准确的结论污染图谱：\n"+
@@ -2225,7 +2254,7 @@ func (t *ToolSet) setConstraints() actool.CoreTool {
 }
 
 func (t *ToolSet) addHint() actool.CoreTool {
-	return writeTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
+	return t.writeExpTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",
 		obj(map[string]any{
 			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/asset_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
@@ -2287,7 +2316,7 @@ func (t *ToolSet) addHint() actool.CoreTool {
 
 // killWorkTool lets the planner terminate a single running work (by intent id).
 func (t *ToolSet) killWorkTool() actool.CoreTool {
-	return writeTool("kill_work", "终止一条正在运行的意图(work)。用于叫停跑偏/无意义的探索；被终止的意图标记为 stopped，不再自动重领。先用 get_worker_output 看看它在干嘛再决定。",
+	return t.writeExpTool("kill_work", "终止一条正在运行的意图(work)。用于叫停跑偏/无意义的探索；被终止的意图标记为 stopped，不再自动重领。先用 get_worker_output 看看它在干嘛再决定。",
 		obj(map[string]any{"intent_id": idp("要终止的意图 id（= work 句柄）")}, "intent_id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.killWork == nil {
@@ -2322,7 +2351,7 @@ func (t *ToolSet) killWorkTool() actool.CoreTool {
 // which re-plans its next step (already-gathered context is kept). For in-intent
 // nudges ("停做 X、聚焦 Y"); if the whole direction is wrong use kill_work + a new intent.
 func (t *ToolSet) steerWorkTool() actool.CoreTool {
-	return writeTool("steer_work", "给一条正在运行的意图(work)实时注入纠偏指令，不打断它、不丢已有进展：worker 会在下一步动作前收到你的指令并据此调整。用于'别再走 X、聚焦 Y'这类【意图内】纠偏；若方向整个错了应改用 kill_work 再下新意图。建议先用 get_worker_output 看它在干嘛。",
+	return t.writeExpTool("steer_work", "给一条正在运行的意图(work)实时注入纠偏指令，不打断它、不丢已有进展：worker 会在下一步动作前收到你的指令并据此调整。用于'别再走 X、聚焦 Y'这类【意图内】纠偏；若方向整个错了应改用 kill_work 再下新意图。建议先用 get_worker_output 看它在干嘛。",
 		obj(map[string]any{
 			"intent_id": idp("要纠偏的意图 id（= work 句柄）"),
 			"message":   str("给 worker 的纠偏指令，明确让它停止什么、转向什么"),
@@ -2361,7 +2390,7 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
-	return readTool("get_worker_output", "读取最新 result，没有 result 时返回最新 text。state 表示意图当前状态；长正文使用 next_offset 续读。",
+	return t.readExpTool("get_worker_output", "读取最新 result，没有 result 时返回最新 text。state 表示意图当前状态；长正文使用 next_offset 续读。",
 		obj(map[string]any{"intent_id": idp("意图 ID"), "offset": intp("正文字符偏移，默认0"), "max_chars": intp("正文字符数，默认8000，最大24000")}, "intent_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -2443,7 +2472,7 @@ func traceSteps(acts []db.Activity) []map[string]any {
 // list step summaries, keyword-search within one work, or pull full detail of a
 // few specific steps. Thinking steps are excluded everywhere.
 func (t *ToolSet) getWorkerTrace() actool.CoreTool {
-	return readTool("get_worker_trace", "读取意图执行轨迹摘要，默认20，最大100，before续页；step_ids显式读取至多5个步骤正文，与q/before互斥。正文默认8000、最大24000字符，offset续读。不包含思考。",
+	return t.readExpTool("get_worker_trace", "读取意图执行轨迹摘要，默认20，最大100，before续页；step_ids显式读取至多5个步骤正文，与q/before互斥。正文默认8000、最大24000字符，offset续读。不包含思考。",
 		obj(map[string]any{"intent_id": idp("意图 ID"), "q": str("摘要/正文关键词"), "before": intp("摘要 next_before"), "limit": intp("摘要默认20，最大100"), "step_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": 5}, "offset": intp("正文 next_offset"), "max_chars": intp("正文默认8000，最大24000")}, "intent_id"),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			var in struct {
@@ -2563,7 +2592,7 @@ func (t *ToolSet) getWorkerTrace() actool.CoreTool {
 // finding what a worker saw but never wrote back as a fact. Returns only matching
 // summaries (≤100 chars), each tagged with its intent_id for follow-up drill-down.
 func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
-	return readTool("search_all_worker_traces", "按关键词搜索其他 Worker 的授权可见轨迹摘要，不包含思考；详情用 get_worker_trace。默认20，最大100。",
+	return t.readExpTool("search_all_worker_traces", "按关键词搜索其他 Worker 的授权可见轨迹摘要，不包含思考；详情用 get_worker_trace。默认20，最大100。",
 		obj(map[string]any{"q": str("正文或摘要关键词"), "limit": intp("默认20，最大100"), "before": intp("next_before 续页")}, "q"),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
@@ -2617,7 +2646,7 @@ func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
 // from search_all_worker_traces hits. Excludes still-open intents (not yet run →
 // no process to inspect).
 func (t *ToolSet) listWorkerTraces() actool.CoreTool {
-	return readTool("list_worker_traces", "分页查询已执行意图摘要，用于复用其他 Worker 观察；详情使用 get_worker_trace。默认20，最大100。",
+	return t.readExpTool("list_worker_traces", "分页查询已执行意图摘要，用于复用其他 Worker 观察；详情使用 get_worker_trace。默认20，最大100。",
 		obj(map[string]any{"q": str("摘要关键词"), "limit": intp("默认20，最大100"), "before": intp("next_before 续页")}),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {

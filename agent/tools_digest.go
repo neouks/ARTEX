@@ -284,7 +284,7 @@ func (t *ToolSet) resolveDigest(id int64) (*db.Node, *db.ExplorationStore, int64
 // a distinct tool from node_detail because it returns a LIST of members, not one
 // node's full detail.
 func (t *ToolSet) expandDigest() actool.CoreTool {
-	return writeTool("expand_digest",
+	return t.writeExpTool("expand_digest",
 		"展开一个 cold digest：返回它折叠的成员紧凑列表（id/summary/state/confidence），与概览 recent_facts/recent_done_intents 同形状。要某条完整细节/证据用 node_detail(member_id)。",
 		map[string]any{
 			"type": "object",
@@ -410,7 +410,7 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 // with its body + member count — so the planner can drill an asset directory down
 // to its directions without reading every digest globally.
 func (t *ToolSet) expandIndex() actool.CoreTool {
-	return writeTool("expand_index", "按资产展开冷摘要索引（0为未锚定桶）。默认20，最大100；before续页，正文详情使用 expand_digest。",
+	return t.writeExpTool("expand_index", "按资产展开冷摘要索引（0为未锚定桶）。默认20，最大100；before续页，正文详情使用 expand_digest。",
 		obj(map[string]any{"asset_id": idp("资产 ID，默认0"), "before": intp("next_before 续页"), "limit": intp("默认20，最大100")}),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
