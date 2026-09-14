@@ -4,7 +4,7 @@ value: tangerine
 */
 
 :root[data-theme-preset="tangerine"] {
-  --radius: 0.625rem;
+  --radius: 5px;
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.32 0 0);
   --popover: oklch(1 0 0);

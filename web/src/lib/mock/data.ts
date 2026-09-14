@@ -999,6 +999,16 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
       ts: T("2026-07-25T23:50:00Z"),
     },
 
+    {
+      id: "i14",
+      type: "intent",
+      payload: P({ summary: "核对订单接口的权限边界（等待运行）" }),
+      priority: 5,
+      state: "open",
+      origin: "planner",
+      ts: T("2026-07-26T00:10:00Z"),
+    },
+
     // ── 事实 ──
     {
       id: "fa1",

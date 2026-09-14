@@ -27,6 +27,8 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
+	workerControlMu sync.Mutex // Serializes user controls with worker admission.
+
 	ID           string `json:"id"`
 	ExpID        int64  `json:"exploration_id"`
 	Name         string `json:"name"` // 可选任务名称;空=未命名
@@ -1908,7 +1910,7 @@ func (t *Task) NotifyGoalEdited(oldText, newText string) {
 	t.Notify()
 }
 
-// NotifyCancelled records that the human deleted intentID (reason = 删除原因), then
+// NotifyCancelled records that the human cancelled intentID (reason = 取消原因), then
 // wakes the planner so the next round spells out which intent was removed and why.
 // The intent is stopped (not deleted); the reason is attached to it as a fact.
 func (t *Task) NotifyCancelled(intentID int64, reason string) {

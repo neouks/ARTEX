@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -22,9 +24,12 @@ type taskControlResult struct {
 }
 
 type intentControlResult struct {
-	ID      int64             `json:"id"`
-	State   string            `json:"state"`
-	Deleted *db.IntentCleanup `json:"deleted,omitempty"`
+	CancelledByUser bool              `json:"cancelled_by_user"`
+	CancelReason    string            `json:"cancel_reason,omitempty"`
+	Queued          bool              `json:"queued,omitempty"`
+	ID              int64             `json:"id"`
+	State           string            `json:"state"`
+	Deleted         *db.IntentCleanup `json:"deleted,omitempty"`
 }
 
 // parsedTaskID carries one requested batch id together with whether it parsed.
@@ -150,6 +155,8 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 }
 
 func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason string) (intentControlResult, error) {
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
 	out := intentControlResult{ID: iid}
 	node, err := t.Store.GetNode(iid)
 	if err != nil {
@@ -174,39 +181,89 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		}
 		out.State = "paused"
 	case "resume":
-		if node.State != "paused" {
-			return out, fmt.Errorf("仅已暂停的意图可以恢复")
+		if node.State == "open" && !node.UserCancelled() {
+			out.State = "open"
+			return out, nil
 		}
-		changed, err := t.Store.CompareAndSetIntentState(iid, "paused", "open")
+		if node.State != "paused" && !(node.State == "stopped" && node.UserCancelled()) {
+			return out, fmt.Errorf("仅已暂停或用户已取消的意图可以重新开启")
+		}
+		changed, err := t.Store.ReopenIntentByUser(iid, node.State)
 		if err != nil {
 			return out, err
 		}
 		if !changed {
-			return out, fmt.Errorf("%w: 意图不再是 paused 状态", db.ErrIntentStateConflict)
+			return out, db.ErrIntentStateConflict
 		}
-		t.Notify()
-		out.State = "open"
-	case "cancel":
-		// 「删除」新语义:不销毁意图与产出,而是把意图停到 stopped、把用户填写的删除原因
-		// 作为一条事实挂到该意图上,并用 cancelled 触发告知 planner(意图内容 + 删除原因)。
-		if node.State != "running" && node.State != "paused" {
-			return out, fmt.Errorf("仅运行中或已暂停的意图可以删除")
-		}
-		reason = strings.TrimSpace(reason)
-		if reason == "" {
-			return out, fmt.Errorf("请填写删除原因")
-		}
-		if node.State == "running" {
-			if err := s.engine.ControlWork(ctx, iid, "cancel"); err != nil {
-				return out, err
+		queued, err := s.admitTask(t, "resume")
+		if err != nil {
+			if restoreErr := t.Store.RestoreUserReopen(node); restoreErr != nil {
+				return out, fmt.Errorf("%w; restore: %v", err, restoreErr)
 			}
-		}
-		if _, err := t.Store.StopIntentWithReason(iid, reason, "user"); err != nil {
 			return out, err
 		}
-		s.cancelWorkerSide(t.ID, t.ExpID, iid)
-		t.NotifyCancelled(iid, reason)
-		out.State = "stopped"
+		t.Notify()
+		out.State, out.Queued = "open", queued
+	case "cancel":
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			reason = "用户取消等待运行"
+			if node.State != "open" {
+				reason = "用户取消 Worker"
+			}
+		}
+		// A claimed row can precede registerWork briefly. Wait for registration or
+		// settlement without letting another UI action or pool claim race this one.
+		waitCtx, cancel := context.WithTimeout(ctx, workControlWaitTimeout)
+		defer cancel()
+		for {
+			if err := waitCtx.Err(); err != nil {
+				return out, err
+			}
+			factID, stopErr := t.Store.StopIntentWithReason(iid, reason, "user")
+			if stopErr == nil {
+				if factID != 0 {
+					s.cancelWorkerSide(t.ID, t.ExpID, iid)
+					t.NotifyCancelled(iid, reason)
+				}
+				current, err := t.Store.GetNode(iid)
+				if err != nil {
+					return out, err
+				}
+				out.State, out.CancelledByUser = "stopped", true
+				var p struct {
+					Reason string `json:"cancel_reason"`
+				}
+				if current != nil {
+					_ = json.Unmarshal(current.Payload, &p)
+				}
+				out.CancelReason = p.Reason
+				break
+			}
+			if !errors.Is(stopErr, db.ErrIntentStateConflict) {
+				return out, stopErr
+			}
+			current, err := t.Store.GetNode(iid)
+			if err != nil {
+				return out, err
+			}
+			if current != nil && (current.State == "paused" || current.State == "open" || (current.State == "stopped" && current.UserCancelled())) {
+				continue
+			}
+			if current == nil || current.State != "running" {
+				return out, stopErr
+			}
+			if err := s.engine.ControlWork(waitCtx, iid, "cancel"); err != nil {
+				if !errors.Is(err, errWorkControlConflict) {
+					return out, err
+				}
+				select {
+				case <-waitCtx.Done():
+					return out, waitCtx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		}
 	default:
 		return out, fmt.Errorf("action must be pause|resume|cancel")
 	}

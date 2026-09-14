@@ -1024,7 +1024,7 @@ export default function SkillsPage() {
               <TabsTrigger value="mcp">
                 关联 MCP
                 {newMcps.length > 0 && (
-                  <span className="ml-1.5 rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none text-primary-foreground">
+                  <span className="ml-1.5 rounded-md bg-primary px-1.5 py-0.5 text-[10px] leading-none text-primary-foreground">
                     {newMcps.length}
                   </span>
                 )}
@@ -1032,7 +1032,7 @@ export default function SkillsPage() {
               <TabsTrigger value="visibility">
                 可见性
                 {newVisibility.length > 0 && (
-                  <span className="ml-1.5 rounded-full bg-primary px-1.5 py-0.5 text-[10px] leading-none text-primary-foreground">
+                  <span className="ml-1.5 rounded-md bg-primary px-1.5 py-0.5 text-[10px] leading-none text-primary-foreground">
                     {newVisibility.length}
                   </span>
                 )}

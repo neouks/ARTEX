@@ -1,0 +1,8 @@
+/* Non-circular pills become ordinary controls. Do not change avatar/status dots,
+   switches, slider thumbs, or rounded-none seams in connected button groups. */
+:where(button:not([role="switch"]):not([role="checkbox"]):not([role="radio"])):is([class~="rounded-full"]),
+:where([data-slot="button"], [data-slot="badge"], [data-slot="tabs-list"], [data-slot="tabs-trigger"]):is(
+  [class~="rounded-full"]
+) {
+  border-radius: var(--radius);
+}

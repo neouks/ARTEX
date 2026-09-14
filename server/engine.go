@@ -1297,6 +1297,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message string) error {
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1363,6 +1365,8 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 }
 
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
 		// Do not claim work whose target assets are still pending approval. This

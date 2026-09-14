@@ -1249,7 +1249,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Action string `json:"action"`
-		Reason string `json:"reason"` // cancel(删除)时必填:删除原因,挂为事实并告知 planner
+		Reason string `json:"reason"` // cancel 时可选：取消原因，挂为事实并告知 planner
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
@@ -1275,10 +1275,7 @@ func restoreRerunIntent(t *Task, before *db.Node) error {
 	if t == nil || before == nil {
 		return fmt.Errorf("missing intent rollback snapshot")
 	}
-	if before.State == "blocked" && before.BlockedReason != "" {
-		return t.Store.SetIntentBlockedReason(before.ID, before.BlockedReason)
-	}
-	return t.Store.SetIntentState(before.ID, before.State)
+	return t.Store.RestoreUserReopen(before)
 }
 
 func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
@@ -1297,12 +1294,18 @@ func (s *Server) rerunIntent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.engine.decInflight(t.ID)
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
 	before, err := t.Store.GetNode(iid)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	reopened, err := t.Store.ReopenIntent(iid)
+	if before == nil || before.Kind != db.KindIntent || (before.State != "blocked" && before.State != "exhausted" && before.State != "stopped") {
+		writeErr(w, 409, "仅 blocked/exhausted/stopped 意图可重跑")
+		return
+	}
+	reopened, err := t.Store.ReopenIntentByUser(iid, before.State)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

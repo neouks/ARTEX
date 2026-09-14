@@ -336,6 +336,9 @@ export const api = {
     post<{
       id: number;
       state: "paused" | "open" | "stopped";
+      cancelled_by_user: boolean;
+      cancel_reason?: string;
+      queued?: boolean;
       deleted?: { intents: number; facts: number; findings: number; activities: number };
     }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "" }),
   sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>

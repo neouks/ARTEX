@@ -472,7 +472,7 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 // SetNodeState updates any node's state (never deletes). content_version bumps
 // so a folded member's state flip invalidates its digest's cached body (§5.3).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
+	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND (kind<>'intent' OR payload->>'cancelled_by_user' IS DISTINCT FROM 'true')`, state, id, s.expID)
 	return err
 }
 
@@ -517,7 +517,7 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 // forever in the UI. Workers resume from their transcript, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
-WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
+WHERE exploration_id=$1 AND kind='intent' AND state='running' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, s.expID)
 	if err != nil {
 		return 0, err
 	}
@@ -533,7 +533,7 @@ func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
-  AND state IN ('blocked','exhausted','stopped')`, id, s.expID)
+  AND state IN ('blocked','exhausted','stopped') AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, id, s.expID)
 	if err != nil {
 		return false, err
 	}
@@ -546,7 +546,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
-WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, s.expID)
 	if err != nil {
 		return 0, err
 	}
@@ -559,7 +559,7 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, state, id, s.expID, terminal)
 	return err
 }
 
@@ -570,7 +570,7 @@ func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state st
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	res, err := s.db.Exec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4 AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, state, id, s.expID, expected, terminal)
 	if err != nil {
 		return false, err
 	}
@@ -588,7 +588,7 @@ type IntentCleanup struct {
 	Activities int64 `json:"activities"`
 }
 
-// StopIntentWithReason marks a running/paused intent as 'stopped' WITHOUT deleting
+// StopIntentWithReason marks an open/paused intent as 'stopped' WITHOUT deleting
 // it or any of its yielded facts/findings/activities, and records the user's reason
 // as a fact node hanging off that intent (intent --yields--> fact). Returns the new
 // fact node id. The caller must first stop a running worker to prevent late writes.
@@ -610,17 +610,26 @@ func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string)
 		}
 		return 0, err
 	}
-	if state != "running" && state != "paused" {
+	var existing map[string]any
+	_ = json.Unmarshal(rawPayload, &existing)
+	if state == "stopped" && existing["cancelled_by_user"] == true {
+		return 0, tx.Commit() // Already cancelled: no duplicate audit fact.
+	}
+	if state != "open" && state != "paused" {
 		return 0, fmt.Errorf("%w: intent state %s cannot be cancelled", ErrIntentStateConflict, state)
 	}
-	// Merge the delete marker into the intent's own payload so it travels with the
+	// Merge the cancellation marker into the intent's own payload so it travels with the
 	// intent everywhere (session list badge, detail banner) without a schema change.
 	ip := map[string]any{}
 	_ = json.Unmarshal(rawPayload, &ip)
 	ip["cancelled_by_user"] = true
+	if strings.TrimSpace(reason) == "" {
+		reason = "用户取消等待运行"
+	}
 	ip["cancel_reason"] = reason
+	ip["cancelled_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	newPayload, _ := json.Marshal(ip)
-	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET state='stopped', payload=$3, blocked_reason=NULL, completed_at=now(), content_version=content_version+1
 		WHERE id=$1 AND exploration_id=$2`, id, s.expID, string(newPayload)); err != nil {
 		return 0, err
 	}
@@ -634,8 +643,8 @@ func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string)
 		origin = "user"
 	}
 	raw, _ := json.Marshal(map[string]any{
-		"summary":     "用户删除了该意图",
-		"detail":      "删除原因：" + reason,
+		"summary":     "用户取消了该意图",
+		"detail":      "取消原因：" + reason + "。仅用户手动重新开启后可执行；Planner 不得重开或创建同方向替代工作。",
 		"confidence":  "observed",
 		"user_cancel": true,
 	})
@@ -1160,7 +1169,7 @@ func (s *ExplorationStore) Frontier(limit int) ([]*Node, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state='open'
+WHERE exploration_id=$1 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
 	if err != nil {
 		return nil, err
@@ -1196,7 +1205,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running')`, s.expID).Scan(&
 func (s *ExplorationStore) HasOpenIntent() (bool, error) {
 	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='intent' AND state='open'
+WHERE exploration_id=$1 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 AND NOT EXISTS(SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=$1
 WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id)))`, s.expID).Scan(&exists)
 	return exists, err
@@ -1350,7 +1359,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
-WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 	  AND NOT EXISTS (
 	    SELECT 1
 	    FROM exploration_anchors ea

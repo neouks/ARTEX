@@ -1214,10 +1214,16 @@ function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentCo
   const intent = mockIntents.find((item) => item.id === id);
   if (!intent) return { ok: false, error: "意图不存在" };
   const requiredState = action === "pause" ? "running" : "paused";
-  if (intent.inherited || intent.state !== requiredState) {
+  const payload = JSON.parse(intent.payload || "{}");
+  const cancelled = intent.state === "stopped" && payload.cancelled_by_user === true;
+  if (
+    intent.inherited ||
+    (intent.state !== requiredState && !(action === "resume" && (cancelled || intent.state === "open")))
+  ) {
     return { ok: false, state: intent.state, error: "Worker 状态已变化" };
   }
   intent.state = action === "pause" ? "paused" : "open";
+  if (action === "resume") intent.payload = JSON.stringify({ ...payload, cancelled_by_user: false });
   return { ok: true, state: intent.state };
 }
 
@@ -1916,30 +1922,43 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const action = b.action === "resume" ? "resume" : "pause";
     return { items: bodyIDs(b.task_ids).map((id) => controlMockTask(id, action)) };
   }
+  if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "rerun" && m === "POST") {
+    const intent = mockIntents.find((item) => item.id === seg[3]);
+    if (!intent || intent.inherited || !["blocked", "exhausted", "stopped"].includes(intent.state)) {
+      throw new Error("仅 blocked/exhausted/stopped 意图可重跑");
+    }
+    intent.state = "open";
+    intent.payload = JSON.stringify({ ...JSON.parse(intent.payload || "{}"), cancelled_by_user: false });
+    return { id: seg[1], reopened: Number(intent.id.replace(/\D/g, "")) || 0 };
+  }
   if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "control" && m === "POST") {
     const id = seg[3];
     if (b.action === "cancel") {
-      const index = mockIntents.findIndex((item) => item.id === id);
-      const intent = mockIntents[index];
-      if (!intent || intent.inherited || (intent.state !== "running" && intent.state !== "paused")) {
+      const intent = mockIntents.find((item) => item.id === id);
+      if (!intent || intent.inherited) throw new Error("Worker 状态已变化");
+      const payload = JSON.parse(intent.payload || "{}");
+      if (
+        !(intent.state === "stopped" && payload.cancelled_by_user) &&
+        !["open", "running", "paused"].includes(intent.state)
+      ) {
         throw new Error("Worker 状态已变化");
       }
-      mockIntents.splice(index, 1);
+      const reason = payload.cancelled_by_user
+        ? payload.cancel_reason
+        : String(b.reason ?? "").trim() || (intent.state === "open" ? "用户取消等待运行" : "用户取消 Worker");
+      intent.state = "stopped";
+      intent.payload = JSON.stringify({ ...payload, cancelled_by_user: true, cancel_reason: reason });
       return {
         id: Number(id.replace(/\D/g, "")) || 0,
-        state: "cancelled",
-        deleted: {
-          intents: 1,
-          facts: 1,
-          findings: 1,
-          activities: mockActivity.filter((item) => item.intent_id === id).length,
-        },
+        state: "stopped",
+        cancelled_by_user: true,
+        cancel_reason: reason,
       };
     }
     const action = b.action === "resume" ? "resume" : "pause";
     const result = controlMockIntent(id, action);
     if (!result.ok) throw new Error(result.error ?? "Worker 状态已变化");
-    return { id: Number(id.replace(/\D/g, "")) || 0, state: result.state };
+    return { id: Number(id.replace(/\D/g, "")) || 0, state: result.state, cancelled_by_user: false };
   }
   if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "messages" && m === "POST") {
     const id = seg[3];

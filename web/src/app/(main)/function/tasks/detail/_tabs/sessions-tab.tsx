@@ -19,7 +19,7 @@ import {
   RotateCwIcon,
   ShieldAlertIcon,
   SquareIcon,
-  Trash2Icon,
+  PlayIcon,
   UserIcon,
   WifiOffIcon,
   XIcon,
@@ -43,6 +43,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
@@ -340,8 +342,11 @@ function SessionItem({
   unread,
   onClick,
   onCancel,
+  onResume,
+  selected,
+  onSelect,
   controlling,
-  deleted,
+  executionCancelled,
 }: {
   s: Session;
   active: boolean;
@@ -350,11 +355,14 @@ function SessionItem({
   unread?: number;
   onClick: () => void;
   onCancel?: () => void;
+  onResume?: () => void;
+  selected?: boolean;
+  onSelect?: (selected: boolean) => void;
   controlling?: boolean;
-  deleted?: boolean;
+  executionCancelled?: boolean;
 }) {
-  const icon = deleted ? (
-    <Trash2Icon className="size-3.5 text-destructive" />
+  const icon = executionCancelled ? (
+    <CircleSlashIcon className="size-3.5 text-muted-foreground" />
   ) : s.role === "worker" ? (
     statusIcon(s.status)
   ) : s.live ? (
@@ -362,7 +370,10 @@ function SessionItem({
   ) : null;
 
   const cancellable =
-    s.role === "worker" && !s.inherited && !deleted && (s.status === "running" || s.status === "paused");
+    s.role === "worker" &&
+    !s.inherited &&
+    !executionCancelled &&
+    (s.status === "pending" || s.status === "running" || s.status === "paused");
   return (
     <div
       className={cn(
@@ -370,6 +381,15 @@ function SessionItem({
         active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
       )}
     >
+      {onSelect && (
+        <Checkbox
+          className="ml-2 shrink-0"
+          checked={selected}
+          disabled={controlling}
+          onCheckedChange={(value) => onSelect(value === true)}
+          aria-label={`选择 Worker #${s.intent_id}`}
+        />
+      )}
       <button
         type="button"
         onClick={onClick}
@@ -387,18 +407,18 @@ function SessionItem({
           </Badge>
         )}
         <span
-          className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}
+          className={cn("min-w-0 flex-1 truncate text-sm font-medium", executionCancelled && "text-muted-foreground")}
         >
           {displayTitle}
         </span>
-        {deleted && (
-          <Badge variant="outline" className="shrink-0 border-destructive/40 text-destructive">
-            已删除
+        {executionCancelled && (
+          <Badge variant="outline" className="shrink-0">
+            已取消执行
           </Badge>
         )}
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
-          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+          <span className="inline-flex min-w-4 items-center justify-center rounded-md bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
@@ -409,6 +429,19 @@ function SessionItem({
           </span>
         )}
       </button>
+      {executionCancelled && !s.inherited && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={onResume}
+          disabled={controlling}
+          title="开启 Worker 执行"
+          aria-label="开启 Worker 执行"
+        >
+          <PlayIcon />
+        </Button>
+      )}
       {cancellable && (
         <div className="flex shrink-0 items-center gap-0.5 pr-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover/session:opacity-100 sm:group-focus-within/session:opacity-100">
           <Button
@@ -417,11 +450,10 @@ function SessionItem({
             size="icon-xs"
             onClick={onCancel}
             disabled={controlling}
-            title="删除该意图（需填写原因，保留数据）"
-            aria-label="删除该意图（需填写原因，保留数据）"
-            className="text-destructive hover:text-destructive"
+            title="取消 Worker 执行"
+            aria-label="取消 Worker 执行"
           >
-            <Trash2Icon />
+            <CircleSlashIcon />
           </Button>
         </div>
       )}
@@ -503,6 +535,8 @@ export function SessionsTab({
   const [stopping, setStopping] = React.useState(false);
   const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
+  const [selectedWorkers, setSelectedWorkers] = React.useState<Set<string>>(new Set());
+  const [batchCancelIds, setBatchCancelIds] = React.useState<string[]>([]);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
   const [cancelReason, setCancelReason] = React.useState("");
   const [workerMessage, setWorkerMessage] = React.useState("");
@@ -550,35 +584,48 @@ export function SessionsTab({
     }
   }
 
-  const patchIntentState = React.useCallback((intentId: string, state?: string) => {
-    const patch = (rows: TaskNode[]) =>
-      state
-        ? rows.map((row) => (row.id === intentId ? { ...row, state } : row))
-        : rows.filter((row) => row.id !== intentId);
-    setIntents(patch);
-    setOlderIntents(patch);
-  }, []);
+  const patchIntentState = React.useCallback(
+    (intentId: string, state?: string, cancelled?: boolean, reason?: string) => {
+      const patch = (rows: TaskNode[]) =>
+        state
+          ? rows.map((row) => {
+              if (row.id !== intentId) return row;
+              let payload = row.payload;
+              if (cancelled !== undefined) {
+                try {
+                  const p = JSON.parse(payload || "{}");
+                  payload = JSON.stringify({
+                    ...p,
+                    cancelled_by_user: cancelled,
+                    ...(reason ? { cancel_reason: reason } : {}),
+                  });
+                } catch {
+                  /* Refreshed server rows will reconcile malformed legacy payloads. */
+                }
+              }
+              return { ...row, state, payload };
+            })
+          : rows.filter((row) => row.id !== intentId);
+      setIntents(patch);
+      setOlderIntents(patch);
+    },
+    [],
+  );
 
   const controlWorker = React.useCallback(
     async (session: Session, action: "pause" | "resume" | "cancel", reason?: string) => {
       if (!session.intent_id || session.inherited || controllingIntent) return;
-      if (action === "cancel" && !reason?.trim()) {
-        toast.error("请填写删除原因");
-        return;
-      }
       setControllingIntent(session.intent_id);
       try {
-        await api.controlIntent(taskId, session.intent_id, action, reason);
+        const result = await api.controlIntent(taskId, session.intent_id, action, reason);
+        patchIntentState(session.intent_id, result.state, result.cancelled_by_user, result.cancel_reason);
         if (action === "pause") {
-          patchIntentState(session.intent_id, "paused");
           toast.success(`Worker #${session.intent_id} 已暂停`);
         } else if (action === "resume") {
-          patchIntentState(session.intent_id, "open");
-          toast.success(`Worker #${session.intent_id} 已恢复，等待重新领取`);
+          toast.success(`Worker #${session.intent_id} 已开启执行，等待运行`);
         } else {
-          // 删除 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
-          patchIntentState(session.intent_id, "stopped");
-          toast.success(`Worker #${session.intent_id} 已删除（原因已记录，规划者将据此重新规划）`);
+          // 取消 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
+          toast.success(`Worker #${session.intent_id} 已取消执行，仅手动重新开启后可运行`);
           setCancelReason("");
         }
       } catch (error) {
@@ -590,6 +637,33 @@ export function SessionsTab({
     },
     [controllingIntent, patchIntentState, taskId],
   );
+
+  const controlWorkerBatch = async (ids: string[], action: "cancel" | "resume", reason?: string) => {
+    if (controllingIntent || ids.length === 0) return;
+    setControllingIntent("batch");
+    const succeeded = new Set<string>();
+    const failures: string[] = [];
+    try {
+      for (const id of ids) {
+        try {
+          const result = await api.controlIntent(taskId, id, action, reason);
+          patchIntentState(id, result.state, result.cancelled_by_user, result.cancel_reason);
+          succeeded.add(id);
+        } catch (error) {
+          failures.push(`#${id}：${(error as Error).message}`);
+        }
+      }
+      setSelectedWorkers((previous) => new Set([...previous].filter((id) => !succeeded.has(id))));
+      const label = action === "cancel" ? "取消执行" : "开启执行";
+      if (succeeded.size) toast.success(`${succeeded.size} 个 Worker 已${label}`);
+      if (failures.length)
+        toast.error(`${failures.length} 个 Worker 操作失败，已保留选择`, { description: failures.join("；") });
+    } finally {
+      setControllingIntent(null);
+      setBatchCancelIds([]);
+      setCancelReason("");
+    }
+  };
 
   // SSE connection state — surfaced so a dropped realtime link is visible, never
   // silently shown as "no messages".
@@ -1141,27 +1215,30 @@ export function SessionsTab({
   // For each worker session (intent), derive the display title from the intent
   // payload summary. Also store the full TaskNode for the hover-JSON tooltip.
   const sessionMeta = React.useMemo(() => {
-    const map = new Map<string, { title: string; json: unknown; deleted: boolean; deleteReason: string }>();
+    const map = new Map<
+      string,
+      { title: string; json: unknown; executionCancelled: boolean; executionCancelReason: string }
+    >();
     for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
-      let deleted = false;
-      let deleteReason = "";
+      let executionCancelled = false;
+      let executionCancelReason = "";
       if (node.payload) {
         try {
           const p = JSON.parse(node.payload);
           parsedPayload = p;
           if (p?.summary) title = String(p.summary);
           if (p?.cancelled_by_user) {
-            deleted = true;
-            deleteReason = String(p.cancel_reason ?? "");
+            executionCancelled = true;
+            executionCancelReason = String(p.cancel_reason ?? "");
           }
         } catch {
           title = node.payload.trim() || title;
         }
       }
       const json = { ...node, payload: parsedPayload };
-      map.set(node.id, { title, json, deleted, deleteReason });
+      map.set(node.id, { title, json, executionCancelled, executionCancelReason });
     }
     return map;
   }, [allIntents]);
@@ -1222,6 +1299,29 @@ export function SessionsTab({
 
   // Every main-agent segment is an independent, interactive session (like the top-level
   // chat conversations) — you can talk in any of them, newest-first.
+  const selectableWorkers = workerSessions.filter(
+    (worker) =>
+      !worker.inherited &&
+      worker.intent_id &&
+      (["pending", "running", "paused"].includes(worker.status) || sessionMeta.get(worker.id)?.executionCancelled),
+  );
+  const selectedVisibleWorkers = selectableWorkers.filter((worker) => selectedWorkers.has(worker.intent_id!));
+  const batchCancellable = selectedVisibleWorkers.filter((worker) =>
+    ["pending", "running", "paused"].includes(worker.status),
+  );
+  const batchResumable = selectedVisibleWorkers.filter(
+    (worker) => worker.status === "paused" || sessionMeta.get(worker.id)?.executionCancelled,
+  );
+  const allWorkersSelected = selectableWorkers.length > 0 && selectedVisibleWorkers.length === selectableWorkers.length;
+  const toggleWorkerSelection = (id: string, checked: boolean) => {
+    setSelectedWorkers((previous) => {
+      const next = new Set(previous);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
   const mainSessions = React.useMemo<Session[]>(
     () =>
       mainSegs.map((m) => ({
@@ -1557,7 +1657,7 @@ export function SessionsTab({
                       · {activeDisplayTitle}
                     </span>
                     {hiddenUnread > 0 && (
-                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
+                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-md bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
                         {hiddenUnread > 99 ? "99+" : hiddenUnread}
                       </span>
                     )}
@@ -1643,6 +1743,55 @@ export function SessionsTab({
                         </button>
                       )}
                     </div>
+                    {role === "worker" && selectableWorkers.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2 border-b px-2 py-2">
+                        <label className="flex items-center gap-1 text-xs">
+                          <Checkbox
+                            aria-label="全选当前已加载的可操作 Worker"
+                            checked={
+                              allWorkersSelected ? true : selectedVisibleWorkers.length ? "indeterminate" : false
+                            }
+                            disabled={controllingIntent !== null}
+                            onCheckedChange={(checked) =>
+                              setSelectedWorkers(
+                                checked === true
+                                  ? new Set(selectableWorkers.map((worker) => worker.intent_id!))
+                                  : new Set(),
+                              )
+                            }
+                          />
+                          全选已加载
+                        </label>
+                        <span className="text-xs text-muted-foreground">已选 {selectedVisibleWorkers.length}</span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={controllingIntent !== null || !batchCancellable.length}
+                          onClick={() => {
+                            setCancelReason("");
+                            setBatchCancelIds(batchCancellable.map((worker) => worker.intent_id!));
+                          }}
+                        >
+                          <CircleSlashIcon data-icon="inline-start" />
+                          取消执行 ({batchCancellable.length})
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          title={`批量开启执行（${batchResumable.length} 个 Worker）`}
+                          aria-label={`批量开启执行（${batchResumable.length} 个 Worker）`}
+                          disabled={controllingIntent !== null || !batchResumable.length}
+                          onClick={() =>
+                            void controlWorkerBatch(
+                              batchResumable.map((worker) => worker.intent_id!),
+                              "resume",
+                            )
+                          }
+                        >
+                          <PlayIcon />
+                        </Button>
+                      </div>
+                    )}
                     {items.map((s) => {
                       const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
                       return (
@@ -1659,8 +1808,18 @@ export function SessionsTab({
                             setWorkerMessage("");
                             setWorkerMessageRequestId("");
                           }}
-                          controlling={controllingIntent === s.intent_id}
-                          deleted={meta?.deleted}
+                          controlling={controllingIntent !== null}
+                          selected={selectedWorkers.has(s.intent_id ?? "")}
+                          onSelect={
+                            s.role === "worker" &&
+                            !s.inherited &&
+                            s.intent_id &&
+                            (["pending", "running", "paused"].includes(s.status) || meta?.executionCancelled)
+                              ? (checked) => toggleWorkerSelection(s.intent_id!, checked)
+                              : undefined
+                          }
+                          executionCancelled={meta?.executionCancelled}
+                          onResume={() => void controlWorker(s, "resume")}
                           onCancel={() => {
                             setCancelIntent(s);
                           }}
@@ -1796,22 +1955,34 @@ export function SessionsTab({
             </div>
             {(() => {
               const dm = active.role === "worker" ? sessionMeta.get(active.id) : undefined;
-              if (!dm?.deleted) return null;
+              if (!dm?.executionCancelled) return null;
               return (
-                <div className="flex items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2.5 text-xs">
-                  <Trash2Icon className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                <div className="flex items-start gap-2 border-b bg-muted/30 px-4 py-2.5 text-xs">
+                  <CircleSlashIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                   <div className="min-w-0">
-                    <span className="font-medium text-destructive">此意图已被用户删除</span>
+                    <span className="font-medium">Worker 已取消执行</span>
                     <span className="text-muted-foreground">
-                      （已停止执行，规划者已收到通知；意图与产出保留，可在下方查看历史）
+                      （仅手动重新开启后可运行；规划者已收到通知，意图与产出保留）
                     </span>
-                    {dm.deleteReason && (
+                    {dm.executionCancelReason && (
                       <p className="mt-1 break-words text-foreground">
-                        <span className="text-muted-foreground">删除原因：</span>
-                        {dm.deleteReason}
+                        <span className="text-muted-foreground">取消原因：</span>
+                        {dm.executionCancelReason}
                       </p>
                     )}
                   </div>
+                  {!active.inherited && (
+                    <Button
+                      size="icon-sm"
+                      variant="outline"
+                      title="开启 Worker 执行"
+                      aria-label="开启 Worker 执行"
+                      disabled={controllingIntent !== null}
+                      onClick={() => void controlWorker(active, "resume")}
+                    >
+                      <PlayIcon />
+                    </Button>
+                  )}
                 </div>
               );
             })()}
@@ -1996,7 +2167,7 @@ export function SessionsTab({
                         size="icon-xs"
                         variant="destructive"
                         onClick={() => void controlWorker(active, "pause")}
-                        disabled={controllingIntent === active.intent_id}
+                        disabled={controllingIntent !== null}
                         title="暂停当前 Worker"
                         aria-label="暂停当前 Worker"
                       >
@@ -2013,7 +2184,7 @@ export function SessionsTab({
                           size="xs"
                           variant="ghost"
                           onClick={() => void controlWorker(active, "resume")}
-                          disabled={controllingIntent === active.intent_id || workerMessageSending}
+                          disabled={controllingIntent !== null || workerMessageSending}
                           title="不发消息，直接继续执行"
                           aria-label="直接继续执行"
                         >
@@ -2053,45 +2224,50 @@ export function SessionsTab({
           </div>
         </SideQuestionWorkspace>
         <AlertDialog
-          open={cancelIntent !== null}
+          open={cancelIntent !== null || batchCancelIds.length > 0}
           onOpenChange={(open) => {
             if (!open) {
               setCancelIntent(null);
+              setBatchCancelIds([]);
               setCancelReason("");
             }
           }}
         >
           <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
             <AlertDialogHeader>
-              <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
+              <AlertDialogTitle>
+                {batchCancelIds.length
+                  ? `取消 ${batchCancelIds.length} 个 Worker 的执行？`
+                  : `取消 Worker #${cancelIntent?.intent_id} 的执行？`}
+              </AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                删除会<strong>停止该意图</strong>
-                （不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞
-                <strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                取消后，该 Worker 将停止执行或退出等待队列。Worker、会话和已有产出均保留。 Planner
+                会收到通知；你可以随时点击“开启执行”，让该 Worker 重新等待运行。
               </AlertDialogDescription>
             </AlertDialogHeader>
-            <div className="grid gap-2 py-1">
-              <label htmlFor="cancel-reason" className="text-sm font-medium">
-                删除原因（必填）
-              </label>
+            <Field className="py-1">
+              <FieldLabel htmlFor="cancel-reason">取消原因（可选）</FieldLabel>
               <Textarea
                 id="cancel-reason"
                 value={cancelReason}
                 onChange={(e) => setCancelReason(e.target.value)}
-                placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
+                placeholder="可补充原因，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
                 rows={3}
                 autoFocus
               />
-            </div>
+            </Field>
             <AlertDialogFooter>
               <AlertDialogCancel>返回</AlertDialogCancel>
               <AlertDialogAction
-                variant="destructive"
-                disabled={!cancelIntent || controllingIntent !== null || !cancelReason.trim()}
-                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)}
+                disabled={(!cancelIntent && !batchCancelIds.length) || controllingIntent !== null}
+                onClick={() =>
+                  batchCancelIds.length
+                    ? void controlWorkerBatch(batchCancelIds, "cancel", cancelReason)
+                    : cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)
+                }
               >
-                {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
-                确认删除
+                {controllingIntent ? <Loader2Icon className="animate-spin" /> : <CircleSlashIcon />}
+                取消执行
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
