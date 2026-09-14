@@ -3243,9 +3243,31 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
     return mockInterceptPending.find((p) => p.id === Number(seg[2])) ?? null;
-  if (path === "/intercept/history") return { items: mockInterceptHistory };
-  if (seg[0] === "intercept" && seg[1] === "task")
-    return { items: mockInterceptHistory.filter((r) => r.task_id === seg[2]) };
+  if (path === "/intercept/history") {
+    if (!q.has("page") && !q.has("size")) return { items: mockInterceptHistory, total: mockInterceptHistory.length };
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
+    const offset = (page - 1) * size;
+    return {
+      items: mockInterceptHistory.slice(offset, offset + size),
+      total: mockInterceptHistory.length,
+      page,
+      page_size: size,
+    };
+  }
+  if (seg[0] === "intercept" && seg[1] === "task") {
+    const filtered = mockInterceptHistory.filter((r) => r.task_id === seg[2]);
+    if (!q.has("page") && !q.has("size")) return { items: filtered, total: filtered.length };
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
+    const offset = (page - 1) * size;
+    return {
+      items: filtered.slice(offset, offset + size),
+      total: filtered.length,
+      page,
+      page_size: size,
+    };
+  }
   if (path === "/intercept/tool-config") return { enabled_tools: ["bash"] };
   if (path === "/intercept/judge" && m === "GET")
     return {
