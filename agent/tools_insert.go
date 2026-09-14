@@ -514,7 +514,7 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 func (t *ToolSet) listAssets() actool.CoreTool {
 	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
-			"dsl": str("查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
+			"dsl": str("查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。任务审批筛选用 approval_state==approved（approved/pending/blocked/revoked）；status_code==200 表示 HTTP 状态码，status 的整数值仍是 HTTP 状态码。审批筛选不会扩大当前角色的可见范围，Planner 查非批准资产管理摘要应使用 list_task_assets。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
 			"id": idp("单个资产 ID"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "最多50个 ID；详情最多5个"},
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "默认10，最大50；更多结果用返回的 next_offset 作为 offset 续页"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
 			"fields": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "详情字段组，默认 identity/fingerprint"},

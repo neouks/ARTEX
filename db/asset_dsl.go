@@ -64,7 +64,7 @@ func isKnownField(f string) bool {
 	_, s := knownStringFields[f]
 	_, a := knownArrayFields[f]
 	_, n := knownNumericFields[f]
-	return s || a || n || f == "company_id" || f == "task_id"
+	return s || a || n || f == "company_id" || f == "task_id" || f == "approval_state"
 }
 
 // ── tokeniser ────────────────────────────────────────────────────────────────
@@ -258,8 +258,9 @@ var fullTextCols = []string{
 }
 
 type whereBuilder struct {
-	args []any
-	base int // placeholders are numbered base+1, base+2, …; 0 = the usual $1, $2, …
+	args   []any
+	base   int   // placeholders are numbered base+1, base+2, …; 0 = the usual $1, $2, …
+	taskID int64 // server-owned context; never inferred from a DSL task_id clause.
 }
 
 func (b *whereBuilder) next(v any) string {
@@ -268,6 +269,9 @@ func (b *whereBuilder) next(v any) string {
 }
 
 func (b *whereBuilder) build(node *astNode) (string, error) {
+	if node == nil {
+		return "1=1", nil
+	}
 	switch node.kind {
 	case "and":
 		parts := make([]string, 0, len(node.children))
@@ -328,6 +332,28 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 			return "", fmt.Errorf("company_id 需要整数值: %s", e.Value)
 		}
 		return "company_id = " + b.next(n), nil
+	}
+
+	// Approval enums and HTTP status codes are distinct namespaces. Accept the
+	// common status==approved spelling only for known enums; numeric status keeps
+	// its historical HTTP meaning. Both forms retain the caller's visibility gate.
+	approvalValue := strings.ToLower(e.Value)
+	isApproval := approvalValue == ApprovalApproved || approvalValue == ApprovalPending || approvalValue == ApprovalRevoked || approvalValue == "blocked"
+	if f == "approval_state" || (f == "status" && isApproval) {
+		if b.taskID <= 0 {
+			return "", fmt.Errorf("approval_state 需要当前任务上下文；status/status_code 的整数值表示 HTTP 状态码")
+		}
+		if !isApproval {
+			return "", fmt.Errorf("approval_state 仅支持 approved/pending/blocked/revoked")
+		}
+		op := e.Op
+		if op == "==" {
+			op = "="
+		}
+		if op != "=" && op != "!=" {
+			return "", fmt.Errorf("approval_state 仅支持 =、==、!= 运算符")
+		}
+		return fmt.Sprintf("task_asset_effective_approval_state(%s,assets.id) %s %s", b.next(b.taskID), op, b.next(approvalValue)), nil
 	}
 
 	// numeric fields
@@ -687,7 +713,9 @@ func buildTaskDSLWhere(taskID int64, dsl, typ, tested, approval string) (string,
 	if err != nil {
 		return "", nil, err
 	}
-	where, args, err := buildDSLWhere(node)
+	b := &whereBuilder{taskID: taskID}
+	where, err := b.build(node)
+	args := b.args
 	if err != nil {
 		return "", nil, err
 	}

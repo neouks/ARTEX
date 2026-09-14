@@ -76,4 +76,47 @@ func TestTaskDSLAppliesApprovalBeforePagination(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("approved count=%d err=%v, want 1", count, err)
 	}
+	for _, clause := range []string{"status==approved", "approval_state==approved", "(approval_state==pending OR approval_state==approved)"} {
+		rows, err := d.Assets().QueryDSLByTaskApproval(task.ID, marker+" AND "+clause, "root_domain", "all", ApprovalApproved, 20, 0)
+		if err != nil || len(rows) != 1 || rows[0].ID != approvedID {
+			t.Fatalf("%s: rows=%v err=%v", clause, rows, err)
+		}
+	}
+}
+
+func TestTaskDSLApprovalFields(t *testing.T) {
+	for _, field := range []string{"status", "approval_state"} {
+		for _, state := range []string{"approved", "pending", "blocked", "revoked"} {
+			where, args, err := buildTaskDSLWhere(42, field+"=="+state, "", "all", ApprovalApproved)
+			if err != nil || !strings.Contains(where, "task_asset_effective_approval_state($1,assets.id) = $2") || !strings.Contains(where, "task_asset_effectively_approved($3,assets.id)") {
+				t.Fatalf("%s=%s: %s %v", field, state, where, err)
+			}
+			if args[0] != int64(42) || args[1] != state {
+				t.Fatalf("args=%v", args)
+			}
+		}
+	}
+	for _, query := range []string{"status==200", "status_code==200"} {
+		where, _, err := buildTaskDSLWhere(42, query, "", "all", ApprovalApproved)
+		if err != nil || !strings.Contains(where, "status_code = $1") {
+			t.Fatalf("%s: %s %v", query, where, err)
+		}
+	}
+	for _, query := range []string{"approval_state==unknown", "approval_state>approved", "status>approved"} {
+		if _, _, err := buildTaskDSLWhere(42, query, "", "all", ApprovalApproved); err == nil {
+			t.Fatal("accepted", query)
+		}
+	}
+	for _, query := range []string{"approval_state==approved", "status==approved", "task_id==42 AND status==approved"} {
+		n, err := ParseDSL(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := buildDSLWhere(n); err == nil {
+			t.Fatal("global query accepted approval filter", query)
+		}
+	}
+	if _, _, err := buildTaskDSLWhere(42, "", "", "all", ApprovalApproved); err != nil {
+		t.Fatal(err)
+	}
 }
