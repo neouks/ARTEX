@@ -781,6 +781,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/update/stream", s.updateStream)
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
+	mux.HandleFunc("GET /api/tasks/notifications", s.taskNotifications)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
@@ -880,6 +881,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
 	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
+	mux.HandleFunc("GET /api/exploration/tool-calls", s.taskToolCalls)
+	mux.HandleFunc("GET /api/exploration/tool-calls/{seq}", s.taskToolCalls)
 	mux.HandleFunc("GET /api/exploration/main-sessions", s.mainSessions)
 	mux.HandleFunc("POST /api/exploration/main-session/new", s.newMainSession)
 	mux.HandleFunc("GET /api/exploration/activity/stream", s.streamActivity)
@@ -925,6 +928,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/conversations/{id}/profile", s.pgUpdateConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.pgDeleteConversation)
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)
+	mux.HandleFunc("GET /api/conversations/{id}/tool-calls", s.conversationToolCalls)
+	mux.HandleFunc("GET /api/conversations/{id}/tool-calls/{seq}", s.conversationToolCalls)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", s.pgSendConversationMessage)
 	mux.HandleFunc("POST /api/conversations/{id}/stop", s.pgStopConversation)
 	mux.HandleFunc("GET /api/conversations/{id}/messages/{seq}", s.pgConversationMsgDetail)
@@ -2009,6 +2014,10 @@ func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("context_task") {
+		s.taskFindingsPage(w, r)
+		return
+	}
 	// 无 task 参数 → 全局「发现」页：从独立 findings 表读取（任务删除后 finding 依然保留）。
 	// 带 task 参数 → 仅该任务（任务概览/发现 Tab 用），从 exploration_nodes 读（任务在则节点在）。
 	q := r.URL.Query()

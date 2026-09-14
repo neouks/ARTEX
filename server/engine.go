@@ -138,7 +138,8 @@ type Engine struct {
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
 
-	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
+	plannerRound  sync.Map // taskID -> int, planner round counter (for UI round separators)
+	plannerActive sync.Map // live planner calls only; read-only activity views must not guess from task status
 	// Last successfully planned blackboard hash. Pure heartbeats with the same hash
 	// and no running Worker can skip the Planner LLM call.
 	plannerRevision sync.Map // taskID -> string
@@ -944,7 +945,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		observedRevision, observedRevisionErr := t.Store.BlackboardRevision()
 		e.BeginLLMCall(t.ID)
 		planCtx := agent.WithRunInfo(ectx, agent.RunInfo{Trigger: src})
+		e.plannerActive.Store(t.ID, true)
 		met, reason, err := planner.Plan(planCtx, taskIDInt, e.m.assets, t.Guard, t.Store, t.Goal, triggers, emit)
+		e.plannerActive.Delete(t.ID)
 		t.wakeWorkers()
 		e.EndLLMCall(t.ID)
 		if err == nil && observedRevisionErr == nil {

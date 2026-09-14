@@ -11,6 +11,7 @@ import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
+import { NotificationReadContext, TaskUnreadBadge, useTaskNotifications } from "@/components/task-notifications";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -38,6 +39,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import type { NotificationCategory } from "@/lib/task-notifications";
 import type { InterceptApprovalRow, LLMProfile, Stats, Task } from "@/lib/types";
 
 import { SessionsTab } from "./_tabs/sessions-tab";
@@ -52,14 +54,12 @@ const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTa
 const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
 const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
 const ReportTab = dynamic(() => import("./_tabs/report-tab").then((m) => m.ReportTab));
-const RetestsTab = dynamic(() => import("./_tabs/retests-tab").then((m) => m.RetestsTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
   { value: "overview", label: "总览" },
   { value: "graph", label: "探索链路" },
   { value: "findings", label: "发现" },
-  { value: "retests", label: "复测" },
   { value: "assets", label: "测试资产" },
   { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
@@ -167,7 +167,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
       setOpen(false);
       onUpdated();
     } catch (error) {
-      toast.error("更新失败：" + (error as Error).message);
+      toast.error(`更新失败：${(error as Error).message}`);
     } finally {
       setSaving(false);
     }
@@ -235,7 +235,23 @@ function TaskDetailInner() {
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
-  const [tab, setTab] = React.useState("sessions");
+  const [tab, setTab] = React.useState(() =>
+    ["findings", "retests"].includes(searchParams.get("tab") ?? "") ? "findings" : "sessions",
+  );
+  const { counts: unread, refresh: refreshNotifications, capture } = useTaskNotifications([id], "all");
+  const activeTab = React.useRef(tab);
+  activeTab.current = tab;
+  const beginRead = React.useCallback(
+    (category: NotificationCategory) => {
+      const expected = { findings: "findings", assets: "asset-approvals", intercepts: "intercept" }[category];
+      const wasVisible = document.visibilityState === "visible" && activeTab.current === expected;
+      const done = capture(id, category);
+      return () => {
+        if (wasVisible && activeTab.current === expected) done();
+      };
+    },
+    [capture, id],
+  );
   const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [archiving, setArchiving] = React.useState(false);
@@ -322,7 +338,8 @@ function TaskDetailInner() {
   const load = React.useCallback(() => {
     loadTask();
     loadStats();
-  }, [loadStats, loadTask]);
+    void refreshNotifications();
+  }, [loadStats, loadTask, refreshNotifications]);
   React.useEffect(() => {
     setTask(null);
     setLoaded(false);
@@ -344,7 +361,7 @@ function TaskDetailInner() {
       setPaused(next);
       toast.success(next ? "已暂停探索" : "已恢复探索");
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      toast.error(`操作失败：${(e as Error).message}`);
     }
   }
 
@@ -419,10 +436,10 @@ function TaskDetailInner() {
               <ArrowLeftIcon />
             </Link>
           </Button>
-          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={task.name || task.description}>
+          <h1 className="min-w-0 flex-1 truncate font-semibold text-sm" title={task.name || task.description}>
             {task.name || task.description}
           </h1>
-          <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground sm:inline">
+          <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground text-xs sm:inline">
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
@@ -458,18 +475,16 @@ function TaskDetailInner() {
             {controlLabel}
           </Button>
         </div>
-        <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
+        <p className="truncate text-muted-foreground text-xs">{task.goal}</p>
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">
             {TABS.map((t) => (
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
-                {t.value === "intercept" && pendingIntercepts.length > 0 && (
-                  <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
-                    {pendingIntercepts.length > 99 ? "99+" : pendingIntercepts.length}
-                  </span>
-                )}
+                {t.value === "findings" && <TaskUnreadBadge count={unread[id]?.findings} label="新漏洞" />}
+                {t.value === "asset-approvals" && <TaskUnreadBadge count={unread[id]?.assets} label="新待审批资产" />}
+                {t.value === "intercept" && <TaskUnreadBadge count={unread[id]?.intercepts} label="新拦截审批" />}
               </TabsTrigger>
             ))}
           </TabsList>
@@ -477,38 +492,37 @@ function TaskDetailInner() {
       </header>
 
       {/* Tab content */}
-      <div className="flex-1 p-4 lg:p-6">
-        <TabsContent value="sessions" className="mt-0">
-          <SessionsTab taskId={id} pendingIntercepts={pendingIntercepts} />
-        </TabsContent>
-        <TabsContent value="overview" className="mt-0">
-          <OverviewTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="graph" className="mt-0">
-          <GraphTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="findings" className="mt-0">
-          <FindingsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="retests" className="mt-0">
-          <RetestsTab key={id} taskId={id} />
-        </TabsContent>
-        <TabsContent value="assets" className="mt-0">
-          <AssetsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="asset-approvals" className="mt-0">
-          <AssetApprovalsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
-        </TabsContent>
-        <TabsContent value="intercept" className="mt-0">
-          <InterceptTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="report" className="mt-0">
-          <ReportTab taskId={id} />
-        </TabsContent>
-      </div>
+      <NotificationReadContext.Provider value={beginRead}>
+        <div className="flex-1 p-4 lg:p-6">
+          <TabsContent value="sessions" className="mt-0">
+            <SessionsTab taskId={id} pendingIntercepts={pendingIntercepts} />
+          </TabsContent>
+          <TabsContent value="overview" className="mt-0">
+            <OverviewTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="graph" className="mt-0">
+            <GraphTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="findings" className="mt-0">
+            <FindingsTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="assets" className="mt-0">
+            <AssetsTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="asset-approvals" className="mt-0">
+            <AssetApprovalsTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="coverage" className="mt-0">
+            <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
+          </TabsContent>
+          <TabsContent value="intercept" className="mt-0">
+            <InterceptTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="report" className="mt-0">
+            <ReportTab taskId={id} />
+          </TabsContent>
+        </div>
+      </NotificationReadContext.Provider>
     </Tabs>
   );
 }
@@ -517,7 +531,12 @@ function TaskDetailInner() {
 export default function TaskDetailPage() {
   return (
     <React.Suspense fallback={<TaskDetailLoading />}>
-      <TaskDetailInner />
+      <TaskDetailRoute />
     </React.Suspense>
   );
+}
+
+function TaskDetailRoute() {
+  const params = useSearchParams();
+  return <TaskDetailInner key={`${params.get("id") ?? ""}:${params.get("tab") ?? "sessions"}`} />;
 }

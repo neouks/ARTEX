@@ -48,6 +48,7 @@ import { AssetApprovalTemplateField } from "@/components/asset-approval-template
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
+import { TaskUnreadBadge, useTaskNotifications } from "@/components/task-notifications";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
   AlertDialog,
@@ -450,6 +451,9 @@ export default function TasksPage() {
   }, []);
 
   const pageIds = React.useMemo(() => paginated.map((t) => t.id), [paginated]);
+  const { counts: unread, refresh: refreshNotifications } = useTaskNotifications(pageIds, "findings");
+  const notificationRefresh = React.useRef(refreshNotifications);
+  notificationRefresh.current = refreshNotifications;
   const pageSelectedCount = React.useMemo(
     () => pageIds.filter((id) => selectedIds.has(id)).length,
     [pageIds, selectedIds],
@@ -481,6 +485,7 @@ export default function TasksPage() {
   const lastRef = React.useRef<string>("");
 
   const load = React.useCallback(() => {
+    void notificationRefresh.current();
     api
       .tasks()
       .then((r) => {
@@ -1010,6 +1015,7 @@ export default function TasksPage() {
                     <TaskRow
                       key={task.id}
                       task={task}
+                      unreadFindings={unread[task.id]?.findings ?? 0}
                       // running 任务才吃 nowSec;其余行传 0 —— props 不变,memo 就能拦下每秒 tick
                       // 带来的整表重渲染,只让在跑的那几行走时长。
                       nowSec={task.status === "running" ? nowSec : 0}
@@ -1405,6 +1411,7 @@ function ConcurrencySettingsDialog() {
 // wholesale on every parent render.
 const TaskRow = React.memo(function TaskRow({
   task,
+  unreadFindings,
   nowSec,
   onDelete,
   onControl,
@@ -1416,6 +1423,7 @@ const TaskRow = React.memo(function TaskRow({
   onSelectedChange,
 }: {
   task: Task;
+  unreadFindings: number;
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
   onControl: (id: string, action: "pause" | "resume") => Promise<void>;
@@ -1441,6 +1449,14 @@ const TaskRow = React.memo(function TaskRow({
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
           <TaskNameEditor task={task} onRename={onRename} />
+          {unreadFindings > 0 && (
+            <Link
+              href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}&tab=findings`}
+              className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <TaskUnreadBadge count={unreadFindings} label="查看新漏洞" />
+            </Link>
+          )}
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>

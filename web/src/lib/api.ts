@@ -5,6 +5,14 @@
 
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
+import type { NotificationQuery, NotificationSummary } from "@/lib/task-notifications";
+import {
+  parseToolCallPage,
+  type ToolCallFilter,
+  type ToolCallPage,
+  type ToolCallText,
+  toolCallURL,
+} from "@/lib/tool-calls";
 import type {
   ActiveFindingRetest,
   Activity,
@@ -212,6 +220,15 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
 }
 
 export const api = {
+  taskNotifications: (queries: NotificationQuery[], mode: "all" | "findings", signal?: AbortSignal) =>
+    get<NotificationSummary>(
+      `/tasks/notifications?${new URLSearchParams({ queries: JSON.stringify(queries), mode })}`,
+      { signal },
+    ),
+  toolCalls: (base: string, filters: ToolCallFilter, signal?: AbortSignal) =>
+    get<ToolCallPage>(toolCallURL(base, filters), { signal }).then(parseToolCallPage),
+  toolCallDetail: (base: string, id: number, offset: number, signal?: AbortSignal) =>
+    get<ToolCallText>(toolCallURL(base, {}, id, offset), { signal }),
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
 
@@ -530,8 +547,15 @@ export const api = {
   // ---- exploration (per task) ----
   frontier: (task?: string) => get<TaskNode[]>(`/exploration/frontier${tq(task)}`).then(arr),
   findings: (task?: string) => get<Finding[]>(`/exploration/findings${tq(task)}`).then(arr),
+  taskLegacyFinding: (task: string, node: string) =>
+    get<Finding>(`/exploration/findings?${new URLSearchParams({ context_task: task, legacy_node: node })}`),
+  taskFindingsPage: (task: string, page: number, pageSize: number, direction: "asc" | "desc") =>
+    get<FindingsPage>(
+      `/exploration/findings?${new URLSearchParams({ context_task: task, page: String(page), limit: String(pageSize), direction })}`,
+    ),
   findingsPage: (q: FindingQuery) => {
     const p = findingFilterParams(q);
+    p.set("summary_only", "1");
     p.set("page", String(q.page));
     p.set("limit", String(q.pageSize));
     return get<FindingsPage>(`/exploration/findings?${p.toString()}`);
@@ -561,16 +585,25 @@ export const api = {
     } else if (opts.scope === "filtered" && opts.filters) {
       for (const [k, v] of findingFilterParams(opts.filters)) p.set(k, v);
     }
-    const token = getToken();
-    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!r.ok) throw new Error(`export: ${r.status}`);
-    const blob = await r.blob();
-    // 文件名优先取后端 Content-Disposition,取不到则用默认名。
-    const disp = r.headers.get("Content-Disposition") ?? "";
-    const m = disp.match(/filename="?([^"]+)"?/);
-    const filename = m?.[1] ?? `findings-export`;
+    let blob: Blob, filename: string;
+    if (MOCK) {
+      const payload = await get<{ filename: string; bytes: Uint8Array }>(
+        `/exploration/findings/export?${p.toString()}`,
+      );
+      blob = new Blob([new Uint8Array(payload.bytes)]);
+      filename = payload.filename;
+    } else {
+      const token = getToken();
+      const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!r.ok) throw new Error(`export: ${r.status}`);
+      blob = await r.blob();
+      // 文件名优先取后端 Content-Disposition,取不到则用默认名。
+      const disp = r.headers.get("Content-Disposition") ?? "";
+      const m = disp.match(/filename="?([^"]+)"?/);
+      filename = m?.[1] ?? `findings-export`;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -634,16 +667,24 @@ export const api = {
     side: "request" | "response",
     contextTask?: string,
   ) => {
-    const token = getToken();
-    const response = await fetch(
-      `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
-      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-    );
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: "下载失败" }));
-      throw new Error(error.error ?? "下载失败");
+    let blob: Blob;
+    if (MOCK) {
+      const preview = await get<EvidenceBodyPreview>(
+        `/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&offset=0${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      );
+      blob = new Blob([preview.content], { type: "application/octet-stream" });
+    } else {
+      const token = getToken();
+      const response = await fetch(
+        `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      );
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "下载失败" }));
+        throw new Error(error.error ?? "下载失败");
+      }
+      blob = await response.blob();
     }
-    const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

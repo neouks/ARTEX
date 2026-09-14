@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { SessionToolCalls } from "@/components/session-tool-calls";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
@@ -53,6 +54,7 @@ import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
 import { taskAssetSourceLabel, taskAssetTypeLabel } from "@/lib/task-assets";
+import { toolCallRevision } from "@/lib/tool-calls";
 import type {
   Activity,
   ChatAttachment,
@@ -1817,41 +1819,50 @@ export function SessionsTab({
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
-            <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
-              <div className="min-w-0 max-w-full p-4" ref={contentRef}>
-                {activeState?.loadingMore && (
-                  <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                    加载更早历史…
-                  </div>
-                )}
-                {showLoader ? (
-                  <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                    加载活动流…
-                  </div>
-                ) : activeState?.error ? (
-                  <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
-                    <CircleXIcon className="size-3.5" />
-                    加载失败：{activeState.error}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 px-2 text-xs"
-                      onClick={() => loadSession(activeKey)}
-                    >
-                      重试
-                    </Button>
-                  </div>
-                ) : activity.length ? (
-                  <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
-                ) : (
-                  <div className="pl-9 text-xs text-muted-foreground">
-                    {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
-                  </div>
-                )}
-              </div>
-            </ScrollArea>
+            <SessionToolCalls
+              key={`${taskId}:${activeKey}`}
+              base={`/exploration/tool-calls?${new URLSearchParams({ task: taskId, session: activeKey })}`}
+              revision={toolCallRevision(activity, active.live)}
+            >
+              <ScrollArea
+                type="auto"
+                className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+              >
+                <div className="min-w-0 max-w-full p-4" ref={contentRef}>
+                  {activeState?.loadingMore && (
+                    <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                      加载更早历史…
+                    </div>
+                  )}
+                  {showLoader ? (
+                    <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                      加载活动流…
+                    </div>
+                  ) : activeState?.error ? (
+                    <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
+                      <CircleXIcon className="size-3.5" />
+                      加载失败：{activeState.error}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-xs"
+                        onClick={() => loadSession(activeKey)}
+                      >
+                        重试
+                      </Button>
+                    </div>
+                  ) : activity.length ? (
+                    <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
+                  ) : (
+                    <div className="pl-9 text-xs text-muted-foreground">
+                      {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+            </SessionToolCalls>
             {isMain ? (
               <div className="border-t p-3">
                 {attachments.length > 0 && (

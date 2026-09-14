@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { SessionToolCalls } from "@/components/session-tool-calls";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
@@ -57,6 +58,7 @@ import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { isBtwCommand } from "@/lib/side-questions";
+import { toolCallRevision } from "@/lib/tool-calls";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -771,22 +773,28 @@ function ChatView({
       </div>
 
       {/* messages */}
-      <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
-        <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
-          {messages.length === 0 && !running ? (
-            <div className="text-muted-foreground py-10 text-center text-sm">
-              开始和「{agent?.name ?? conv.agent_key}」对话
-            </div>
-          ) : (
-            <>
-              {hasMore && (
-                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
-              )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
-            </>
-          )}
-        </div>
-      </ScrollArea>
+      <SessionToolCalls
+        key={conv.id}
+        base={`/conversations/${conv.id}/tool-calls`}
+        revision={toolCallRevision(messages, running)}
+      >
+        <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+          <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
+            {messages.length === 0 && !running ? (
+              <div className="text-muted-foreground py-10 text-center text-sm">
+                开始和「{agent?.name ?? conv.agent_key}」对话
+              </div>
+            ) : (
+              <>
+                {hasMore && (
+                  <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
+                )}
+                <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
+              </>
+            )}
+          </div>
+        </ScrollArea>
+      </SessionToolCalls>
 
       <Composer
         value={input}

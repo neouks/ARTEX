@@ -62,6 +62,7 @@ export function FindingTrafficPanel({
     api
       .findingTraffic(findingId, contextTask)
       .then((value) => {
+        if (!value || !Array.isArray(value.bindings)) throw new Error("流量证据响应格式无效");
         if (active) setData(value);
       })
       .catch((e: Error) => {
@@ -99,7 +100,7 @@ export function FindingTrafficPanel({
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle>关联流量 {data ? `(${data.bindings.length})` : ""}</CardTitle>
+            <CardTitle>流量证据 {data ? `(${data.bindings.length})` : ""}</CardTitle>
             {!readOnly ? (
               <Button variant="outline" size="sm" disabled={!data || busy} onClick={() => setAdding(true)}>
                 <PlusIcon data-icon="inline-start" />
@@ -141,18 +142,18 @@ export function FindingTrafficPanel({
                   <Badge variant="secondary">
                     {b.snapshot.method} · {b.snapshot.status}
                   </Badge>
-                  <span className="text-xs text-muted-foreground">证据 #{b.id}</span>
+                  <span className="text-muted-foreground text-xs">证据 #{b.id}</span>
                 </div>
                 <Button
                   variant="link"
-                  className="h-auto justify-start p-0 text-left whitespace-normal"
+                  className="h-auto justify-start whitespace-normal p-0 text-left"
                   onClick={() => setPreview(b.id)}
                 >
                   <span className="break-all font-mono text-xs">{b.snapshot.url}</span>
                 </Button>
-                {b.note ? <p className="text-sm whitespace-pre-wrap">{b.note}</p> : null}
+                {b.note ? <p className="whitespace-pre-wrap text-sm">{b.note}</p> : null}
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-muted-foreground text-xs">
                     {new Date(b.snapshot.captured_at * 1000).toLocaleString("zh-CN")}
                   </span>
                   <div className="flex flex-wrap gap-1">

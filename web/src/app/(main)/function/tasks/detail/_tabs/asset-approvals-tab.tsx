@@ -6,6 +6,7 @@ import { CheckIcon, CircleAlertIcon, RefreshCwIcon, ShieldCheckIcon, ShieldXIcon
 import { toast } from "sonner";
 
 import { AssetApprovalTemplateField } from "@/components/asset-approval-template";
+import { useNotificationRead } from "@/components/task-notifications";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -67,6 +68,14 @@ function formatTime(value?: string) {
 }
 
 export function AssetApprovalsTab({ taskId }: { taskId: string }) {
+  const beginRead = useNotificationRead("assets");
+  const mounted = React.useRef(true);
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [task, setTask] = React.useState<Task | null>(null);
   const [items, setItems] = React.useState<TaskAssetApproval[]>([]);
   const [filter, setFilter] = React.useState<ApprovalFilter>("all");
@@ -80,12 +89,14 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
   const [excludeItem, setExcludeItem] = React.useState<TaskAssetApproval | null>(null);
 
   const load = React.useCallback(async () => {
+    const markRead = beginRead();
     try {
       setTask(await api.task(taskId));
       const next = (await api.taskAssetApprovals(taskId)).filter(
         (item) => item.asset_type !== "service" && item.asset_type !== "endpoint",
       );
       setItems(next);
+      if (mounted.current) markRead();
       setError("");
       const validIDs = new Set(next.filter((item) => canSelectApproval(item)).map((item) => item.asset_id));
       setSelected((current) => new Set([...current].filter((id) => validIDs.has(id))));
@@ -94,7 +105,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
     } finally {
       setLoaded(true);
     }
-  }, [taskId]);
+  }, [taskId, beginRead]);
 
   React.useEffect(() => {
     let active = true;

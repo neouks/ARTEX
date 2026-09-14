@@ -1,6 +1,10 @@
 // Mock 路由：把 (method, path) 映射到 lib/mock/data 的静态数据。
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
+import type { NotificationQuery } from "../task-notifications";
+import { MockNotificationLedger, type MockNotificationRecord } from "./task-notifications";
+
+const notificationLedger = new MockNotificationLedger();
 
 import {
   classifyCompanyScopeLine,
@@ -16,6 +20,7 @@ import type {
   Company,
   CompanyScopeRule,
   Conversation,
+  Finding,
   FindingRetest,
   IntentAsset,
   LLMRetryPolicy,
@@ -34,6 +39,11 @@ import type {
   Tool,
 } from "../types";
 import * as D from "./data";
+import { mockFindingExport } from "./finding-export";
+import { MockFindingTraffic } from "./finding-traffic";
+import { mockToolCalls } from "./tool-calls";
+
+const findingTraffic = new MockFindingTraffic();
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,6 +54,19 @@ const mockInterceptPending = structuredClone(D.interceptPending);
 const mockInterceptDetails = structuredClone(D.interceptDetails);
 const mockTasks = structuredClone(D.tasks);
 const mockFindings = structuredClone(D.findings);
+const mockLegacyFindings: Finding[] = [
+  {
+    id: "900001",
+    task_id: "t-acme-api",
+    name: "历史探索记录（仅查看）",
+    vulnclass: "Legacy finding",
+    severity: "low",
+    status: "pending",
+    summary: "此记录仅存在于探索图中，尚未关联持久化漏洞。",
+    evidence: "旧记录证据：仅用于 UI 演示，不执行网络请求。",
+    ts: "2026-07-26T00:00:00Z",
+  },
+];
 const mockLLMRecords = structuredClone(D.llmRecords);
 let mockRetryPolicy: LLMRetryPolicy = {
   connect: { attempts: 0, interval_ms: 0 },
@@ -1332,6 +1355,34 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
 }
 
 function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Record<string, unknown>): unknown {
+  if (m === "GET" && path === "/tasks/notifications") {
+    const queries = JSON.parse(q.get("queries") ?? "[]") as NotificationQuery[];
+    const records: MockNotificationRecord[] = mockFindings.map((row) => ({
+      task: String(row.task_id),
+      category: "findings",
+      id: String(row.id),
+      pending: true,
+    }));
+    for (const task of mockTasks) {
+      for (const row of mockApprovalGroups(task.id)) {
+        if (row.read_only || row.inherited) continue;
+        records.push({
+          task: task.id,
+          category: "assets",
+          id: row.group_key ?? String(row.asset_id),
+          pending: row.approval_state === "pending" && !row.blocked,
+        });
+      }
+    }
+    for (const row of mockInterceptHistory)
+      records.push({
+        task: String(row.task_id),
+        category: "intercepts",
+        id: String(row.id),
+        pending: row.status === "pending",
+      });
+    return notificationLedger.summarize(queries, q.get("mode") ?? "all", records);
+  }
   // No model runs in Mock. Return the real history envelope rather than the
   // generic collection fallback; never pretend a question was submitted.
   if (/^\/(conversations\/[^/]+|tasks\/[^/]+\/(chat|intents\/[^/]+))\/side-questions$/.test(path)) {
@@ -1340,6 +1391,31 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (m === "POST") throw new Error("Mock 模式未运行模型，暂不支持旁路问答");
   }
   const task = q.get("task") ?? undefined;
+
+  if (m === "GET" && seg[0] === "conversations" && seg[2] === "tool-calls") {
+    const id = Number(seg[1]);
+    if (!mockConversations.some((c) => c.id === id)) throw new Error("conversation not found");
+    const events = mockRetestMessages[id] ?? D.conversationMessages[id] ?? [];
+    const running = mockRetests.some((r) => r.conversation_id === id && r.status === "running");
+    return mockToolCalls(events, D.tools, q, `conversation:${id}`, running, seg[3] ? Number(seg[3]) : undefined);
+  }
+  if (m === "GET" && seg[0] === "exploration" && seg[1] === "tool-calls") {
+    if (!mockTasks.some((t) => t.id === task)) throw new Error("task not found");
+    const session = q.get("session") || "main";
+    const current = mockMainSessions.get(task ?? "")?.[0]?.seq ?? 0;
+    // The exported demo activity belongs to this one fixture task, not every
+    // newly created task. Empty tasks must not borrow another task's history.
+    const events = (task === D.tasks[0]?.id ? mockActivity : []).filter((a) => {
+      if (session === "plan") return a.worker === "planner";
+      if (/^intent:.+$/.test(session)) return a.intent_id === session.slice(7);
+      if (session === "main" || /^main:\d+$/.test(session))
+        return (
+          a.worker === "mainagent" && (a.main_seg ?? 0) === (session === "main" ? current : Number(session.slice(5)))
+        );
+      throw new Error("invalid session");
+    });
+    return mockToolCalls(events, D.tools, q, `task:${task}:${session}`, false, seg[2] ? Number(seg[2]) : undefined);
+  }
 
   // ── auth：让 demo 直接进主界面 ──
   if (path === "/auth/status") return { initialized: true };
@@ -2347,6 +2423,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── exploration ──
   if (path === "/exploration/frontier") return D.frontier;
+  if (path === "/exploration/findings/export") {
+    const scope = q.get("scope");
+    if (!["all", "filtered", "selected"].includes(scope ?? "")) throw new Error("invalid export scope");
+    const ids = new Set((q.get("ids") ?? "").split(","));
+    let items = mockFindings;
+    if (scope === "selected") items = mockFindings.filter((item) => ids.has(item.id));
+    else if (scope === "filtered") items = mockApplyAssetScope(mockFilterFindings(q), q.get("asset_scope"));
+    return mockFindingExport(items, q.get("format") ?? "md-single");
+  }
   if (path === "/exploration/findings/stats") {
     const vulnclasses = Array.from(new Set(mockFindings.map((f) => f.vulnclass))).sort();
     // 「按任务」下拉:有漏洞的任务 + 描述 + 条数(mock 任务 id 是字符串,直接当 id 用)。
@@ -2504,10 +2589,35 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       queued: false,
     };
   }
+  if (seg[0] === "exploration" && seg[1] === "findings" && seg[3] === "traffic") {
+    const finding = mockFindings.find((item) => item.id === seg[2]);
+    if (!finding) throw new Error("finding not found");
+    const context = q.get("context_task");
+    const owner = context ? mockTasks.find((item) => item.id === context) : undefined;
+    const inherited = !!context && finding.task_id !== context;
+    if (context && (!owner || (inherited && !owner.source_task_ids?.includes(finding.task_id ?? ""))))
+      throw new Error("finding not found in task");
+    const result = findingTraffic.handle(finding.id, seg[4], seg[5], m, b, q, inherited);
+    if (m !== "GET" && result && typeof result === "object" && "bindings" in result && "version" in result) {
+      finding.traffic_count = (result.bindings as unknown[]).length;
+      finding.evidence_version = Number(result.version);
+      finding.report_stale = !!finding.report && finding.evidence_version !== (finding.report_evidence_version ?? 0);
+    }
+    return result;
+  }
   // 单条 finding:GET 详情 / PATCH 改状态/严重度/名称/类别(demo 直接改内存对象)。
   if (seg[0] === "exploration" && seg[1] === "findings" && seg.length === 3 && seg[2] !== "stats") {
     const f = mockFindings.find((x) => x.id === seg[2]);
-    if (!f) return {};
+    if (!f) throw new Error("finding not found");
+    const context = q.get("context_task");
+    const owner = context ? mockTasks.find((item) => item.id === context) : undefined;
+    if (context && (!owner || (f.task_id !== context && !owner.source_task_ids?.includes(f.task_id ?? ""))))
+      throw new Error("finding not found in task");
+    if (m !== "GET" && context && f.task_id !== context) throw new Error("来源任务漏洞只读");
+    if (m === "DELETE") {
+      mockFindings.splice(mockFindings.indexOf(f), 1);
+      return { deleted: f.id };
+    }
     if (m === "PATCH") {
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
       if (typeof b.severity === "string") f.severity = b.severity as typeof f.severity;
@@ -2529,10 +2639,63 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     };
   }
   if (path === "/exploration/findings") {
+    if (q.has("context_task")) {
+      const context = q.get("context_task");
+      const owner = mockTasks.find((item) => item.id === context);
+      if (!owner) throw new Error("task not found");
+      if (q.has("legacy_node")) {
+        const legacy = mockLegacyFindings.find(
+          (item) =>
+            item.id === q.get("legacy_node") &&
+            (item.task_id === context || owner.source_task_ids?.includes(item.task_id ?? "")),
+        );
+        if (!legacy) throw new Error("legacy finding not found in task");
+        return {
+          ...legacy,
+          inherited: legacy.task_id !== context,
+          source_task_id: legacy.task_id !== context ? legacy.task_id : undefined,
+        };
+      }
+      const page = Number(q.get("page") ?? 1),
+        limit = Number(q.get("limit") ?? 20);
+      const direction = q.get("direction") ?? "desc";
+      if (
+        !Number.isInteger(page) ||
+        page < 1 ||
+        page > 1000000 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 200 ||
+        !["asc", "desc"].includes(direction)
+      )
+        throw new Error("invalid pagination");
+      const sources = new Set(owner.source_task_ids ?? []);
+      const items = [...mockFindings.map((f) => ({ ...f, finding_id: f.id })), ...mockLegacyFindings]
+        .filter((f) => f.task_id === context || (!!f.task_id && sources.has(f.task_id)))
+        .sort(
+          (a, b) =>
+            (Date.parse(a.ts) - Date.parse(b.ts) || a.id.localeCompare(b.id, undefined, { numeric: true })) *
+            (direction === "asc" ? 1 : -1),
+        );
+      return {
+        items: items.slice((page - 1) * limit, page * limit).map((f) => ({
+          ...f,
+          finding_id: f.finding_id,
+          report: undefined,
+          evidence: "",
+          inherited: f.task_id !== context,
+          source_task_id: f.task_id !== context ? f.task_id : undefined,
+        })),
+        total: items.length,
+        page,
+        page_size: limit,
+      };
+    }
     // finding_id=id：真后端用独立表行 id 作为状态/详情句柄,mock 里用自身 id 顶上。
     // report 仅详情接口返回,列表剥掉(与后端一致)。
     const withFid = (f: (typeof mockFindings)[number]) => ({
       ...f,
+      evidence: q.get("summary_only") === "1" ? "" : f.evidence,
       report: undefined,
       finding_id: f.id,
     });
@@ -2962,7 +3125,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") {
     const id = Number(seg[2]);
     const row = mockInterceptHistory.find((r) => r.id === id) ?? mockInterceptPending.find((r) => r.id === id);
-    if (!row || row.status !== "pending") throw new Error("审批已处理或不存在，请刷新记录");
+    if (row?.status !== "pending") throw new Error("审批已处理或不存在，请刷新记录");
     if (b.decision !== "allowed" && b.decision !== "denied") throw new Error("无效审批动作");
     row.status = b.decision;
     row.decided_at = new Date().toISOString();

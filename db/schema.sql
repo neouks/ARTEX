@@ -1390,6 +1390,8 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pend
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
+-- Task selectors anti-join legacy graph nodes before pagination.
+CREATE INDEX IF NOT EXISTS idx_findings_task_node ON findings(task_id, node_id) WHERE node_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
 -- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
@@ -1514,3 +1516,13 @@ CREATE INDEX IF NOT EXISTS idx_side_requests_history ON side_question_requests(s
 -- Additive v3 archive fields; old archives restore these as empty objects.
 ALTER TABLE side_question_sessions ADD COLUMN IF NOT EXISTS memory JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE side_question_requests ADD COLUMN IF NOT EXISTS context_info JSONB NOT NULL DEFAULT '{}';
+
+-- Immutable creation visibility for browser-local unread cursors. Add nullable
+-- columns first: no volatile-default rewrite/backfill of historical business data.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS notification_xid xid8;
+ALTER TABLE findings ALTER COLUMN notification_xid SET DEFAULT pg_current_xact_id();
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS notification_xid xid8;
+ALTER TABLE task_asset_links ALTER COLUMN notification_xid SET DEFAULT pg_current_xact_id();
+ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS notification_xid xid8;
+ALTER TABLE intercept_pending ALTER COLUMN notification_xid SET DEFAULT pg_current_xact_id();
+CREATE INDEX IF NOT EXISTS idx_intercept_notification_pending ON intercept_pending(task_id) WHERE status='pending';

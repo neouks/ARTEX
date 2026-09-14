@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useNotificationRead } from "@/components/task-notifications";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -463,6 +464,7 @@ function ApprovalTable({
 }
 
 export function ApprovalRecords({ taskId }: { taskId?: string }) {
+  const beginRead = useNotificationRead("intercepts");
   const [rows, setRows] = React.useState<InterceptApprovalRow[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -474,12 +476,14 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
 
   const load = React.useCallback(
     async (manual = false) => {
+      const markRead = beginRead();
       const id = ++request.current;
       if (manual) setRefreshing(true);
       try {
         const items = taskId ? await api.interceptTask(taskId) : await api.interceptHistory();
         if (id !== request.current) return;
         setRows(items);
+        markRead();
         setError("");
         if (manual) setRevision((v) => v + 1);
       } catch (e) {
@@ -491,7 +495,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         }
       }
     },
-    [taskId],
+    [taskId, beginRead],
   );
 
   React.useEffect(() => {

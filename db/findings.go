@@ -150,12 +150,13 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 // filter on that column". Sort is "severity" (severity desc, then newest) or
 // anything else (newest first).
 type FindingFilter struct {
-	Severity  string // high | medium | low
-	Status    string // pending | false_positive | ignored | resolved
-	VulnClass string
-	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
-	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
-	Sort      string // "severity" | "time"
+	SummaryOnly bool   // Management selector: defer evidence/report bodies to detail.
+	Severity    string // high | medium | low
+	Status      string // pending | false_positive | ignored | resolved
+	VulnClass   string
+	TaskID      string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
+	Query       string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
+	Sort        string // "severity" | "time"
 	// AssetScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
 	// 选中一个节点等于选中它的整棵子树。空 = 不按资产筛选。
 	AssetScope string
@@ -262,12 +263,16 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
+	cols := findingSelectCols
+	if f.SummaryOnly {
+		cols = strings.Replace(cols, "f.evidence,", "'' AS evidence,", 1)
+	}
 	q := fmt.Sprintf(`
 		SELECT %s
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id%s
 		ORDER BY %s
-		LIMIT $%d OFFSET $%d`, findingSelectCols, where, order, len(args)+1, len(args)+2)
+		LIMIT $%d OFFSET $%d`, cols, where, order, len(args)+1, len(args)+2)
 	rows, err := d.Query(q, pageArgs...)
 	if err != nil {
 		return nil, 0, err
