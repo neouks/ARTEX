@@ -13,7 +13,11 @@ func ResolveBuiltinTool(t actool.CoreTool, description string, saved map[string]
 	raw, _ := json.Marshal(t.InputSchema())
 	var schema map[string]any
 	_ = json.Unmarshal(raw, &schema)
-	mergeToolMetadata(schema, saved)
+	// Asset selector and pagination instructions are executable contract metadata.
+	// Persisted descriptions/defaults may advertise obsolete limit-only calls.
+	if t.Name() != "list_assets" {
+		mergeToolMetadata(schema, saved)
+	}
 	// These descriptions contain versioned pagination/write protocols. Old saved
 	// text must not replace the current contract (e.g. "all findings").
 	switch t.Name() {

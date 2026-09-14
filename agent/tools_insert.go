@@ -512,11 +512,11 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 
 // listAssets lets an agent query the asset table.
 func (t *ToolSet) listAssets() actool.CoreTool {
-	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
+	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。调用前必须选择且只选择一种查询方式：id（正整数）、ids（非空 ID 数组）或 dsl（非空查询条件）；禁止只传 limit/offset/type。按目标搜索示例：{\"dsl\":\"url=example.com\",\"limit\":50}；将示例域名替换为实际目标。续页必须保留原查询条件并使用 next_offset。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
-			"dsl": str("查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。任务审批筛选用 approval_state==approved（approved/pending/blocked/revoked）；status_code==200 表示 HTTP 状态码，status 的整数值仍是 HTTP 状态码。审批筛选不会扩大当前角色的可见范围，Planner 查非批准资产管理摘要应使用 list_task_assets。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
-			"id": idp("单个资产 ID"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "最多50个 ID；详情最多5个"},
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "默认10，最大50；更多结果用返回的 next_offset 作为 offset 续页"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
+			"dsl": str("与 id、ids 三选一，必须为非空查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。任务审批筛选用 approval_state==approved（approved/pending/blocked/revoked）；status_code==200 表示 HTTP 状态码，status 的整数值仍是 HTTP 状态码。审批筛选不会扩大当前角色的可见范围，Planner 查非批准资产管理摘要应使用 list_task_assets。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
+			"id": idp("单个正整数资产 ID；与 ids、dsl 三选一"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "非空正整数 ID 数组，与 id、dsl 三选一；最多50个 ID，详情最多5个"},
+			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "仅控制分页，不能单独使用；必须同时提供 id、ids 或 dsl。默认10，最大50；续页保留查询条件并使用 next_offset"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
 			"fields": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "详情字段组，默认 identity/fingerprint"},
 			"field":  str("详情延期字段 JSON Pointer"), "index": intp("详情集合续页"), "text_offset": intp("详情文本字符偏移"), "max_chars": intp("详情字符预算，默认8000，最大24000"),
 		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -573,8 +573,14 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			if a.DSL != "" {
 				modes++
 			}
-			if modes != 1 || (a.DSL == "" && a.Type != "") {
-				return actool.Errorf("id、ids、dsl 必须三选一；type 仅用于 DSL"), nil
+			if modes == 0 {
+				return actool.Errorf(`缺少查询条件：list_assets 的 id、ids、dsl 必须三选一，不能只传 limit/offset/type。请按实际目标重试，例如 {"dsl":"url=example.com","limit":50}（替换为实际目标），或 {"id":123} / {"ids":[123,456]}（使用已知资产 ID）。续页保留原查询条件并设置 offset=next_offset；Planner 如需审批管理视图，使用 list_task_assets。`), nil
+			}
+			if modes > 1 {
+				return actool.Errorf("查询条件冲突：id、ids、dsl 必须三选一，请仅保留一种查询方式后重试"), nil
+			}
+			if a.DSL == "" && a.Type != "" {
+				return actool.Errorf("type 仅用于 DSL；按 id 或 ids 查询时请删除 type 后重试"), nil
 			}
 			for _, id := range a.IDs {
 				if id <= 0 {
