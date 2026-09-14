@@ -367,7 +367,7 @@ func (s *Server) getFindingTrafficBody(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) toolGetFindingTraffic() actool.CoreTool {
 	return roTool("get_finding_traffic", "读取漏洞已绑定的真实流量证据，不依赖捕获开关。finding_id 使用 report_finding JSON 返回的独立漏洞记录 ID（不是第一行的探索节点 ID）。先不传 binding_id 获取清单及 version；空清单是正常情况，TCP 等非 HTTP 漏洞或未采集时仍可依据文字/命令证据编写报告，不强制绑定。有绑定时按 binding_id、side(request/response)、offset 分段读取正文。写报告时将读取的 version 作为 evidence_version 传给 update_finding_report，后者 finding_id 仍使用探索节点 ID。",
-		objSchema(map[string]any{"finding_id": strParam("独立漏洞记录 ID"), "binding_id": strParam("清单里的绑定 ID，省略则返回清单"), "side": strParam("request 或 response，默认 response"), "offset": map[string]any{"type": "integer"}, "length": map[string]any{"type": "integer"}}, "finding_id"),
+		objSchema(map[string]any{"finding_id": map[string]any{"type": "integer", "minimum": 1, "description": "独立漏洞记录 ID"}, "binding_id": map[string]any{"type": "integer", "minimum": 1, "description": "清单里的绑定 ID，省略则返回清单"}, "side": strParam("request 或 response，默认 response"), "offset": map[string]any{"type": "integer"}, "length": map[string]any{"type": "integer"}}, "finding_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				FindingID      json.RawMessage `json:"finding_id"`

@@ -12,7 +12,7 @@ import (
 func TestDeferredSystem_NoGlobal(t *testing.T) {
 	// No global MCP names still leaves one static, cacheable system segment.
 	sys, boundary := deferredSystem("SYS", DeferredInfo{})
-	if len(sys) != 1 || sys[0] != "SYS" || boundary != 1 {
+	if len(sys) != 1 || sys[0] != "SYS"+toolAvailabilityRule || boundary != 1 {
 		t.Fatalf("expected [SYS],1 — got %v,%d", sys, boundary)
 	}
 }
@@ -23,7 +23,7 @@ func TestDeferredSystem_WithGlobal(t *testing.T) {
 		GlobalNames: []string{"mcp__browser__navigate", "mcp__browser__click"},
 	}
 	sys, boundary := deferredSystem("SYS", def)
-	if len(sys) != 2 || sys[0] != "SYS" {
+	if len(sys) != 2 || sys[0] != "SYS"+toolAvailabilityRule {
 		t.Fatalf("expected [SYS, block], got %v", sys)
 	}
 	if !strings.Contains(sys[1], "<available-deferred-tools>") ||
@@ -52,14 +52,16 @@ func TestDeferredSystem_GatedNotInBlock(t *testing.T) {
 
 func TestSeedUnlockFromHistory(t *testing.T) {
 	skillCall := func(name string) llm.ContentBlock {
-		return llm.ContentBlock{Type: llm.BlockToolUse, Name: "Skill", Input: json.RawMessage(`{"name":"` + name + `"}`)}
+		return llm.ContentBlock{Type: llm.BlockToolUse, ID: name, Name: "Skill", Input: json.RawMessage(`{"name":"` + name + `"}`)}
 	}
 	msgs := []llm.Message{
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{skillCall("browsing")}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.ToolResultText("browsing", "loaded", false)}},
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 			{Type: llm.BlockToolUse, Name: "Bash", Input: json.RawMessage(`{}`)}, // ignored
 			skillCall("recon"),
 		}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.ToolResultText("recon", "loaded", false)}},
 	}
 	var got []string
 	seedUnlockFromHistory(msgs, func(name string) { got = append(got, name) })
@@ -67,6 +69,19 @@ func TestSeedUnlockFromHistory(t *testing.T) {
 		t.Fatalf("unlocked=%v want [browsing recon]", got)
 	}
 	seedUnlockFromHistory(msgs, nil) // nil → no-op, no panic
+}
+
+func TestSeedUnlockRequiresSuccessfulResult(t *testing.T) {
+	msgs := []llm.Message{{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Type: llm.BlockToolUse, ID: "denied", Name: "Skill", Input: json.RawMessage(`{"name":"denied"}`)},
+		{Type: llm.BlockToolUse, ID: "unfinished", Name: "Skill", Input: json.RawMessage(`{"name":"unfinished"}`)},
+		{Type: llm.BlockToolUse, ID: "bad", Name: "Skill", Input: json.RawMessage(`!`)},
+	}}, {Role: llm.RoleUser, Content: []llm.ContentBlock{
+		llm.ToolResultText("denied", "denied", true),
+		llm.ToolResultText("unknown", "loaded", false),
+		llm.ToolResultText("bad", "loaded", false),
+	}}}
+	seedUnlockFromHistory(msgs, func(name string) { t.Fatalf("unauthorized history unlock: %s", name) })
 }
 
 // TestUnlockGatingFlow mirrors what OnInvoke / seedUnlockFromHistory do: a gated

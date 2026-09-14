@@ -51,8 +51,9 @@ func TaskDomainToolsFrom(ctx context.Context) map[string]actool.CoreTool {
 
 // AugmentTools returns base plus the agent's visible skill/MCP tools, the
 // DeferredInfo, and a cleanup func the caller must defer (closes MCP clients).
-// Built-in base tools are kept as-is — never filtered (内置工具留代码层，不做可见性过滤).
-func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func()) {
+// The catalog filters bindings/enabled flags. Configuration errors return no
+// capabilities; callers must run cleanup and stop before constructing a session.
+func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func(), error) {
 	var (
 		def     DeferredInfo
 		cleanup = func() {}
@@ -74,8 +75,12 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	// descriptions/schemas + default injection. MCP/skill/host tools have no row
 	// and pass through untouched, so deferred/unlock wiring stays consistent.
 	if ToolResolve != nil {
-		out = ToolResolve(ctx, agentKey, out)
+		var err error
+		out, err = ToolResolve(ctx, agentKey, out)
+		if err != nil {
+			return nil, DeferredInfo{}, cleanup, err
+		}
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
-	return out, def, cleanup
+	return out, def, cleanup, nil
 }

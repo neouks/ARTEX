@@ -56,7 +56,9 @@ func (s *Server) toolDeleteAssetsByHost() actool.CoreTool {
 			var a struct {
 				Host string `json:"host"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if strings.TrimSpace(a.Host) == "" {
 				return actool.Errorf("host 不能为空"), nil
 			}
@@ -88,7 +90,9 @@ func (s *Server) toolCreateSkill() actool.CoreTool {
 		}, "name", "description"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Name, Description, Instructions string }
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if !validSkillName(a.Name) {
 				return actool.Errorf("skill 名不合法(小写字母开头，仅字母/数字/连字符，≤64)"), nil
 			}
@@ -130,7 +134,9 @@ func (s *Server) toolUpdateSkillFile() actool.CoreTool {
 		}, "name", "content"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Name, File, Content string }
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if !validSkillName(a.Name) {
 				return actool.Errorf("skill 名不合法"), nil
 			}
@@ -206,7 +212,9 @@ func (s *Server) toolCreateCustomTool() actool.CoreTool {
 		customToolSchema("工具 key(小写字母开头，字母/数字/下划线)"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a customToolToolInput
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			a.Key = strings.TrimSpace(a.Key)
 			if !reToolKey.MatchString(a.Key) {
 				return actool.Errorf("key 需小写字母开头，仅含小写字母/数字/下划线"), nil
@@ -232,7 +240,9 @@ func (s *Server) toolUpdateCustomTool() actool.CoreTool {
 		customToolSchema("要修改的自定义工具 key"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a customToolToolInput
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			existing, _ := s.m.pg.GetTool(a.Key)
 			if existing == nil || existing.System {
 				return actool.Errorf("只能修改自定义工具: " + a.Key), nil
@@ -303,7 +313,9 @@ func (s *Server) toolCreateMCP() actool.CoreTool {
 		mcpSchema(false),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a mcpToolInput
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			a.ID = 0
 			if strings.TrimSpace(a.Name) == "" || strings.TrimSpace(a.Transport) == "" {
 				return actool.Errorf("name / transport 必填"), nil
@@ -325,7 +337,9 @@ func (s *Server) toolUpdateMCP() actool.CoreTool {
 		mcpSchema(true),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a mcpToolInput
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if a.ID == 0 {
 				return actool.Errorf("id 必填"), nil
 			}

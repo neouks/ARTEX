@@ -39,7 +39,7 @@ func TestInjectedGraphOverviewUsesRunStore(t *testing.T) {
 	if err := pg.UpdateTool(row.Key, row.Description, row.Schema, mustJSON([]string{"planner"}), true); err != nil {
 		t.Fatal(err)
 	}
-	if tools := names(agent.ToolResolve(context.Background(), "planner", nil)); tools["graph_overview"] != nil {
+	if tools := names(resolveToolsForTest(t, context.Background(), "planner", nil)); tools["graph_overview"] != nil {
 		t.Fatal("injected unbound graph")
 	}
 	var contexts []context.Context
@@ -53,14 +53,14 @@ func TestInjectedGraphOverviewUsesRunStore(t *testing.T) {
 		ts.SetTaskID(task.ID)
 		ts.SetAssetStore(pg.Assets(), pg.Companies())
 		ctx := agent.WithRunInfo(t.Context(), agent.RunInfo{TaskID: task.ID, ExplorationID: task.ExplorationID})
-		if tools := names(agent.ToolResolve(ctx, "planner", nil)); tools["graph_overview"] != nil || tools["list_assets"] != nil {
+		if tools := names(resolveToolsForTest(t, ctx, "planner", nil)); tools["graph_overview"] != nil || tools["list_assets"] != nil {
 			t.Fatal("missing task tools fell back to global")
 		}
 		contexts = append(contexts, agent.WithTaskToolSet(ctx, ts))
 	}
 	// Missing base reproduces the exact catalog-injection path from the panic.
 	for i, ctx := range contexts {
-		tools := names(agent.ToolResolve(ctx, "planner", nil))
+		tools := names(resolveToolsForTest(t, ctx, "planner", nil))
 		graph := tools["graph_overview"]
 		if graph == nil {
 			t.Fatal("task graph tool not injected")
@@ -74,7 +74,7 @@ func TestInjectedGraphOverviewUsesRunStore(t *testing.T) {
 		}
 		// A per-run base handler (and its callbacks) must retain priority.
 		base := []actool.CoreTool{graph}
-		if got := names(agent.ToolResolve(ctx, "planner", base)); got["graph_overview"] == nil {
+		if got := names(resolveToolsForTest(t, ctx, "planner", base)); got["graph_overview"] == nil {
 			t.Fatal("base graph disappeared")
 		}
 	}

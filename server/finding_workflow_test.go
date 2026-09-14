@@ -91,7 +91,7 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	ts.SetFindingRecorder(s.evidenceStore())
 	notices := 0
 	ts.SetNotifyFinding(func(int64, string) { notices++ })
-	tools, def, cleanup := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
+	tools, def, cleanup := augmentToolsForTest(t, ctx, "planner", ts.PlannerTools())
 	defer cleanup()
 	if !strings.Contains(def.FindingGuidance, "evidence_hint_id") || !strings.Contains(def.FindingGuidance, "取消 Worker") {
 		t.Fatal("Planner missed runtime guidance")
@@ -185,10 +185,10 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 		t.Fatal("optional no-packet report failed")
 	}
 	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
-	tools, def, closeTools := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
+	tools, def, closeTools := augmentToolsForTest(t, ctx, "planner", ts.PlannerTools())
 	defer closeTools()
-	if def.FindingGuidance != "" {
-		t.Fatal("disabled feature still injects guidance")
+	if !strings.Contains(def.FindingGuidance, "当前未启用流量证据绑定") {
+		t.Fatal("disabled feature must override stale binding instructions")
 	}
 	for _, tool := range tools {
 		if tool.Name() == "bind_finding_traffic" {
@@ -274,7 +274,7 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 	}
 	seedServerEvidenceFlow(t, s, "reporter-proof", []byte("local proof payload"))
 	seedServerEvidenceFlow(t, s, "reporter-baseline", []byte("local normal response"))
-	tools, def, cleanup := agent.AugmentTools(ctx, "reporter", nil)
+	tools, def, cleanup := augmentToolsForTest(t, ctx, "reporter", nil)
 	defer cleanup()
 	if !strings.Contains(def.FindingGuidance, "报告前自动关联流量") || !strings.Contains(def.FindingGuidance, "绑定成功后重新调用") {
 		t.Fatal("reporter did not receive binding workflow")
@@ -312,10 +312,10 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 	if r := request("PUT", "/api/settings", `{"agent_traffic_binding":false}`); r.Code != 200 {
 		t.Fatal(r.Code, r.Body)
 	}
-	off, offDef, closeOff := agent.AugmentTools(ctx, "reporter", nil)
+	off, offDef, closeOff := augmentToolsForTest(t, ctx, "reporter", nil)
 	defer closeOff()
-	if offDef.FindingGuidance != "" {
-		t.Fatal("off reporter still receives auto-binding guidance")
+	if !strings.Contains(offDef.FindingGuidance, "当前未启用流量证据绑定") {
+		t.Fatal("off reporter missing binding-disabled guidance")
 	}
 	for _, tool := range off {
 		if tool.Name() == "traffic_search" || tool.Name() == "traffic_get" || tool.Name() == "traffic_blob" || tool.Name() == "bind_finding_traffic" {

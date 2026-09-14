@@ -52,7 +52,7 @@ func TestWireTools(t *testing.T) {
 	base := append(ts.WorkerTools(), actool.DefaultTools()...)
 	ctx := context.Background()
 
-	worker := names(agent.ToolResolve(ctx, "worker", base))
+	worker := names(resolveToolsForTest(t, ctx, "worker", base))
 	if _, ok := worker["record_fact"]; !ok {
 		t.Error("worker lost record_fact")
 	}
@@ -68,7 +68,7 @@ func TestWireTools(t *testing.T) {
 		}
 	}
 	// planner is not bound to record_fact → resolving a base that contains it drops it.
-	planner := names(agent.ToolResolve(ctx, "planner", base))
+	planner := names(resolveToolsForTest(t, ctx, "planner", base))
 	if _, ok := planner["record_fact"]; ok {
 		t.Error("planner should not get record_fact (not bound)")
 	}
@@ -88,13 +88,16 @@ func TestWireTools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	worker2 := names(agent.ToolResolve(ctx, "worker", base))
+	worker2 := names(resolveToolsForTest(t, ctx, "worker", base))
 	got := worker2["record_fact"]
 	if got == nil {
 		t.Fatal("record_fact missing after edit")
 	}
-	if got.Description() != "EDITED DESC" {
-		t.Errorf("description = %q, want EDITED DESC", got.Description())
+	if got.Description() != baseDescription(base, "record_fact") {
+		t.Errorf("runtime contract replaced by outdated saved text: %q", got.Description())
+	}
+	if saved, err := pg.GetTool(rf.Key); err != nil || saved.Description != "EDITED DESC" {
+		t.Fatal("saved user description was overwritten")
 	}
 	// Default injection: omit confidence → handler input should carry the default.
 	// We can't run the real handler (nil store), but InputSchema must show the default.
@@ -104,6 +107,15 @@ func TestWireTools(t *testing.T) {
 	if conf["default"] != "inferred" {
 		t.Errorf("confidence.default = %v, want inferred", conf["default"])
 	}
+}
+
+func baseDescription(tools []actool.CoreTool, name string) string {
+	for _, tool := range tools {
+		if tool.Name() == name {
+			return tool.Description()
+		}
+	}
+	return ""
 }
 
 func mustToolRows(t *testing.T, pg *db.DB) []*db.Tool {

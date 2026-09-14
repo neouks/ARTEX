@@ -1332,6 +1332,13 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
 }
 
 function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Record<string, unknown>): unknown {
+  // No model runs in Mock. Return the real history envelope rather than the
+  // generic collection fallback; never pretend a question was submitted.
+  if (/^\/(conversations\/[^/]+|tasks\/[^/]+\/(chat|intents\/[^/]+))\/side-questions$/.test(path)) {
+    if (m === "GET") return { items: [], current: null, next_cursor: 0, snapshot: null };
+    if (m === "DELETE") return { cleared: true };
+    if (m === "POST") throw new Error("Mock 模式未运行模型，暂不支持旁路问答");
+  }
   const task = q.get("task") ?? undefined;
 
   // ── auth：让 demo 直接进主界面 ──

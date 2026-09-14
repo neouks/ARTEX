@@ -44,6 +44,11 @@ func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.Co
 			}
 			out = append(out, tool)
 		}
+		for _, tool := range out {
+			if tool.Name() == "report_finding" || tool.Name() == "add_hint" || tool.Name() == "add_task_hint" || tool.Name() == "update_finding_report" {
+				return out, "\n\n当前未启用流量证据绑定：正常保存文字/命令证据，不传流量绑定参数，不为绑定额外查包。此规则优先于历史或自定义提示中的绑定要求。"
+			}
+		}
 		return out, ""
 	}
 	out := append([]actool.CoreTool(nil), tools...)

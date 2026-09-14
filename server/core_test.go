@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/llm"
 )
 
 // TestCoreTaskLifecyclePG exercises the migrated core (tasks/exploration on PG)
@@ -24,7 +25,19 @@ func TestCoreTaskLifecyclePG(t *testing.T) {
 	}
 	defer m.Close()
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := New(ctx, m, td, td, td)
+	// This tests HTTP/PG lifecycle, not a real provider's retry latency. Keep
+	// goal decomposition deterministic and local even when another test seeded
+	// an active model profile. Empty decomposition exercises the real fallback.
+	s.cfgMu.Lock()
+	s.llmOn = true
+	s.llmCfg.Stream = false
+	s.llmProv = retestProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("本次使用原始目标")}}, "end_turn", llm.Usage{}, nil
+	}}
+	s.cfgMu.Unlock()
 	h := s.Handler()
 	tok, err := signJWT(s.jwtKey)
 	if err != nil {

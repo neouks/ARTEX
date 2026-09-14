@@ -12,6 +12,65 @@ import (
 
 const toolListBudget = 24000
 
+// ProjectToolDetail shares the domain tools' lossless continuation protocol with
+// host tools. The limit includes JSON escaping and continuation metadata.
+type toolDetailRequest struct {
+	Field string `json:"field"`
+	Index int    `json:"index"`
+	detailWindow
+}
+
+func parseToolDetailInput(input json.RawMessage) (toolDetailRequest, error) {
+	var a toolDetailRequest
+	if err := decodeToolInput(input, &a); err != nil {
+		return a, err
+	}
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(input, &fields)
+	if _, explicit := fields["max_chars"]; explicit && a.MaxChars == 0 {
+		return a, fmt.Errorf("max_chars 必须为 1..24000")
+	}
+	if err := a.validate(); err != nil {
+		return a, err
+	}
+	if a.Index < 0 {
+		return a, fmt.Errorf("index 不能为负数")
+	}
+	if a.Field != "" && !strings.HasPrefix(a.Field, "/") {
+		return a, fmt.Errorf("field 必须为 JSON Pointer")
+	}
+	return a, nil
+}
+
+// ValidateToolDetailInput permits host tools to reject bad input before I/O.
+func ValidateToolDetailInput(input json.RawMessage) error {
+	_, err := parseToolDetailInput(input)
+	return err
+}
+
+func ProjectToolDetail(value any, input json.RawMessage) (map[string]any, error) {
+	a, err := parseToolDetailInput(input)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		out, err := projectDetail(value, a.detailWindow, a.Field, a.Index)
+		if err != nil {
+			return nil, err
+		}
+		// projectDetail has normalized every value through JSON decoding; this
+		// map contains only JSON values and cannot fail to marshal.
+		raw, _ := json.Marshal(out)
+		if len([]rune(string(raw))) <= toolListBudget {
+			return out, nil
+		}
+		if a.MaxChars == 1 {
+			return nil, fmt.Errorf("字段路径或元数据超出工具响应预算")
+		}
+		a.MaxChars = max(1, a.MaxChars/2)
+	}
+}
+
 func textWindow(text string, w detailWindow) (string, int, int) {
 	r := []rune(text)
 	start := min(w.Offset, len(r))

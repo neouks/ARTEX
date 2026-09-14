@@ -1360,7 +1360,7 @@ func (t *ToolSet) nodeListTool(kind string) actool.CoreTool {
 				q.Limit = 20
 			}
 			if q.Limit < 1 || q.Limit > 100 || q.Before < 0 || q.AssetID < 0 {
-				return actool.Errorf("无效分页参数"), nil
+				return actool.Errorf("limit 必须为1..100（默认20）；before 使用上一页 next_before 且不得为负；asset_id 须为正整数或省略"), nil
 			}
 			if q.Severity != "" {
 				switch q.Severity {
@@ -1599,7 +1599,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			batch := len(a.Intents) > 0
 			items := a.Intents
 			if !batch {
@@ -1678,7 +1680,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 				EvidenceID json.RawMessage `json:"evidence_id"`
 				Reason     string          `json:"reason"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			goal, ev := pid(a.GoalID), pid(a.EvidenceID)
 			if goal == 0 || ev == 0 {
 				return actool.Errorf("goal_id 和 evidence_id 必填"), nil
@@ -1721,7 +1725,9 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 		obj(map[string]any{"reason": str("达成理由（必须是目标真正达成的证据，不能是“本轮无新方向”这类结束本轮的理由）")}, "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
 			return actool.Text("acknowledged: goal marked met"), nil
@@ -1733,7 +1739,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
-		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 ID，JSON 整数数组，如 [1,2]；不要传字符串"},
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
@@ -1933,29 +1939,42 @@ func (t *ToolSet) ownerAssetIDs() []int64 {
 	return ids
 }
 
+const factWriteContract = "单条和批量事实均调用 record_fact；批量使用同一工具的 facts 数组参数，不改变工具名。"
+
+func factFields() map[string]any {
+	return map[string]any{
+		"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
+		"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
+		"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
+		"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
+		"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+		"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 ID，JSON 整数数组，如 [1,2]；不要传字符串；可省略"},
+	}
+}
+
+func factSchema() map[string]any {
+	fields := factFields()
+	fields["facts"] = map[string]any{"type": "array", "description": "独立结论批量写入；仍调用 record_fact，元素 intent_id 默认使用顶层值。", "items": obj(factFields(), "summary")}
+	return obj(fields)
+}
+
 func (t *ToolSet) recordFact() actool.CoreTool {
-	return writeTool("record_fact", "把探索【事实/结论】写入探索图，连到产生它的意图（intent_id）。用于记录探索结果——包括指纹/枚举等【正向结论】，和'端口关闭'/'参数不可注入'/'未发现登录入口'等【否定结论】。\n"+
+	return writeTool("record_fact", factWriteContract+"\n把探索【事实/结论】写入探索图，连到产生它的意图（intent_id）。用于记录探索结果——包括指纹/枚举等【正向结论】，和'端口关闭'/'参数不可注入'/'未发现登录入口'等【否定结论】。\n"+
 		"⚠️一次探索的多个观察要【汇总成一条事实】，不要拆成多条，可以合并成一条事实的就尽量用一条事实表示：summary=对本次结论的总结性一句话，detail=相关细节（可含多个具体项）。例：指纹意图→一条事实 {summary:'识别了 X 站点的技术栈与响应特征', detail:'nginx 1.25 / Vue3 / 200 / title=.. / body_len=..'}，而不是状态码、指纹、标题各记一条。一条意图通常只产出一条事实，拆太碎会让图谱无限膨胀。\n"+
 		"★facts 数组用于一次写多条【彼此不同】的结论（每条可省略 intent_id，默认用顶层 intent_id）。返回 ids 数组，与 facts 等长同序。\n"+
 		"⚠️只写你在工具输出里【真实看到】的结论，不要脑补。evidence 与 confidence 用来防止不准确的结论污染图谱：\n"+
 		"  · evidence=支撑本结论的【一行】关键证据（命令+最能证明的那一两行输出），**务必简洁**——细节已在 detail，这里不要再粘大段输出。\n"+
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
-		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
-			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
-			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
-			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
-			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
-		}),
+		factSchema(),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Facts    []factItem `json:"facts"`
 				factItem            // 单条模式 + 批量默认 intent_id
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			batch := len(a.Facts) > 0
 			items := a.Facts
 			if !batch {
@@ -2077,7 +2096,9 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 				Goals    []goalItem `json:"goals"`
 				goalItem            // 单条模式:顶层 text/vulnclass
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			batch := len(a.Goals) > 0
 			items := a.Goals
 			if !batch {
@@ -2171,7 +2192,9 @@ func (t *ToolSet) setConstraints() actool.CoreTool {
 				Constraints    []constraintItem `json:"constraints"`
 				constraintItem                  // 单条模式:顶层 text/type
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			batch := len(a.Constraints) > 0
 			items := a.Constraints
 			if !batch {
@@ -2215,7 +2238,9 @@ func (t *ToolSet) addHint() actool.CoreTool {
 				Hints    []hintItem `json:"hints"`
 				hintItem            // 单条模式：顶层 text/asset_ids
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			batch := len(a.Hints) > 0
 			items := a.Hints
 			if !batch {
@@ -2271,7 +2296,9 @@ func (t *ToolSet) killWorkTool() actool.CoreTool {
 			var a struct {
 				IntentID json.RawMessage `json:"intent_id"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			id := pid(a.IntentID)
 			if id <= 0 {
 				return actool.Errorf("intent_id 必填"), nil
@@ -2308,7 +2335,9 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 				IntentID json.RawMessage `json:"intent_id"`
 				Message  string          `json:"message"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			id := pid(a.IntentID)
 			if id <= 0 {
 				return actool.Errorf("intent_id 必填"), nil
@@ -2606,7 +2635,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 				in.Limit = 20
 			}
 			if in.Limit < 1 || in.Limit > 100 || in.Before < 0 {
-				return actool.Errorf("无效分页参数"), nil
+				return actool.Errorf("limit 必须为1..100（默认20）；before 使用上一页 next_before 且不得为负"), nil
 			}
 			page, err := t.ts.ToolNodePage(ctx, db.KindIntent, strings.TrimSpace(in.Q), "", 0, in.Before, in.Limit)
 			if err != nil {

@@ -1601,7 +1601,9 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Limit          int
 				Page           int
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if strings.TrimSpace(a.Host) == "" {
 				return actool.Errorf("host 为必填参数：请指定要查询的主机（如 '107.172.96.177:8082'），避免全库扫描。"), nil
 			}
@@ -1641,7 +1643,9 @@ func (t *Traffic) Tools() []actool.CoreTool {
 		Permissions: allow,
 		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var a struct{ ID string }
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			req, resp, err := t.Get(a.ID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -1670,7 +1674,9 @@ func (t *Traffic) Tools() []actool.CoreTool {
 				Offset int64
 				Length int64
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if a.Length <= 0 || a.Length > maxBlobRead {
 				a.Length = maxBlobRead
 			}

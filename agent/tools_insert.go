@@ -438,7 +438,9 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 				scopeEntry              // 单条模式
 				Reason     string       `json:"reason"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			items := a.Entries
 			if len(items) == 0 {
 				items = []scopeEntry{a.scopeEntry}
@@ -487,7 +489,9 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 				Page     int    `json:"page"`
 				PageSize int    `json:"page_size"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if a.Page <= 0 {
 				a.Page = 1
 			}
@@ -510,15 +514,12 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 func (t *ToolSet) listAssets() actool.CoreTool {
 	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。id、ids、dsl 三选一。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
-			"dsl": str("DSL，如 port==443 AND technology=nginx"), "type": str("可选资产类型，仅用于 DSL"),
+			"dsl": str("查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
 			"id": idp("单个资产 ID"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "最多50个 ID；详情最多5个"},
-			"limit": intp("默认10，最大50"), "offset": intp("列表偏移"), "detail": map[string]any{"type": "boolean"},
+			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "默认10，最大50；更多结果用返回的 next_offset 作为 offset 续页"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
 			"fields": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "详情字段组，默认 identity/fingerprint"},
 			"field":  str("详情延期字段 JSON Pointer"), "index": intp("详情集合续页"), "text_offset": intp("详情文本字符偏移"), "max_chars": intp("详情字符预算，默认8000，最大24000"),
 		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			if t.as == nil {
-				return actool.Errorf("AssetStore 未初始化"), nil
-			}
 			var a struct {
 				DSL        string   `json:"dsl"`
 				Type       string   `json:"type"`
@@ -534,13 +535,22 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				MaxChars   int      `json:"max_chars"`
 			}
 			if err := decodeToolInput(in, &a); err != nil {
-				return actool.Errorf(err.Error()), nil
+				return actool.Errorf(err.Error() + `。list_assets 使用 dsl 搜索，没有顶层 url/domain/ip 参数；例如 {"type":"endpoint","dsl":"url=example.com","limit":50}；limit 为1..50，用 offset 续页。`), nil
 			}
 			if a.Limit == 0 {
 				a.Limit = 10
 			}
-			if a.Limit < 1 || a.Limit > 50 || a.Offset < 0 || a.ID < 0 || len(a.IDs) > 50 {
-				return actool.Errorf("无效分页范围或资产 ID 数量"), nil
+			if a.Limit < 1 || a.Limit > 50 {
+				return actool.Errorf(fmt.Sprintf("limit=%d 超出范围：list_assets 默认10、最大50；请使用 limit=50，并以返回的 next_offset 继续读取。", a.Limit)), nil
+			}
+			if a.Offset < 0 {
+				return actool.Errorf("offset 必须为非负整数，续页使用返回的 next_offset"), nil
+			}
+			if a.ID < 0 {
+				return actool.Errorf("id 必须为正整数；不指定单个资产时省略 id"), nil
+			}
+			if len(a.IDs) > 50 {
+				return actool.Errorf("ids 每次最多50个；请拆分批次，详细模式每次最多5个"), nil
 			}
 			if a.Index < 0 {
 				return actool.Errorf("index 不能为负数"), nil
@@ -594,6 +604,9 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				default:
 					return actool.Errorf("未知字段组: " + group), nil
 				}
+			}
+			if t.as == nil {
+				return actool.Errorf("AssetStore 未初始化"), nil
 			}
 			store := t.as.WithReadContext(ctx).WithToolReadFields(a.Detail, a.Fields)
 			if t.workerExecution {
@@ -728,7 +741,9 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 			var a struct {
 				Search string `json:"search"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			cos, err := t.cs.ListCompanies()
 			if err != nil {
 				return actool.Errorf("查询公司失败: " + err.Error()), nil

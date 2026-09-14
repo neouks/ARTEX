@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -143,8 +142,17 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 // arguments cannot redirect a result into a different finding or conversation.
 func (s *Server) findingRetestTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		roTool("get_finding_retest_context", "读取当前复测会话关联的漏洞证据快照、复测状态、补充说明与当前任务约束。无参数，只能读取本会话。",
-			objSchema(map[string]any{}), func(ctx context.Context, _ json.RawMessage) (actool.Result, error) {
+		roTool("get_finding_retest_context", "读取当前复测会话的有界证据概览与当前任务约束，不接受其他会话 ID。长证据按返回的 field 读取；集合用 next_index，正文用 next_offset 续读。默认8000、最大24000字符，完整证据保留。truncated=true 不表示已读完；执行前按需读齐原证据与约束。",
+			objSchema(map[string]any{
+				"field":     strParam("延期字段 JSON Pointer，默认概览"),
+				"index":     map[string]any{"type": "integer", "minimum": 0, "description": "集合 next_index 续页"},
+				"offset":    map[string]any{"type": "integer", "minimum": 0, "description": "文本 next_offset 续读"},
+				"max_chars": map[string]any{"type": "integer", "minimum": 1, "maximum": 24000, "description": "默认8000，最大24000"},
+			}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+				// Validate even direct host invocations before accessing the database.
+				if err := agent.ValidateToolDetailInput(in); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
 				r, err := s.m.pg.FindingRetestForConversation(ctx, intercept.ConvIDFromContext(ctx))
 				if err != nil {
 					return actool.Errorf(err.Error()), nil
@@ -157,15 +165,29 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 				if err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
-				if f != nil && f.TaskID != nil {
-					if task, ok := s.m.Task(strconv.FormatInt(*f.TaskID, 10)); ok {
-						constraints, err = task.Store.ListConstraints()
-						if err != nil {
-							return actool.Errorf(err.Error()), nil
-						}
+				if f == nil {
+					return actool.Errorf("关联漏洞已不存在，无法读取当前复测约束"), nil
+				}
+				if f.TaskID != nil {
+					// A task need not be loaded/running in Manager to have constraints.
+					// Read current state from PG, not the immutable snapshot or cache.
+					task, err := s.m.pg.GetTask(*f.TaskID)
+					if err != nil {
+						return actool.Errorf(err.Error()), nil
+					}
+					if task == nil || task.ExplorationID <= 0 {
+						return actool.Errorf("关联任务不可用，无法确认当前测试约束"), nil
+					}
+					constraints, err = s.m.pg.Exploration(task.ExplorationID).ListConstraints()
+					if err != nil {
+						return actool.Errorf(err.Error()), nil
 					}
 				}
-				return jsonResult(map[string]any{"retest": r, "current_constraints": constraints})
+				projection, err := agent.ProjectToolDetail(map[string]any{"retest": r, "current_constraints": constraints}, in)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				return jsonResult(projection)
 			}),
 		wrTool("record_finding_retest_result", "为当前复测会话保存唯一结论；原漏洞证据与报告保持不变。会话成功结束且结论为 fixed 时，系统自动将漏洞状态改为已修复；其他结论保留原状态。必须提供本次实际检查的证据，无法确认时写明阻塞原因。",
 			objSchema(map[string]any{

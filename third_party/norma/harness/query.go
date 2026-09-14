@@ -29,6 +29,7 @@ type QueryInput struct {
 	// list (they stay in Tools and are invoked via ExecuteExtraTool). Empty = all
 	// tool schemas sent as usual.
 	DeferredTools []string
+	UnlockSet     *tool.UnlockSet // shared session gate; nil does not unlock deferred tools
 	MaxTokens     int
 	Temperature   *float64
 	// MaxTurns bounds tool-turns (0 = off). MaxDuration bounds wall-clock time,
@@ -109,7 +110,7 @@ type QueryInput struct {
 type Settlement struct {
 	Prompt        string   // wrap-up instruction injected as a user turn (empty = settlement off)
 	MaxTurns      int      // turn budget for the wrap-up phase itself (0 = default 2)
-	DisabledTools []string // tool names hidden from the model during wrap-up (e.g. ["Bash"])
+	DisabledTools []string // hidden and execution-denied during wrap-up, including deferred calls
 	// PromptByReason optionally overrides Prompt based on WHY the run settled
 	// (keyed by the terminal reason, e.g. ReasonTimeout / ReasonMaxTurns). When the
 	// settling reason has a non-empty entry here it is used; otherwise Prompt is used.

@@ -214,10 +214,10 @@ func NewSearchExtraTools(reg *Registry, deferred []string) CoreTool {
 	})
 }
 
-// NewExecuteExtraTool builds the always-loaded invoker for deferred tools. It runs
-// the named tool from reg, but only if it is currently in the unlock set. Schema is
-// validated before the call. unlock may be nil (then every registry tool is
-// callable — no gating).
+// NewExecuteExtraTool builds the always-loaded invoker for deferred tools. It
+// resolves the schema/unlock gate, then dispatches through ToolContext.ExecuteTool
+// for the full runtime policy. A nil unlock omits this local gate only; it never
+// bypasses the runtime gate. Missing dispatchers fail closed.
 func NewExecuteExtraTool(reg *Registry, unlock *UnlockSet) CoreTool {
 	return Build(Spec{
 		Name: ExecuteExtraToolName,
@@ -263,10 +263,14 @@ func NewExecuteExtraTool(reg *Registry, unlock *UnlockSet) CoreTool {
 			if len(params) == 0 {
 				params = json.RawMessage("{}")
 			}
+			params = ApplyInputDefaults(params, t.InputSchema())
 			if err := ValidateInput(t.InputSchema(), params); err != nil {
 				return Errorf("Error: invalid params for " + args.ToolName + ": " + err.Error()), nil
 			}
-			return t.Call(ctx, params, tc)
+			if tc == nil || tc.ExecuteTool == nil {
+				return Errorf("Error: deferred execution requires a policy-aware executor"), nil
+			}
+			return tc.ExecuteTool(ctx, args.ToolName, params)
 		},
 	})
 }

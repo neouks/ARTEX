@@ -36,14 +36,52 @@ export interface SideHistory {
   snapshot: { captured_at: string; model: SideModel; available: boolean; reason: string } | null;
 }
 
+// Validate before scheduling React state updates: updater errors escape the
+// request's try/catch and otherwise crash the entire session view.
+export function parseSideHistory(value: unknown): SideHistory {
+  const data = value as SideHistory | null;
+  if (
+    !data ||
+    !(Array.isArray(data.items) || data.items === null) ||
+    !Number.isInteger(data.next_cursor) ||
+    data.next_cursor < 0
+  ) {
+    throw new Error("旁路问答历史响应格式错误，请重试");
+  }
+  const items = data.items ?? [];
+  for (const item of items) parseSideExchange(item);
+  if (data.current != null) parseSideExchange(data.current);
+  return { ...data, items, current: data.current ?? null, snapshot: data.snapshot ?? null };
+}
+
+export function parseSideExchange(value: unknown): SideExchange {
+  const item = value as SideExchange | null;
+  if (
+    !item ||
+    typeof item.id !== "string" ||
+    !item.id ||
+    !Number.isInteger(item.sequence) ||
+    !Number.isInteger(item.ordinal) ||
+    typeof item.question !== "string" ||
+    typeof item.answer !== "string" ||
+    !["running", "completed", "failed", "cancelled", "interrupted"].includes(item.status) ||
+    !item.model ||
+    typeof item.model.model !== "string"
+  ) {
+    throw new Error("旁路问答记录格式错误，请重试");
+  }
+  return item;
+}
+
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   return http<T>(path.replace(/^\/api/, ""), { method, body: body === undefined ? undefined : JSON.stringify(body) });
 }
 
 export const sideAPI = {
-  history: (parent: string, before = 0) => request<SideHistory>(`${parent}/side-questions?before=${before}`),
+  history: async (parent: string, before = 0) =>
+    parseSideHistory(await request<unknown>(`${parent}/side-questions?before=${before}`)),
   ask: (parent: string, question: string, client_request_id: string) =>
-    request<SideExchange>(`${parent}/side-questions`, "POST", { question, client_request_id }),
+    request<unknown>(`${parent}/side-questions`, "POST", { question, client_request_id }).then(parseSideExchange),
   clear: (parent: string) => request(`${parent}/side-questions`, "DELETE"),
   cancel: (id: string) => request(`/api/side-questions/${id}/cancel`, "POST"),
 };

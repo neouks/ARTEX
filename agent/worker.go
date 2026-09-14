@@ -152,7 +152,7 @@ func (w *Worker) SetRunTimeout(run time.Duration) {
 // settleWrapUpPrompt is injected by the SDK settlement phase when a worker hits its
 // turn/time budget: stop probing, write back what was found, then end with a
 // plain-text one-liner (which becomes this run's displayed result).
-const settleWrapUpPrompt = "你即将因预算耗尽被终止。不要再运行任何命令/探测。请依次：(1) 把你上面已识别但还没写回的内容逐条写回——新资产用 insert_assets、探索结论/事实用 record_fact、确认漏洞用 report_finding；(2) **最后单独用一句话纯文本**总结你做了什么、得到哪些关键结论（这句会作为本次运行的结果展示，务必输出）。"
+const settleWrapUpPrompt = "你即将因预算耗尽被终止。不要再运行任何命令/探测。请依次：(1) 把你上面已识别但还没写回的内容写回——新资产用 insert_assets、探索结论/事实用 record_fact、确认漏洞用 report_finding。" + factWriteContract + "(2) **最后单独用一句话纯文本**总结你做了什么、得到哪些关键结论（这句会作为本次运行的结果展示，务必输出）。"
 
 func (w *Worker) SetMemory(m *memory.Store) { w.mem = m }
 
@@ -432,7 +432,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	runProfile := shellProfileFor(w.shellProfile, runDir)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
-	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
+	// phase, Bash is hidden and execution-gated via Settlement.DisabledTools.
 	tsx.workerExecution = true
 	base := append(tsx.WorkerTools(), w.extraTools...)
 	// Worker 需要本地读写与 Bash，但不会派后台任务；Sleep 只为后台任务轮询服务，
@@ -440,9 +440,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	base = append(base, workerLocalTools(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, AgentKey: "worker"})
 	ctx = WithTaskToolSet(ctx, tsx)
-	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools, def, cleanup, err := AugmentTools(ctx, "worker", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
+	if err != nil {
+		return harness.ReasonAbortedTools, WriteCounts{}, err
+	}
+	if err := requireRoleTools("worker", tools); err != nil {
+		return harness.ReasonAbortedTools, WriteCounts{}, err
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，

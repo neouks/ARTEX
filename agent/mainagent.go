@@ -126,9 +126,12 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultToolsWithProfile(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "mainagent", Trigger: "human_message"})
 	ctx = WithTaskToolSet(ctx, tsx)
-	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
+	tools, def, cleanup, err := AugmentTools(ctx, "mainagent", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参
 	defer cleanup()
+	if err != nil {
+		return "", err
+	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
 	runProxyAddr := TaskProxyAddr(m.proxyAddr, m.proxyCACert, taskID, guard.AssetSkipScope(ctx))

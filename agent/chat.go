@@ -127,8 +127,11 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	runProfile := shellProfileFor(c.shellProfile, sessionWorkDir)
 	base := actool.DefaultToolsWithProfile(runProfile)
 	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID, AgentKey: agentKey, TaskID: c.taskID, Trigger: "human_message"})
-	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
+	tools, def, cleanup, err := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
+	if err != nil {
+		return "", err
+	}
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
 	opts := agentcore.Options{

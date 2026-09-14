@@ -277,7 +277,9 @@ func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
 	run := func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
 		var params map[string]any
 		if len(in) > 0 {
-			_ = json.Unmarshal(in, &params)
+			if err := json.Unmarshal(in, &params); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 		}
 		if params == nil {
 			params = map[string]any{}

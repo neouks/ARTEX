@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
@@ -245,11 +246,10 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// interactive_shell is on, so Bash points at shell_open for interactive programs
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).
 	const bashInteractiveShellNote = "\n\n需要【交互输入】的程序（msfconsole / ssh 交互登录 / mysql、psql、python 等 REPL / 密码或 yes/no 提示 / nc 反弹 shell）不要用 Bash（它没有 stdin、会卡住），改用 shell_open 开交互会话（用完 shell_close）。一次性、非交互命令仍用 Bash。"
-	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
+	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, error) {
 		rows, err := pg.ListTools()
 		if err != nil {
-			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
-			return tools
+			return nil, fmt.Errorf("加载工具授权配置失败，已停止本次工具装配: %w", err)
 		}
 		byKey := make(map[string]*db.Tool, len(rows))
 		for _, t := range rows {
@@ -260,6 +260,9 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			var schema map[string]any
 			if len(row.Schema) > 0 {
 				_ = json.Unmarshal(row.Schema, &schema)
+			}
+			if row.System {
+				return meterTool(agent.ResolveBuiltinTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
 			}
 			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
 		}
@@ -329,7 +332,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				}
 			}
 		}
-		return out
+		return out, nil
 	}
 }
 

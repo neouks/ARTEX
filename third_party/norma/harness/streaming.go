@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"sync"
 
 	"github.com/Autumn-27/norma/llm"
@@ -14,10 +15,12 @@ import (
 // blocks every tool queued behind it until it finishes. Results are yielded in
 // arrival order; progress is yielded as soon as it arrives.
 type streamExec struct {
-	l      *loop
-	mu     sync.Mutex
-	tools  []*tracked
-	notify chan struct{} // pinged when a tool completes or emits progress
+	toolCtx  context.Context
+	settling bool
+	l        *loop
+	mu       sync.Mutex
+	tools    []*tracked
+	notify   chan struct{} // pinged when a tool completes or emits progress
 }
 
 type toolStatus int
@@ -39,7 +42,9 @@ type tracked struct {
 }
 
 func newStreamExec(l *loop) *streamExec {
-	return &streamExec{l: l, notify: make(chan struct{}, 1)}
+	// A timed-out round must retain its cancelled context even after the loop
+	// switches to settlement; late goroutines must not inherit the new budget.
+	return &streamExec{l: l, toolCtx: l.toolCtx, settling: l.settling, notify: make(chan struct{}, 1)}
 }
 
 func (e *streamExec) ping() {
@@ -54,11 +59,22 @@ func (e *streamExec) add(block llm.ContentBlock) {
 	e.mu.Lock()
 	safe := false
 	if t, ok := e.l.in.Tools.Get(block.Name); ok {
-		safe = t.IsConcurrencySafe(block.Input)
+		safe = concurrencySafe(t, block.Input)
 	}
 	e.tools = append(e.tools, &tracked{block: block, safe: safe})
 	e.mu.Unlock()
 	e.processQueue()
+}
+
+// A broken metadata callback must not panic while the scheduler holds its lock.
+// Unknown safety is exclusive execution; execOne isolates execution failures.
+func concurrencySafe(t tool.CoreTool, input []byte) (safe bool) {
+	defer func() {
+		if recover() != nil {
+			safe = false
+		}
+	}()
+	return t.IsConcurrencySafe(input)
 }
 
 // canStartLocked reports whether a tool with the given safety may start now.
@@ -96,7 +112,7 @@ func (e *streamExec) processQueue() {
 func (e *streamExec) run(t *tracked) {
 	e.l.sem <- struct{}{} // bound concurrent tool execution
 	defer func() { <-e.l.sem }()
-	res, extra := e.l.execOne(t.block, func(p tool.ProgressInfo) {
+	res, extra := e.l.execOne(e.toolCtx, e.settling, t.block, func(p tool.ProgressInfo) {
 		e.mu.Lock()
 		t.prog = append(t.prog, p.Message)
 		e.mu.Unlock()

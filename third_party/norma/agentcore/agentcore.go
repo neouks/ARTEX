@@ -468,6 +468,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		SystemReminder:     buildSystemReminder(reminderExtra),
 		Tools:              s.registry,
 		DeferredTools:      s.opts.DeferredTools,
+		UnlockSet:          s.unlock,
 		MaxTokens:          s.opts.MaxTokens,
 		Temperature:        s.opts.Temperature,
 		MaxTurns:           s.opts.MaxTurns,

@@ -150,7 +150,9 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	var head struct {
 		TaskID string `json:"task_id"`
 	}
-	_ = json.Unmarshal(in, &head)
+	if err := json.Unmarshal(in, &head); err != nil {
+		return actool.Errorf("参数格式错误: " + err.Error()), nil
+	}
 	if strings.TrimSpace(head.TaskID) == "" {
 		return actool.Errorf("task_id 为必填"), nil
 	}
@@ -159,7 +161,9 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 		return actool.Errorf("task 不存在: " + head.TaskID), nil
 	}
 	var m map[string]json.RawMessage
-	_ = json.Unmarshal(in, &m)
+	if err := json.Unmarshal(in, &m); err != nil {
+		return actool.Errorf("参数格式错误: " + err.Error()), nil
+	}
 	delete(m, "task_id")
 	inner, _ := json.Marshal(m)
 	tsx := agent.NewToolSet(t.Store, "orchestrator")
@@ -267,7 +271,9 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 				PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
 				SeedFirstIntent      bool            `json:"seed_first_intent"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			if strings.TrimSpace(a.Description) == "" {
 				a.Description = "未命名任务"
 			}
@@ -340,7 +346,9 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 			var a struct {
 				TaskID string `json:"task_id"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			t, ok := s.m.Task(a.TaskID)
 			if !ok {
 				return actool.Errorf("task 不存在: " + a.TaskID), nil
@@ -352,76 +360,54 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 		})
 }
 
+// Cross-task wrappers must expose the same parameters and paging contract as
+// their task-local implementation, with task_id as the only added parameter.
+func (s *Server) taskDelegatedTool(name string, pick func(*agent.ToolSet) actool.CoreTool, writes bool) actool.CoreTool {
+	base := pick(agent.NewToolSet(nil, "orchestrator"))
+	raw, _ := json.Marshal(base.InputSchema())
+	var schema map[string]any
+	_ = json.Unmarshal(raw, &schema)
+	props := schema["properties"].(map[string]any)
+	props["task_id"] = strParam("任务 id（字符串）")
+	required, _ := schema["required"].([]any)
+	schema["required"] = append(required, "task_id")
+	replacer := strings.NewReplacer("graph_overview", "get_task_graph", "list_findings", "list_task_findings", "get_worker_trace", "get_task_worker_trace", "list_worker_traces", "list_task_worker_traces", "search_all_worker_traces", "search_task_worker_traces", "node_detail", "get_task_node_detail", "add_hint", "add_task_hint")
+	desc := "指定 task_id 查询/操作该任务。" + replacer.Replace(base.Description())
+	run := func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+		return s.delegateToTask(ctx, in, pick)
+	}
+	if writes {
+		return wrTool(name, desc, schema, run)
+	}
+	return roTool(name, desc, schema, run)
+}
+
 func (s *Server) toolGetTaskGraph() actool.CoreTool {
-	return roTool("get_task_graph", "读指定任务的探索图总览(同 graph_overview：资产计数/frontier/发现/覆盖等)，用 task_id 指定任务。",
-		objSchema(map[string]any{"task_id": strParam("任务 id")}, "task_id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).GraphOverviewTool)
-		})
+	return s.taskDelegatedTool("get_task_graph", (*agent.ToolSet).GraphOverviewTool, false)
 }
 
 func (s *Server) toolListTaskFindings() actool.CoreTool {
-	return roTool("list_task_findings", "分页读取指定任务授权可见的漏洞摘要；详情用 get_task_node_detail。q 仅搜索摘要；has_more=true 时未命中不能断言不存在，保留筛选并用 next_before 续页。",
-		objSchema(map[string]any{"task_id": strParam("任务 id"), "limit": map[string]any{"type": "integer", "description": "默认20，最大100"}, "before": map[string]any{"type": "integer", "description": "上一页 next_before"}, "q": strParam("摘要关键词"), "severity": strParam("严重等级"), "asset_id": map[string]any{"type": "integer"}}, "task_id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).ListFindingsTool)
-		})
+	return s.taskDelegatedTool("list_task_findings", (*agent.ToolSet).ListFindingsTool, false)
 }
 
 func (s *Server) toolAddHint() actool.CoreTool {
-	return wrTool("add_task_hint", "给指定任务注入战略提示(该任务的 planner 下轮生成意图时会读到)。\n"+
-		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
-		objSchema(map[string]any{
-			"task_id":      strParam("任务 id"),
-			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
-			"text":         strParam("[单条] 提示内容"),
-			"traffic_refs": agent.HintTrafficSchema(),
-			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
-		}, "task_id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
-		})
+	return s.taskDelegatedTool("add_task_hint", (*agent.ToolSet).AddHintTool, true)
 }
 
 func (s *Server) toolGetWorkerTrace() actool.CoreTool {
-	return roTool("get_task_worker_trace",
-		"看指定任务里某个 work(意图)的执行过程：get_task_worker_trace(task_id, intent_id) 看步骤摘要；再带 step_ids=[...] 取那几步完整内容(一次最多 5 个,多传只返回前 5 个)。",
-		objSchema(map[string]any{
-			"task_id":   strParam("任务 id"),
-			"intent_id": map[string]any{"type": "integer", "description": "意图 id(该任务里的 work)"},
-			"step_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "可选：要取完整内容的步骤 id(一次最多 5 个,多传只返回前 5 个,其余在 omitted_step_ids 里列出)"},
-		}, "task_id", "intent_id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).GetWorkerTraceTool)
-		})
+	return s.taskDelegatedTool("get_task_worker_trace", (*agent.ToolSet).GetWorkerTraceTool, false)
 }
 
 func (s *Server) toolListWorkerTraces() actool.CoreTool {
-	return roTool("list_task_worker_traces", "列出指定任务里跑过哪些 work(意图) + 各自步数，用于发现哪些 work 值得翻看(再用 get_task_worker_trace)。",
-		objSchema(map[string]any{"task_id": strParam("任务 id")}, "task_id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).ListWorkerTracesTool)
-		})
+	return s.taskDelegatedTool("list_task_worker_traces", (*agent.ToolSet).ListWorkerTracesTool, false)
 }
 
 func (s *Server) toolSearchWorkerTraces() actool.CoreTool {
-	return roTool("search_task_worker_traces", "在指定任务里按关键字搜索所有 work 的执行过程(返回命中步骤摘要 + intent_id)。",
-		objSchema(map[string]any{"task_id": strParam("任务 id"), "q": strParam("搜索关键字")}, "task_id", "q"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).SearchWorkerTracesTool)
-		})
+	return s.taskDelegatedTool("search_task_worker_traces", (*agent.ToolSet).SearchWorkerTracesTool, false)
 }
 
 func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
-	return roTool("get_task_node_detail",
-		"读指定任务里某个探索图节点的完整内容(发现/事实/意图/目标：摘要 + 详情/证据/PoC)。id 为探索节点 id(如 report_finding 返回、或 list_task_findings 里的 id)。写漏洞报告前用它取该漏洞的完整证据。",
-		objSchema(map[string]any{
-			"task_id": strParam("任务 id"),
-			"id":      map[string]any{"type": "integer", "description": "探索图节点 id(非资产 id)"},
-		}, "task_id", "id"),
-		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			return s.delegateToTask(ctx, in, (*agent.ToolSet).NodeDetailTool)
-		})
+	return s.taskDelegatedTool("get_task_node_detail", (*agent.ToolSet).NodeDetailTool, false)
 }
 
 // toolUpdateFindingReport writes/overwrites a finding's detailed Markdown report.
@@ -442,7 +428,9 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 				FindingID       json.RawMessage `json:"finding_id"`
 				Report          string          `json:"report"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数格式错误: " + err.Error()), nil
+			}
 			nodeID := parseProfileID(a.FindingID) // 复用「数字或数字字符串」解析
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil

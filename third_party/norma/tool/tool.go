@@ -20,6 +20,9 @@ type ProgressInfo struct {
 
 // ToolContext carries per-call execution state into a tool.
 type ToolContext struct {
+	// ExecuteTool routes nested calls through the host's full execution policy.
+	// Tools must never fall back to calling a registry entry directly when absent.
+	ExecuteTool    func(context.Context, string, json.RawMessage) (Result, error)
 	WorkingDir     string
 	AgentID        string
 	MaxOutputChars int

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { sseUrl } from "@/lib/api";
-import { isBtwCommand, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
+import { isBtwCommand, parseSideExchange, type SideExchange, type SideHistory, sideAPI } from "@/lib/side-questions";
 
 // crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
 function newSideRequestID(): string {
@@ -132,7 +132,7 @@ export function useSideQuestions(parent: string | null) {
     stream.addEventListener("snapshot", (event) => {
       if (version !== epoch.current) return;
       try {
-        const item = JSON.parse((event as MessageEvent).data) as SideExchange;
+        const item = parseSideExchange(JSON.parse((event as MessageEvent).data));
         if (item.id !== runningID) return;
         setItems((old) => merge(old, [item]));
         restoreFailedDraft([item]);

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -104,7 +105,7 @@ func BuiltinToolSeeds() []ToolSeed {
 // and wraps the rest so the model sees the DB-overridden description/schema and
 // 缺省入参 get injected. Tools with no matching DB row (MCP/skill/host tools like
 // traffic) pass through untouched. nil = tools unchanged. Wired in server/assembly.go.
-var ToolResolve func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool
+var ToolResolve func(ctx context.Context, agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, error)
 
 // DecorateTool wraps t so Description()/InputSchema() report the DB overrides and
 // Call() injects scalar parameter defaults (from schema's "default" props) whenever
@@ -116,6 +117,11 @@ func DecorateTool(t actool.CoreTool, desc string, schema map[string]any) actool.
 	}
 	if len(schema) == 0 {
 		schema = t.InputSchema()
+	}
+	// Naming and batching are handler contracts, not editable prose. Retain the
+	// rule when an existing database description overrides the built-in text.
+	if t.Name() == "record_fact" && !strings.Contains(desc, factWriteContract) {
+		desc = factWriteContract + "\n" + desc
 	}
 	return &overriddenTool{CoreTool: t, desc: desc, schema: schema}
 }
@@ -133,69 +139,13 @@ func (o *overriddenTool) Description() string         { return o.desc }
 func (o *overriddenTool) InputSchema() map[string]any { return o.schema }
 
 func (o *overriddenTool) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
-	return o.CoreTool.Call(ctx, injectDefaults(in, o.schema), tc)
+	resolved := injectDefaults(in, o.schema)
+	if err := actool.ValidateInput(o.schema, resolved); err != nil {
+		return actool.Errorf("参数错误: " + err.Error()), nil
+	}
+	return o.CoreTool.Call(ctx, resolved, tc)
 }
 
-// injectDefaults fills scalar parameter defaults declared in the (possibly edited)
-// schema into the input JSON whenever the model omitted the field or left it empty/
-// null. Structure (names/types/required) is untouched — only缺省值 are merged in.
 func injectDefaults(in json.RawMessage, schema map[string]any) json.RawMessage {
-	defs := scalarDefaults(schema)
-	if len(defs) == 0 {
-		return in
-	}
-	m := map[string]json.RawMessage{}
-	if len(in) > 0 {
-		if err := json.Unmarshal(in, &m); err != nil {
-			return in // non-object input: don't touch it
-		}
-	}
-	changed := false
-	for k, dv := range defs {
-		if cur, ok := m[k]; !ok || isEmptyJSON(cur) {
-			m[k] = dv
-			changed = true
-		}
-	}
-	if !changed {
-		return in
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return in
-	}
-	return b
-}
-
-// scalarDefaults extracts properties[k]["default"] for scalar params (string/
-// integer/number/boolean). Array/object defaults are skipped: merging them is
-// ambiguous and not worth the surprise.
-func scalarDefaults(schema map[string]any) map[string]json.RawMessage {
-	props, _ := schema["properties"].(map[string]any)
-	if len(props) == 0 {
-		return nil
-	}
-	out := map[string]json.RawMessage{}
-	for name, raw := range props {
-		p, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		dv, ok := p["default"]
-		if !ok || dv == nil {
-			continue
-		}
-		switch p["type"] {
-		case "string", "integer", "number", "boolean":
-			if b, err := json.Marshal(dv); err == nil {
-				out[name] = b
-			}
-		}
-	}
-	return out
-}
-
-func isEmptyJSON(raw json.RawMessage) bool {
-	s := string(raw)
-	return s == "null" || s == `""`
+	return actool.ApplyInputDefaults(in, schema)
 }
