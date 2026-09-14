@@ -17,7 +17,8 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// mcpClient is the shared surface of a connected MCP server (stdio or remote http),
+// mcpClient is the shared surface of a connected MCP server (stdio, Streamable HTTP,
+// or legacy SSE),
 // so tools/list and cleanup are handled uniformly regardless of transport.
 type mcpClient interface {
 	Tools(context.Context) ([]actool.CoreTool, error)
@@ -117,13 +118,13 @@ func normalizeMCPServer(m *db.MCPServer) error {
 			return fmt.Errorf("stdio 传输缺少命令")
 		}
 		m.URL = ""
-	case "http":
+	case "http", "sse":
 		if m.URL == "" {
-			return fmt.Errorf("http 传输缺少 URL")
+			return fmt.Errorf("%s 传输缺少 URL", m.Transport)
 		}
 		u, err := url.ParseRequestURI(m.URL)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("http 传输 URL 必须是有效的 http 或 https 地址")
+			return fmt.Errorf("%s 传输 URL 必须是有效的 http 或 https 地址", m.Transport)
 		}
 		m.Command = ""
 		args = []string{}
@@ -146,6 +147,8 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 	case "http":
 		// env map doubles as HTTP headers (e.g. Authorization).
 		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+	case "sse":
+		return mcphttp.NewSSE(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
 	}
 	return nil, fmt.Errorf("未知传输方式 %q", m.Transport)
 }

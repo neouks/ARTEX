@@ -37,7 +37,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { Agent, MCPCall, MCPServer, MCPTestResult, MCPTool, MCPUsageStat } from "@/lib/types";
 
-type Transport = "stdio" | "http";
+type Transport = "stdio" | "http" | "sse";
 type FormState = {
   name: string;
   transport: Transport;
@@ -184,7 +184,10 @@ export default function MCPPage() {
       const trimmed = line.trim();
       if (!trimmed) continue;
       const idx = trimmed.indexOf("=");
-      if (idx > 0) out[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
+      if (idx > 0) {
+        const key = trimmed.slice(0, idx).trim();
+        if (key) out[key] = trimmed.slice(idx + 1).trim();
+      }
     }
     return out;
   }
@@ -194,7 +197,7 @@ export default function MCPPage() {
       .join("\n");
   }
   function formPayload(): Partial<MCPServer> {
-    return form.transport === "http"
+    return form.transport !== "stdio"
       ? {
           name: form.name.trim(),
           transport: "http",
@@ -219,7 +222,7 @@ export default function MCPPage() {
   function validateForm() {
     if (!form.name.trim()) return "请填写名称";
     if (form.transport === "stdio" && !form.command.trim()) return "请填写命令";
-    if (form.transport === "http" && !form.url.trim()) return "请填写远程 URL";
+    if (form.transport !== "stdio" && !form.url.trim()) return "请填写远程 URL";
     return "";
   }
   function openAdd() {
@@ -394,10 +397,17 @@ export default function MCPPage() {
             </Button>
             <Button
               type="button"
-              variant={form.transport === "http" ? "default" : "outline"}
+              variant={form.transport !== "stdio" ? "default" : "outline"}
               onClick={() => setF({ transport: "http" })}
             >
               http（远程）
+            </Button>
+            <Button
+              type="button"
+              variant={form.transport === "sse" ? "default" : "outline"}
+              onClick={() => setF({ transport: "sse" })}
+            >
+              sse（旧版）
             </Button>
           </div>
         </Field>
@@ -458,12 +468,12 @@ export default function MCPPage() {
         )}
         <Field>
           <FieldLabel htmlFor="m-env">
-            {form.transport === "http" ? "请求头（每行 KEY=VALUE）" : "环境变量（每行 KEY=VALUE）"}
+            {form.transport !== "stdio" ? "请求头（每行 KEY=VALUE）" : "环境变量（每行 KEY=VALUE）"}
           </FieldLabel>
           <Textarea
             id="m-env"
             className="font-mono"
-            placeholder={form.transport === "http" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"}
+            placeholder={form.transport !== "stdio" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"}
             value={form.env}
             onChange={(e) => setF({ env: e.target.value })}
           />
