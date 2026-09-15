@@ -8,8 +8,8 @@ import (
 )
 
 func (t *ToolSet) registerDescriptionAsset() actool.CoreTool {
-	return writeTool("register_user_target", "登记用户明确提供的测试资产。仅目标分解阶段可用；evidence 必须逐字引用描述或目标中的授权语句，不得把禁止项、参考地址或变量作为目标。域名精确登记，通配域名须保留 *. 前缀。",
-		obj(map[string]any{"kind": str("host 或 cidr"), "value": str("原文明示的主机/IP/CIDR/通配域名；URL取完整主机名"), "evidence": str("逐字引用包含目标的完整授权语句")}, "kind", "value", "evidence"),
+	return writeTool("register_user_target", "登记用户明确提供的测试资产。仅目标分解阶段可用；evidence 必须引用描述或目标中的原文授权语句（允许同地址 URL 的 Markdown 链接格式差异；不要添加原文没有的前缀），不得把禁止项、参考地址或变量作为目标。域名精确登记，通配域名须保留 *. 前缀。",
+		obj(map[string]any{"kind": str("host 或 cidr"), "value": str("原文明示的主机/IP/CIDR/通配域名；URL取完整主机名"), "evidence": str("引用包含目标的完整原文授权语句，不添加“目标：”等原文没有的内容；裸 URL 与同地址 Markdown 链接可等价")}, "kind", "value", "evidence"),
 		func(_ context.Context, raw json.RawMessage) (actool.Result, error) {
 			var in struct{ Kind, Value, Evidence string }
 			if err := json.Unmarshal(raw, &in); err != nil {

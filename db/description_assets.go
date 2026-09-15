@@ -18,26 +18,12 @@ func (s *AssetStore) RegisterDescriptionAsset(taskID int64, kind, value, evidenc
 	if err := s.db.QueryRow(`SELECT description,goal FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&description, &goal); err != nil {
 		return 0, err
 	}
-	evidence = strings.TrimSpace(evidence)
+	var err error
+	evidence, err = validateDescriptionEvidence(description, goal, evidence)
+	if err != nil {
+		return 0, err
+	}
 	value = strings.TrimSpace(value)
-	if evidence == "" || (!strings.Contains(description, evidence) && !strings.Contains(goal, evidence)) {
-		return 0, fmt.Errorf("依据必须逐字引用当前任务描述或目标")
-	}
-	// Inspect the containing source sentence too: quoting just the host from
-	// "禁止测试 host" must not strip the user's denial from the evidence.
-	contextText := evidence
-	for _, original := range []string{description, goal} {
-		for _, sentence := range strings.FieldsFunc(original, func(r rune) bool { return strings.ContainsRune("。；;\n", r) }) {
-			if strings.Contains(sentence, evidence) {
-				contextText += "\n" + sentence
-			}
-		}
-	}
-	for _, deny := range []string{"禁止", "不测试", "不测", "不碰", "排除", "例如", "举例", "参考", "do not ", "don't ", "for example", "example:", "example：", "exclude "} {
-		if strings.Contains(strings.ToLower(contextText), deny) {
-			return 0, fmt.Errorf("依据包含排除或参考语句，不能登记为用户授权")
-		}
-	}
 	// Compare whole literals, not substring matches such as evil-example.com.
 	grantKind := "host"
 	target := DomainKey(value)
@@ -124,4 +110,45 @@ func (s *AssetStore) RegisterDescriptionAsset(taskID int64, kind, value, evidenc
 		}
 		return id, reconcileAssetTemplate(scoped.tx, taskID)
 	})
+}
+
+// Only collapse links whose visible URL and destination are identical. Arbitrary
+// link labels may carry restrictions and must never disappear during validation.
+var descriptionLiteralLink = regexp.MustCompile(`\[(https?://[^\s\[\]()<>]+)\]\((https?://[^\s\[\]()<>]+)\)`)
+var descriptionAutolink = regexp.MustCompile(`<((?i:https?)://[^\s<>]+)>`)
+
+func normalizeDescriptionEvidence(text string) string {
+	text = descriptionLiteralLink.ReplaceAllStringFunc(text, func(link string) string {
+		parts := descriptionLiteralLink.FindStringSubmatch(link)
+		if parts[1] == parts[2] {
+			return parts[1]
+		}
+		return link
+	})
+	return descriptionAutolink.ReplaceAllString(text, "$1")
+}
+
+func validateDescriptionEvidence(description, goal, evidence string) (string, error) {
+	evidence = normalizeDescriptionEvidence(strings.TrimSpace(evidence))
+	description = normalizeDescriptionEvidence(description)
+	goal = normalizeDescriptionEvidence(goal)
+	if evidence == "" || (!strings.Contains(description, evidence) && !strings.Contains(goal, evidence)) {
+		return "", fmt.Errorf("依据必须引用当前任务描述或目标中的原文（允许同地址 Markdown 链接格式差异）；请保留原文措辞，不要添加“目标：”等前缀")
+	}
+	// Inspect the containing source sentence too: quoting just the host from
+	// "禁止测试 host" must not strip the user's denial from the evidence.
+	contextText := evidence
+	for _, original := range []string{description, goal} {
+		for _, sentence := range strings.FieldsFunc(original, func(r rune) bool { return strings.ContainsRune("。；;\n", r) }) {
+			if strings.Contains(sentence, evidence) {
+				contextText += "\n" + sentence
+			}
+		}
+	}
+	for _, deny := range []string{"禁止", "不测试", "不测", "不碰", "排除", "例如", "举例", "参考", "do not ", "don't ", "for example", "example:", "example：", "exclude "} {
+		if strings.Contains(strings.ToLower(contextText), deny) {
+			return "", fmt.Errorf("依据包含排除或参考语句，不能登记为用户授权")
+		}
+	}
+	return evidence, nil
 }
