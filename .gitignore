@@ -25,7 +25,7 @@ web/next-env.d.ts
 *.swo
 
 # docs
-/docs/
+/docs/*
 
 # os
 .DS_Store
@@ -58,3 +58,5 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+# Worker queue API documentation
+!docs/worker-queue.md

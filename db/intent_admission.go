@@ -7,7 +7,7 @@ import "fmt"
 // be claimed between this check and deletion. Edges and anchors cascade with the
 // node; activity is deleted explicitly because its node FK otherwise becomes NULL.
 func (s *ExplorationStore) DiscardOpenIntent(id int64) error {
-	tx, err := s.db.Begin()
+	tx, err := s.beginQueue()
 	if err != nil {
 		return err
 	}

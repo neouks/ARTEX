@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 
 import { FindingWorkspaceDetail } from "@/components/finding-detail-content";
+import { FindingLayoutToggle, FindingPresentation, useFindingPresentation } from "@/components/finding-presentation";
 import { FindingSelector } from "@/components/finding-selector";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
@@ -211,6 +212,7 @@ export default function FindingsPage() {
   }, []);
 
   // 勾选导出:按 finding_id(独立表 id)记选中项,跨页保留。
+  const presentation = useFindingPresentation("artex_global_findings_layout");
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(() => new Set());
   // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
   const [exportOpen, setExportOpen] = React.useState(false);
@@ -686,11 +688,15 @@ export default function FindingsPage() {
     [refreshAfterMutation],
   );
   const selectorProps = {
+    flat: presentation.layout === "flat",
     selectedIds,
     onToggleSelected: toggleSelected,
     onToggleSelectedPage: toggleSelectedPage,
     selectedKey: currentFinding ? findingRowKey(currentFinding) : null,
-    onSelect: (finding: Finding) => setExpanded(findingRowKey(finding)),
+    onSelect: (finding: Finding) => {
+      setExpanded(findingRowKey(finding));
+      presentation.setDetailOpen(true);
+    },
   };
 
   // 平铺视图与资产视图右侧是同一张表 + 同一份分页,只是筛选条件不同。
@@ -856,6 +862,7 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
+          <FindingLayoutToggle value={presentation.layout} onChange={presentation.changeLayout} />
           <div className="ml-auto flex items-center gap-3">
             {selectedIds.size > 0 && (
               <span className="text-muted-foreground text-xs tabular-nums">已选 {selectedIds.size} 条</span>
@@ -866,7 +873,25 @@ export default function FindingsPage() {
           </div>
         </div>
 
-        <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(20rem,0.9fr)_minmax(0,2fr)]">
+        <FindingPresentation
+          {...presentation}
+          onOpenChange={presentation.setDetailOpen}
+          detail={
+            <>
+              {" "}
+              {currentFinding ? (
+                <FindingWorkspaceDetail
+                  finding={currentFinding}
+                  onChanged={onDetailChanged}
+                  onDelete={deleteFinding}
+                  onDeepen={openDeepen}
+                />
+              ) : (
+                <p className="py-12 text-center text-muted-foreground">请选择漏洞查看详情、流量证据与复测记录。</p>
+              )}{" "}
+            </>
+          }
+        >
           <div className="flex min-w-0 flex-col gap-3">
             {view === "flat" && flatListCard}
 
@@ -1067,19 +1092,7 @@ export default function FindingsPage() {
               </div>
             )}
           </div>
-          <div className="min-w-0">
-            {currentFinding ? (
-              <FindingWorkspaceDetail
-                finding={currentFinding}
-                onChanged={onDetailChanged}
-                onDelete={deleteFinding}
-                onDeepen={openDeepen}
-              />
-            ) : (
-              <p className="py-12 text-center text-muted-foreground">请选择漏洞查看详情、流量证据与复测记录。</p>
-            )}
-          </div>
-        </div>
+        </FindingPresentation>
       </div>
 
       <Dialog

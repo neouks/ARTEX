@@ -44,7 +44,7 @@ import type { InterceptApprovalRow, LLMProfile, Stats, Task } from "@/lib/types"
 
 import { SessionsTab } from "./_tabs/sessions-tab";
 
-// Secondary tabs (graphs, tables and report renderers) are not on the session
+// Secondary tabs (graphs and tables) are not on the session
 // startup path. Load their code only when the corresponding tab mounts.
 const AssetApprovalsTab = dynamic(() => import("./_tabs/asset-approvals-tab").then((m) => m.AssetApprovalsTab));
 const AssetsTab = dynamic(() => import("./_tabs/assets-tab").then((m) => m.AssetsTab));
@@ -53,7 +53,6 @@ const FindingsTab = dynamic(() => import("./_tabs/findings-tab").then((m) => m.F
 const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTab));
 const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
 const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
-const ReportTab = dynamic(() => import("./_tabs/report-tab").then((m) => m.ReportTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
@@ -64,7 +63,6 @@ const TABS = [
   { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
-  { value: "report", label: "报告" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -518,9 +516,7 @@ function TaskDetailInner() {
           <TabsContent value="intercept" className="mt-0">
             <InterceptTab taskId={id} />
           </TabsContent>
-          <TabsContent value="report" className="mt-0">
-            <ReportTab taskId={id} />
-          </TabsContent>
+
         </div>
       </NotificationReadContext.Provider>
     </Tabs>

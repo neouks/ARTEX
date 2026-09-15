@@ -262,7 +262,7 @@ func (s *Server) sideParent(w http.ResponseWriter, r *http.Request, kind string)
 			return p, false
 		}
 		if n.State == "stopped" {
-			writeErr(w, 409, "Worker 已删除")
+			writeErr(w, 409, "Worker 已取消执行")
 			return p, false
 		}
 		p.IntentID = iid
@@ -354,6 +354,13 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 	}
 	s.side.commands.Lock()
 	defer s.side.commands.Unlock()
+	if p.IntentID > 0 {
+		node, err := s.m.pg.Exploration(p.ExplorationID).GetNode(p.IntentID)
+		if err != nil || node == nil || node.State == "stopped" {
+			writeErr(w, 409, "Worker 已取消或删除")
+			return
+		}
+	}
 	if p.TaskID > 0 && s.engine.IsDeleting(strconv.FormatInt(p.TaskID, 10)) {
 		writeErr(w, 409, "任务正在归档或删除")
 		return

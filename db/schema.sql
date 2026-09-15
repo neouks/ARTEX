@@ -1526,3 +1526,52 @@ ALTER TABLE task_asset_links ALTER COLUMN notification_xid SET DEFAULT pg_curren
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS notification_xid xid8;
 ALTER TABLE intercept_pending ALTER COLUMN notification_xid SET DEFAULT pg_current_xact_id();
 CREATE INDEX IF NOT EXISTS idx_intercept_notification_pending ON intercept_pending(task_id) WHERE status='pending';
+
+-- User-managed worker queue and deletion receipts belong to the task exploration.
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS worker_queue_manual BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS worker_queue_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS queue_position BIGINT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS deleted_workers (
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    intent_id BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    deleted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (exploration_id, intent_id)
+);
+CREATE OR REPLACE FUNCTION assign_worker_queue_position() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.kind='intent' AND NEW.state='open' AND NEW.payload->>'cancelled_by_user' IS DISTINCT FROM 'true' THEN
+        IF TG_OP='INSERT' OR OLD.state IS DISTINCT FROM 'open' OR OLD.payload->>'cancelled_by_user'='true' THEN
+            IF (SELECT worker_queue_manual FROM explorations WHERE id=NEW.exploration_id) AND NOT (TG_OP='INSERT' AND NEW.queue_position>0) THEN
+                SELECT COALESCE(MAX(queue_position),0)+1 INTO NEW.queue_position
+                  FROM exploration_nodes WHERE exploration_id=NEW.exploration_id AND kind='intent';
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_worker_queue_position ON exploration_nodes;
+CREATE TRIGGER trg_worker_queue_position BEFORE INSERT OR UPDATE ON exploration_nodes
+FOR EACH ROW EXECUTE FUNCTION assign_worker_queue_position();
+CREATE OR REPLACE FUNCTION bump_worker_queue_version() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.kind='intent' THEN
+            UPDATE explorations SET worker_queue_version=worker_queue_version+1 WHERE id=OLD.exploration_id;
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF NEW.kind='intent' THEN
+        IF TG_OP='INSERT' OR NEW.state IS DISTINCT FROM OLD.state OR NEW.priority IS DISTINCT FROM OLD.priority
+           OR NEW.queue_position IS DISTINCT FROM OLD.queue_position
+           OR (NEW.payload->>'cancelled_by_user') IS DISTINCT FROM (OLD.payload->>'cancelled_by_user') THEN
+            UPDATE explorations SET worker_queue_version=worker_queue_version+1 WHERE id=NEW.exploration_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_worker_queue_version ON exploration_nodes;
+CREATE TRIGGER trg_worker_queue_version AFTER INSERT OR UPDATE OR DELETE ON exploration_nodes
+FOR EACH ROW EXECUTE FUNCTION bump_worker_queue_version();
+CREATE INDEX IF NOT EXISTS idx_worker_queue_position ON exploration_nodes(exploration_id,queue_position,id)
+WHERE kind='intent' AND state='open';

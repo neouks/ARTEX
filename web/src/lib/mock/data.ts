@@ -1008,6 +1008,24 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
       origin: "planner",
       ts: T("2026-07-26T00:10:00Z"),
     },
+    {
+      id: "i15",
+      type: "intent",
+      payload: P({ summary: "核对用户资料接口授权（等待运行）" }),
+      priority: 5,
+      state: "open",
+      origin: "planner",
+      ts: T("2026-07-26T00:10:00Z"),
+    },
+    {
+      id: "i16",
+      type: "intent",
+      payload: P({ summary: "检查订单导出权限（等待运行）" }),
+      priority: 5,
+      state: "open",
+      origin: "planner",
+      ts: T("2026-07-26T00:10:00Z"),
+    },
 
     // ── 事实 ──
     {

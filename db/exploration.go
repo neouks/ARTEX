@@ -203,7 +203,7 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
 	raw, _ := json.Marshal(payload)
-	tx, err := s.db.Begin()
+	tx, err := s.beginQueue()
 	if err != nil {
 		return 0, err
 	}
@@ -267,16 +267,12 @@ func (s *ExplorationStore) AddIntentDeduplicated(payload map[string]any, priorit
 		return id, err == nil, err
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.beginQueue()
 	if err != nil {
 		return 0, false, err
 	}
 	defer tx.Rollback()
-	// Negative keys reserve a separate namespace from the positive schema,
-	// company-scope, and test-suite advisory locks used elsewhere in this DB.
-	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, -s.expID); err != nil {
-		return 0, false, err
-	}
+	// beginQueue also serializes deduplication against queue changes.
 	rows, err := tx.Query(`
 SELECT n.id, n.payload,
        COALESCE((SELECT json_agg(a.asset_id ORDER BY a.asset_id) FROM exploration_anchors a WHERE a.node_id=n.id), '[]'::json)::text
@@ -383,7 +379,7 @@ func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 	if nodeID <= 0 || assetID <= 0 {
 		return nil
 	}
-	_, err := s.db.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, assetID)
+	_, err := s.queueExec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, assetID)
 	return err
 }
 
@@ -463,7 +459,7 @@ ORDER BY lineage.root_id,anchor.asset_id`, nodeIDs, s.expID)
 
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
-	_, err := s.db.Exec(`
+	_, err := s.queueExec(`
 INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
 ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, rel, to)
 	return err
@@ -472,7 +468,7 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 // SetNodeState updates any node's state (never deletes). content_version bumps
 // so a folded member's state flip invalidates its digest's cached body (§5.3).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND (kind<>'intent' OR payload->>'cancelled_by_user' IS DISTINCT FROM 'true')`, state, id, s.expID)
+	_, err := s.queueExec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND (kind<>'intent' OR payload->>'cancelled_by_user' IS DISTINCT FROM 'true')`, state, id, s.expID)
 	return err
 }
 
@@ -485,7 +481,7 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 		payload["vulnclass"] = vulnclass
 	}
 	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	res, err := s.queueExec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
 	if err != nil {
 		return err
 	}
@@ -500,7 +496,7 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 // CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
 // error if no such goal exists in this exploration.
 func (s *ExplorationStore) DeleteGoal(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
+	res, err := s.queueExec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
 	if err != nil {
 		return err
 	}
@@ -516,7 +512,7 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 // backend restart or crashed worker goroutine left it stuck) would otherwise spin
 // forever in the UI. Workers resume from their transcript, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='running' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -530,7 +526,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='running' AND payload->>'can
 // The worker resumes from its prior LLM transcript instead of restarting from scratch.
 // done/open/running are left untouched. Returns whether a row changed. Used by "重跑".
 func (s *ExplorationStore) ReopenIntent(id int64) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes
+	res, err := s.queueExec(`UPDATE exploration_nodes
 SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE id=$1 AND exploration_id=$2 AND kind='intent'
   AND state IN ('blocked','exhausted','stopped') AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, id, s.expID)
@@ -545,7 +541,7 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // (batch rerun after e.g. an LLM/network outage that blocked many at once). Returns the
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -557,7 +553,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND payload->>'can
 func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	// terminal states stamp completed_at; reopening (back to open/running) clears it.
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
-	_, err := s.db.Exec(`UPDATE exploration_nodes
+	_, err := s.queueExec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, state, id, s.expID, terminal)
 	return err
@@ -568,7 +564,7 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND payload->>'cancelled_by_
 // worker settlement, so a stale API read cannot overwrite a concurrent finish.
 func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state string) (bool, error) {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
-	res, err := s.db.Exec(`UPDATE exploration_nodes
+	res, err := s.queueExec(`UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4 AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'`, state, id, s.expID, expected, terminal)
 	if err != nil {
@@ -595,7 +591,7 @@ type IntentCleanup struct {
 // Used by the "delete work" action, which no longer destroys data — it stops the
 // intent and attaches why, so the planner can account for it.
 func (s *ExplorationStore) StopIntentWithReason(id int64, reason, origin string) (int64, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.beginQueue()
 	if err != nil {
 		return 0, err
 	}
@@ -669,7 +665,7 @@ ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
 // transaction. The caller must first stop a running worker to prevent late writes.
 func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 	var out IntentCleanup
-	tx, err := s.db.Begin()
+	tx, err := s.beginQueue()
 	if err != nil {
 		return out, err
 	}
@@ -1170,7 +1166,7 @@ func (s *ExplorationStore) Frontier(limit int) ([]*Node, error) {
 	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
 WHERE exploration_id=$1 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
-ORDER BY priority DESC, id ASC LIMIT $2`, s.expID, limit)
+ORDER BY CASE WHEN (SELECT worker_queue_manual FROM explorations WHERE id=$1) THEN queue_position ELSE 0 END, CASE WHEN (SELECT worker_queue_manual FROM explorations WHERE id=$1) THEN 0 ELSE priority END DESC, id ASC LIMIT $2`, s.expID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1358,7 +1354,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state='running', owner=$1
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 	  AND NOT EXISTS (
 	    SELECT 1

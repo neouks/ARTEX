@@ -839,6 +839,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
+	mux.HandleFunc("DELETE /api/tasks/{id}/intents/{iid}", s.deleteWorker)
+	mux.HandleFunc("GET /api/tasks/{id}/worker-queue", s.workerQueue)
+	mux.HandleFunc("POST /api/tasks/{id}/worker-queue/move", s.workerQueue)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/messages", s.sendWorkerMessage)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/rerun", s.rerunIntent)    // 重跑单条 blocked/exhausted/stopped 意图
 	mux.HandleFunc("POST /api/tasks/{id}/intents/rerun-blocked", s.rerunBlocked) // 批量重跑本任务全部 blocked 意图
@@ -911,7 +914,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	mux.HandleFunc("POST /api/settings/global-proxy/test", s.testGlobalProxy)
-	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
 	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
@@ -3736,29 +3738,6 @@ func (s *Server) fallbackChat(t *Task, msg string) string {
 		fr, _ := t.Store.Frontier(1000)
 		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，确认发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", assets, len(fr), len(fnd))
 	}
-}
-
-func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
-	t := s.m.ResolveTask(r.URL.Query().Get("task"))
-	if t == nil {
-		writeErr(w, 404, "no active task")
-		return
-	}
-	findings, _ := t.Store.ListByKind(db.KindFinding, 1000) // 纯漏洞（事实是独立的 KindFact，不进报告）
-	counts := map[string]int{}
-	for _, ty := range []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"} {
-		ns, _ := s.m.Assets().QueryByType(ty, 100000, 0)
-		if len(ns) > 0 {
-			counts[ty] = len(ns)
-		}
-	}
-	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
-	})
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.WriteHeader(200)
-	_, _ = w.Write([]byte(md))
 }
 
 func (s *Server) getAudit(w http.ResponseWriter, r *http.Request) {

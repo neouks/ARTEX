@@ -32,7 +32,7 @@ func (s *ExplorationStore) UserCancelledIntents() ([]*Node, error) {
 // reopen and task recovery deliberately cannot remove the cancellation lock.
 // expected prevents an outdated user request from reopening a different state.
 func (s *ExplorationStore) ReopenIntentByUser(id int64, expected string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL,
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state='open', completed_at=NULL,
 	blocked_reason=NULL, content_version=content_version+1,
 	payload=CASE WHEN payload->>'cancelled_by_user'='true'
 	THEN payload || jsonb_build_object('cancelled_by_user',false,'reopened_by_user_at',now()) ELSE payload END
@@ -47,7 +47,7 @@ func (s *ExplorationStore) ReopenIntentByUser(id int64, expected string) (bool, 
 
 // RestoreUserReopen runs while the server's worker-admission lock is held.
 func (s *ExplorationStore) RestoreUserReopen(before *Node) error {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state=$3, payload=$4,
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state=$3, payload=$4,
 	blocked_reason=NULLIF($5,''), content_version=content_version+1,
 	completed_at=CASE WHEN $3 IN ('blocked','exhausted','stopped') THEN now() ELSE NULL END
 	WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='open'`,

@@ -1367,20 +1367,16 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	t.workerControlMu.Lock()
 	defer t.workerControlMu.Unlock()
-	fr, _ := t.Store.Frontier(20)
-	for _, in := range fr {
-		// Do not claim work whose target assets are still pending approval. This
-		// keeps the frontier idle until the approval handler wakes the task.
+	node, err := t.Store.ClaimNextWorker(name, func(in *db.Node) bool {
 		if e.m.assets != nil {
 			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			ids, err := agent.IntentAssetIDs(t.Store, in)
-			if err != nil || e.m.assets.ValidateTaskAssetsApproved(taskID, ids) != nil {
-				continue
-			}
+			return err == nil && e.m.assets.ValidateTaskAssetsApproved(taskID, ids) == nil
 		}
-		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
-			return in
-		}
+		return true
+	})
+	if err != nil {
+		log.Printf("[worker queue] task %s claim: %v", t.ID, err)
 	}
-	return nil
+	return node
 }

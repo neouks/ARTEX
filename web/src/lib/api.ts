@@ -159,29 +159,6 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
 // production reverse proxy that flushes SSE correctly).
 // Token is appended as ?token= because SSE bypasses the Next.js proxy and the
 // browser does not send cookies cross-port.
-// mockReport returns a canned Markdown report for the demo.
-function mockReport(_task?: string): string {
-  return `# ARTEX 渗透测试报告 — Acme Corp
-
-## 概览
-- 范围：acme.com（含 www / admin / api / shop / vpn 子域）
-- 已确认发现：6 项（高危 3 · 中危 3 · 低危 2）
-- 引擎模式：exploring
-
-## 关键发现
-1. **[高] 后台默认口令** admin.acme.com admin/admin123 → 可完全接管后台。
-2. **[高] SQL 注入** www.acme.com/search?q= → 可读取 acme_prod 库。
-3. **[高] IDOR** api.acme.com/v1/orders?id= → 可越权读取他人订单（含手机号/地址）。
-4. **[中] 反射型 XSS**、**暴露 .git 源码**、**登录无速率限制**。
-
-## 建议
-- 后台强制改密 + 启用 MFA、封禁默认口令。
-- search 接口参数化查询、输出编码。
-- API 增加对象级授权校验（IDOR）、更换强 JWT 密钥。
-
-> （demo）本报告由 mock 数据生成，仅用于界面演示。`;
-}
-
 export function sseUrl(path: string): string {
   const base =
     process.env.NEXT_PUBLIC_SSE_BASE ??
@@ -332,6 +309,16 @@ export const api = {
   deleteTaskArchive: (id: number) => del<TaskArchive>(`/task-archives/${id}`),
   deleteTaskArchives: (archiveIds: number[]) =>
     post<{ items: ArchiveBatchItem[] }>("/task-archives/delete/batch", { archive_ids: archiveIds }),
+  deleteWorker: (taskId: string, intentId: string) =>
+    del<{ id: string; deleted: boolean }>(`/tasks/${taskId}/intents/${intentId}`),
+  workerQueue: (taskId: string) =>
+    get<{ items: TaskNode[]; version: number; manual: boolean }>(`/tasks/${taskId}/worker-queue`),
+  moveWorker: (taskId: string, id: string, beforeId: string | null, version: number) =>
+    post<{ items: TaskNode[]; version: number; manual: boolean }>(`/tasks/${taskId}/worker-queue/move`, {
+      id,
+      before_id: beforeId,
+      version,
+    }),
   controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel", reason?: string) =>
     post<{
       id: number;
@@ -811,15 +798,6 @@ export const api = {
     tavily_search_api_key?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
   testGlobalProxy: (proxy: string) => post<GlobalProxyProbeResult>(`/settings/global-proxy/test`, { proxy }),
-  report: async (task?: string) => {
-    if (MOCK) return mockReport(task);
-    const token = getToken();
-    const r = await fetch(`/api/report${tq(task)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!r.ok) throw new Error(`report: ${r.status}`);
-    return r.text();
-  },
   chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
     post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),

@@ -1210,6 +1210,38 @@ type MockWorkerMessage = {
 const mockWorkerMessages = new Map<string, MockWorkerMessage>();
 let nextMockWorkerMessageActivitySeq = mockActivity.reduce((maximum, item) => Math.max(maximum, item.seq), 0) + 1;
 
+const mockDeletedWorkers = new Set<string>();
+const mockQueueStates = new Map<string, { version: number; manual: boolean; order: string[]; signature: string }>();
+function mockWorkerQueue(taskId: string) {
+  if (!mockTasks.some((task) => task.id === taskId)) throw new Error("任务不存在");
+  let state = mockQueueStates.get(taskId);
+  if (!state) {
+    state = { version: 0, manual: false, order: [], signature: "" };
+    mockQueueStates.set(taskId, state);
+  }
+  const pending = mockIntents.filter(
+    (item) => !item.inherited && item.state === "open" && !JSON.parse(item.payload || "{}").cancelled_by_user,
+  );
+  const signature = JSON.stringify(pending.map((item) => [item.id, item.priority]));
+  if (signature !== state.signature) {
+    state.version++;
+    state.signature = signature;
+  }
+  const ids = new Set(pending.map((item) => item.id));
+  state.order = state.order.filter((id) => ids.has(id));
+  for (const item of pending) if (!state.order.includes(item.id)) state.order.push(item.id);
+  const items = [...pending].sort((a, b) =>
+    state.manual
+      ? state.order.indexOf(a.id) - state.order.indexOf(b.id)
+      : b.priority - a.priority || Number(a.id.replace(/\D/g, "")) - Number(b.id.replace(/\D/g, "")),
+  );
+  if (!state.manual) state.order = items.map((item) => item.id);
+  return { items, manual: state.manual, version: state.version };
+}
+function syncMockQueues() {
+  for (const key of mockQueueStates.keys()) mockWorkerQueue(key);
+}
+
 function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentControlResult {
   const intent = mockIntents.find((item) => item.id === id);
   if (!intent) return { ok: false, error: "意图不存在" };
@@ -1224,6 +1256,7 @@ function controlMockIntent(id: string, action: "pause" | "resume"): MockIntentCo
   }
   intent.state = action === "pause" ? "paused" : "open";
   if (action === "resume") intent.payload = JSON.stringify({ ...payload, cancelled_by_user: false });
+  syncMockQueues();
   return { ok: true, state: intent.state };
 }
 
@@ -1922,6 +1955,50 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const action = b.action === "resume" ? "resume" : "pause";
     return { items: bodyIDs(b.task_ids).map((id) => controlMockTask(id, action)) };
   }
+  if (seg[0] === "tasks" && seg[2] === "worker-queue") {
+    const result = mockWorkerQueue(seg[1]);
+    if (m === "GET" && seg.length === 3) return result;
+    if (m === "POST" && seg[3] === "move") {
+      if (
+        b.version !== result.version ||
+        !result.items.some((item) => item.id === b.id) ||
+        (b.before_id != null && !result.items.some((item) => item.id === b.before_id)) ||
+        b.id === b.before_id
+      )
+        throw new Error("Worker 队列已变化，请刷新后重试");
+      const state = mockQueueStates.get(seg[1])!;
+      const remaining = result.items.map((item) => item.id).filter((id) => id !== b.id);
+      remaining.splice(
+        b.before_id == null ? remaining.length : remaining.indexOf(String(b.before_id)),
+        0,
+        String(b.id),
+      );
+      state.order = remaining;
+      state.manual = true;
+      state.version++;
+      return mockWorkerQueue(seg[1]);
+    }
+  }
+  if (seg[0] === "tasks" && seg[2] === "intents" && seg.length === 4 && m === "DELETE") {
+    if (!mockTasks.some((task) => task.id === seg[1])) throw new Error("任务不存在");
+    const receipt = `${seg[1]}:${seg[3]}`;
+    if (mockDeletedWorkers.has(receipt)) return { id: seg[3], deleted: true };
+    const index = mockIntents.findIndex((item) => item.id === seg[3]);
+    const intent = mockIntents[index];
+    if (
+      !intent ||
+      intent.inherited ||
+      !(intent.state === "open" || (intent.state === "stopped" && JSON.parse(intent.payload || "{}").cancelled_by_user))
+    )
+      throw new Error("仅等待运行或用户已取消的 Worker 可以删除");
+    mockIntents.splice(index, 1);
+    mockDeletedWorkers.add(receipt);
+    for (let i = mockActivity.length - 1; i >= 0; i--)
+      if (mockActivity[i].intent_id === intent.id) mockActivity.splice(i, 1);
+    for (const [key, value] of mockWorkerMessages) if (value.intentId === intent.id) mockWorkerMessages.delete(key);
+    syncMockQueues();
+    return { id: intent.id, deleted: true };
+  }
   if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "rerun" && m === "POST") {
     const intent = mockIntents.find((item) => item.id === seg[3]);
     if (!intent || intent.inherited || !["blocked", "exhausted", "stopped"].includes(intent.state)) {
@@ -1929,6 +2006,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     intent.state = "open";
     intent.payload = JSON.stringify({ ...JSON.parse(intent.payload || "{}"), cancelled_by_user: false });
+    syncMockQueues();
     return { id: seg[1], reopened: Number(intent.id.replace(/\D/g, "")) || 0 };
   }
   if (seg[0] === "tasks" && seg[2] === "intents" && seg[4] === "control" && m === "POST") {
@@ -1948,6 +2026,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         : String(b.reason ?? "").trim() || (intent.state === "open" ? "用户取消等待运行" : "用户取消 Worker");
       intent.state = "stopped";
       intent.payload = JSON.stringify({ ...payload, cancelled_by_user: true, cancel_reason: reason });
+      syncMockQueues();
       return {
         id: Number(id.replace(/\D/g, "")) || 0,
         state: "stopped",

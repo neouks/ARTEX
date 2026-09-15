@@ -391,6 +391,28 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	if err != nil {
 		return false, "", fmt.Errorf("读取用户取消约束: %w", err)
 	}
+	queue, err := ts.WorkerQueue()
+	if err != nil {
+		return false, "", fmt.Errorf("读取用户队列: %w", err)
+	}
+	if queue.Manual {
+		cancelled += "\n【用户等待队列】用户已手动排序，按保存的队列顺序执行。新建或重新进入等待的 Worker 追加队尾；不要通过修改数值优先级绕过用户顺序。"
+	}
+	deleted, err := ts.DeletedWorkers()
+	if err != nil {
+		return false, "", fmt.Errorf("读取用户删除记录: %w", err)
+	}
+	for _, n := range deleted {
+		var p struct {
+			Summary string `json:"summary"`
+			Reason  string `json:"cancel_reason"`
+		}
+		_ = json.Unmarshal(n.Payload, &p)
+		cancelled += fmt.Sprintf("\n【用户已删除】Worker #%d：%s；原 Worker 不可重新开启。", n.ID, p.Summary)
+		if n.UserCancelled() {
+			cancelled += fmt.Sprintf("此前用户取消原因：%s；不要创建同方向替代工作。", p.Reason)
+		}
+	}
 	situational := cancelled + renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后

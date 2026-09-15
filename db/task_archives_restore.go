@@ -98,6 +98,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM main_sessions WHERE exploration_id=$1`, []any{expID}},
+		{`DELETE FROM deleted_workers WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM exploration_nodes WHERE exploration_id=$1`, []any{expID}},
 	} {
 		if _, err := tx.Exec(statement.query, statement.args...); err != nil {
@@ -246,7 +247,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	// Insert graph rows in foreign-key order. The archived stub has no graph rows,
 	// so an ID conflict signals external corruption and must stop the restore.
-	for _, table := range []string{"exploration_nodes", "exploration_edges", "exploration_anchors", "task_constraints", "activity", "main_sessions"} {
+	for _, table := range []string{"exploration_nodes", "exploration_edges", "exploration_anchors", "task_constraints", "activity", "main_sessions", "deleted_workers"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -320,6 +321,7 @@ func restoreExplorationStub(tx *sql.Tx, raw json.RawMessage, expID int64) error 
 	_, err := tx.Exec(`UPDATE explorations current SET
  description=archived.description,goal=archived.goal,status=archived.status,
  round_no=COALESCE(archived.round_no,0),
+ worker_queue_manual=COALESCE(archived.worker_queue_manual,false),worker_queue_version=COALESCE(archived.worker_queue_version,0),
  created_at=archived.created_at,updated_at=archived.updated_at
 FROM json_populate_record(NULL::explorations,$2::json) archived
 WHERE current.id=$1 AND archived.id=$1`, expID, string(firstArchiveRow(raw)))
@@ -426,6 +428,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		}
 	}
 	allowed := map[string]bool{
+		"deleted_workers":         true,
 		"task_asset_skips":        true,
 		"task_asset_grants":       true,
 		"task_asset_dns_evidence": true,
@@ -441,6 +444,21 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	}
 	if rawRowCount(raw) == 0 {
 		return nil
+	}
+	if table == "exploration_nodes" {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row["queue_position"] == nil {
+				row["queue_position"] = 0
+			}
+		}
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
 	}
 	if table == "task_asset_skips" {
 		rows, err := decodeArchiveRows(raw)

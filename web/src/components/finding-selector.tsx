@@ -4,10 +4,12 @@ import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { findingRowKey } from "@/lib/findings";
+import { findingRowKey, fmtTime } from "@/lib/findings";
 import type { Finding } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 export function FindingSelector({
+  flat = false,
   items,
   selectedKey,
   onSelect,
@@ -16,6 +18,7 @@ export function FindingSelector({
   onToggleSelectedPage,
   selectAllLabel = "选择当前页全部",
 }: {
+  flat?: boolean;
   items: Finding[];
   selectedKey: string | null;
   onSelect: (finding: Finding) => void;
@@ -46,7 +49,10 @@ export function FindingSelector({
           {selectAllLabel}
         </div>
       )}
-      <section className="flex max-h-[36rem] flex-col gap-2 overflow-y-auto" aria-label="漏洞选择列表">
+      <section
+        className={cn("flex flex-col gap-2", !flat && "max-h-[36rem] overflow-y-auto")}
+        aria-label="漏洞选择列表"
+      >
         {items.map((item) => (
           <div key={findingRowKey(item)} className="flex min-w-0 items-start gap-2">
             {onToggleSelected && (
@@ -60,7 +66,10 @@ export function FindingSelector({
             )}
             <Button
               variant={selectedKey === findingRowKey(item) ? "secondary" : "ghost"}
-              className="h-auto min-w-0 flex-1 flex-col items-start gap-2 whitespace-normal p-3 text-left"
+              className={cn(
+                "h-auto min-w-0 flex-1 flex-col items-start gap-2 whitespace-normal p-3 text-left",
+                flat && "sm:grid sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]",
+              )}
               aria-pressed={selectedKey === findingRowKey(item)}
               onClick={() => onSelect(item)}
             >
@@ -69,10 +78,20 @@ export function FindingSelector({
                 <StatusBadge domain="severity" value={item.severity} dot />
                 <StatusBadge domain="finding" value={item.status} dot />
               </span>
+              {flat && (
+                <span className="min-w-0 break-words text-xs text-muted-foreground">
+                  资产：{item.assets?.map((asset) => asset.label).join("、") || "未关联资产"}
+                </span>
+              )}
+              {flat && <span className="text-xs text-muted-foreground">发现时间：{fmtTime(item.ts)}</span>}
               {item.inherited ? (
                 <Badge variant="outline">来源 #{item.source_task_id || item.task_id} · 只读</Badge>
               ) : (
-                item.task_id && <span className="text-muted-foreground text-xs">任务 #{item.task_id}</span>
+                item.task_id && (
+                  <span className="text-muted-foreground text-xs">
+                    任务 {item.task_description || `#${item.task_id}`}
+                  </span>
+                )
               )}
             </Button>
           </div>

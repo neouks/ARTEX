@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { FindingWorkspaceDetail } from "@/components/finding-detail-content";
+import { FindingLayoutToggle, FindingPresentation, useFindingPresentation } from "@/components/finding-presentation";
 import { FindingSelector } from "@/components/finding-selector";
 import { TablePagination } from "@/components/table-pagination";
 import { useNotificationRead } from "@/components/task-notifications";
@@ -20,6 +21,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
   return <TaskFindings key={taskId} taskId={taskId} />;
 }
 function TaskFindings({ taskId }: { taskId: string }) {
+  const presentation = useFindingPresentation("artex_task_findings_layout");
   const beginRead = useNotificationRead("findings");
   const [sort, setSort] = useStoredSortPreference("artex_task_findings_sort", FIELDS, "time", "desc");
   const [page, setPage] = React.useState(1);
@@ -62,10 +64,21 @@ function TaskFindings({ taskId }: { taskId: string }) {
   }, [taskId, page, pageSize, sort.direction, beginRead, revision]);
   const selected = data ? selectFinding(data.items, selectedKey) : null;
   return (
-    <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(18rem,0.8fr)_minmax(0,2fr)]">
+    <FindingPresentation
+      {...presentation}
+      onOpenChange={presentation.setDetailOpen}
+      detail={
+        selected ? (
+          <FindingWorkspaceDetail finding={selected} contextTask={taskId} onChanged={refresh} />
+        ) : (
+          <p>请选择漏洞查看详情。</p>
+        )
+      }
+    >
       <Card className="min-w-0">
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-          <CardTitle>选择漏洞 · {data?.total ?? "…"}</CardTitle>
+          <CardTitle>漏洞 · {data?.total ?? "…"}</CardTitle>
+          <FindingLayoutToggle value={presentation.layout} onChange={presentation.changeLayout} />
           <Button
             size="sm"
             variant="outline"
@@ -94,9 +107,13 @@ function TaskFindings({ taskId }: { taskId: string }) {
             </div>
           ) : (
             <FindingSelector
+              flat={presentation.layout === "flat"}
               items={data?.items ?? []}
               selectedKey={selected ? findingRowKey(selected) : null}
-              onSelect={(item) => setSelectedKey(findingRowKey(item))}
+              onSelect={(item) => {
+                setSelectedKey(findingRowKey(item));
+                presentation.setDetailOpen(true);
+              }}
             />
           )}
           {data && (
@@ -117,13 +134,6 @@ function TaskFindings({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
-      <div className="min-w-0">
-        {selected ? (
-          <FindingWorkspaceDetail finding={selected} contextTask={taskId} onChanged={refresh} />
-        ) : (
-          <p className="py-12 text-center text-muted-foreground">请选择漏洞查看详情、流量证据与复测记录。</p>
-        )}
-      </div>
-    </div>
+    </FindingPresentation>
   );
 }
