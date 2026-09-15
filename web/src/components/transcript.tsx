@@ -386,7 +386,7 @@ function ToolBlock({
       ? "text-emerald-600 dark:text-emerald-400"
       : "text-red-600 dark:text-red-400";
   const rawCmd =
-    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : use?.summary ?? "";
+    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : (use?.summary ?? "");
   const cmd = toolInputText(toolName, rawCmd);
   // status only — the full result lives behind the expand (【输出】), not previewed inline
   const statusText = running ? "执行中…" : ok ? "✓" : "✕ 失败";
@@ -420,8 +420,20 @@ function ToolBlock({
 
   React.useEffect(() => {
     if (!focused || !open || !detail || loadError || !root.current) return;
-    const frame=requestAnimationFrame(() => { if(root.current) onLocated?.(root.current); });
-    return () => cancelAnimationFrame(frame);
+    if (onLocated) {
+      const frame=requestAnimationFrame(() => { if(root.current) onLocated(root.current); });
+      return () => cancelAnimationFrame(frame);
+    }
+    const el=root.current;
+    const viewport=el.closest('[data-slot="scroll-area-viewport"]');
+    if (!viewport) return;
+    const center=() => { const rect=el.getBoundingClientRect(),bounds=viewport.getBoundingClientRect(); viewport.scrollTop += rect.top+rect.height/2-bounds.top-bounds.height/2; };
+    const observer=new ResizeObserver(center);
+    observer.observe(el.parentElement ?? el);observer.observe(viewport);
+    const stop=() => observer.disconnect();
+    for (const event of ["wheel","touchstart","pointerdown","keydown"]) viewport.addEventListener(event,stop,{passive:true,once:true});
+    const frame=requestAnimationFrame(center),timer=setTimeout(stop,2000);
+    return () => {cancelAnimationFrame(frame);clearTimeout(timer);stop();for(const event of ["wheel","touchstart","pointerdown","keydown"])viewport.removeEventListener(event,stop);};
   }, [focused, open, detail, loadError, onLocated]);
 
   function toggle() {
@@ -666,8 +678,7 @@ function ExecView({
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
   // its own (conversation-scoped) fetcher instead.
   const getDetail = React.useCallback(
-    (seq: number) =>
-      fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? ""),
+    (seq: number) => (fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? "")),
     [fetchDetail, taskId],
   );
   return (
@@ -705,6 +716,7 @@ export function Transcript({
   chat,
   fetchDetail,
   focusActivity,
+  focusedSeq,
   onLocated,
 }: {
   activity: Activity[];
@@ -713,11 +725,24 @@ export function Transcript({
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
   focusActivity?: number;
+  focusedSeq?: number;
   onLocated?: (el: HTMLElement) => void;
 }) {
+  const transcriptRef = React.useRef<HTMLDivElement>(null);
+  const [focusPadding, setFocusPadding] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (focusedSeq == null) { setFocusPadding(0); return; }
+    const viewport = transcriptRef.current?.closest('[data-slot="scroll-area-viewport"]');
+    if (!viewport) return;
+    const measure = () => setFocusPadding(viewport.clientHeight / 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [focusedSeq]);
   return (
-    <div className="flex flex-col gap-1">
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusActivity={focusActivity} onLocated={onLocated} />
+    <div ref={transcriptRef} className="flex flex-col gap-1" style={focusPadding ? {paddingBlock:focusPadding} : undefined}>
+      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusActivity={focusActivity ?? focusedSeq} onLocated={onLocated} />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">

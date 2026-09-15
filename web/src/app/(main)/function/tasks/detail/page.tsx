@@ -385,7 +385,7 @@ function TaskDetailInner() {
 
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">未找到任务 {id}</p>
+        <p className="text-muted-foreground">任务 {id} 已被删除、归档或不存在</p>
         <Button asChild variant="outline">
           <Link href="/function/tasks">
             <ArrowLeftIcon /> 返回任务列表
