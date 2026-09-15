@@ -87,7 +87,7 @@ export function normalizeMCPImportConfig(value: unknown): { servers: MCPImportIt
       .trim()
       .toLowerCase();
     const transport: Transport =
-      type === "http" || type === "sse" || type === "streamable-http" || (!type && item.url) ? "http" : "stdio";
+      type === "sse" ? "sse" : type === "http" || type === "streamable-http" || (!type && item.url) ? "http" : "stdio";
     if (item.command !== undefined && item.command !== null && typeof item.command !== "string")
       throw new Error(`servers[${index}].command 必须是字符串`);
     const command = item.command === undefined || item.command === null ? "" : item.command.trim();
@@ -116,16 +116,16 @@ export function normalizeMCPImportConfig(value: unknown): { servers: MCPImportIt
       throw new Error(`servers[${index}].url 必须是字符串`);
     const url = item.url === undefined || item.url === null ? "" : item.url.trim();
     if (transport === "stdio" && !command) throw new Error(`servers[${index}] 的 stdio 配置缺少 command`);
-    if (transport === "http" && !url) throw new Error(`servers[${index}] 的 http 配置缺少 url`);
+    if (transport !== "stdio" && !url) throw new Error(`servers[${index}] 的 http 配置缺少 url`);
     return {
       name,
       transport,
       command: transport === "stdio" ? command : "",
       args: transport === "stdio" ? args : [],
       env,
-      url: transport === "http" ? url : "",
+      url: transport !== "stdio" ? url : "",
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
-      insecure: transport === "http" && item.insecure === true,
+      insecure: transport !== "stdio" && item.insecure === true,
     };
   });
   return { servers };
@@ -200,7 +200,7 @@ export default function MCPPage() {
     return form.transport !== "stdio"
       ? {
           name: form.name.trim(),
-          transport: "http",
+          transport: form.transport,
           insecure: form.insecure,
           url: form.url.trim(),
           command: "",
@@ -397,7 +397,7 @@ export default function MCPPage() {
             </Button>
             <Button
               type="button"
-              variant={form.transport !== "stdio" ? "default" : "outline"}
+              variant={form.transport === "http" ? "default" : "outline"}
               onClick={() => setF({ transport: "http" })}
             >
               http（远程）
@@ -682,7 +682,7 @@ export default function MCPPage() {
         <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
           <SheetHeader>
             <SheetTitle>{editing ? editing.name : "添加 MCP 服务器"}</SheetTitle>
-            <SheetDescription>stdio（本地起进程）或 http（远程 Streamable HTTP）</SheetDescription>
+            <SheetDescription>stdio（本地进程）、http（Streamable HTTP）或 sse（旧版远程）</SheetDescription>
           </SheetHeader>
           {editing ? (
             <Tabs

@@ -52,3 +52,20 @@ func TestNormalizeMCPServerRejectsTransportSpecificErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestSSEImportPreservesTransport(t *testing.T) {
+	for _, input := range []mcpImportServer{
+		{Name: "legacy", Type: "sse", URL: "https://example.com/sse"},
+		{Name: "legacy", Transport: "sse", URL: "https://example.com/sse"},
+	} {
+		server, err := input.normalized()
+		if err != nil || server.Transport != "sse" || server.URL != input.URL {
+			t.Fatalf("SSE import = %+v, %v", server, err)
+		}
+	}
+	for _, endpoint := range []string{"", "ftp://example.com/sse"} {
+		if err := normalizeMCPServer(&db.MCPServer{Name: "legacy", Transport: "sse", URL: endpoint}); err == nil {
+			t.Fatalf("accepted invalid SSE URL %q", endpoint)
+		}
+	}
+}

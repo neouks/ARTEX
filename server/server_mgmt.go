@@ -969,7 +969,9 @@ func (in mcpImportServer) normalized() (*db.MCPServer, error) {
 		switch strings.ToLower(strings.TrimSpace(in.Type)) {
 		case "local", "stdio":
 			transport = "stdio"
-		case "http", "sse", "streamable-http":
+		case "sse":
+			transport = "sse"
+		case "http", "streamable-http":
 			transport = "http"
 		}
 	}

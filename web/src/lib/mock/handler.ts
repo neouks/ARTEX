@@ -3134,11 +3134,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const item: MCPServer = {
       id,
       name: String(current.name ?? "new-mcp"),
-      transport: current.transport === "http" ? "http" : "stdio",
-      command: current.transport === "http" ? "" : String(current.command ?? ""),
+      transport: current.transport === "sse" ? "sse" : current.transport === "http" ? "http" : "stdio",
+      command: current.transport !== "stdio" ? "" : String(current.command ?? ""),
       args: Array.isArray(current.args) ? current.args.map(String) : [],
       env: current.env && typeof current.env === "object" ? (current.env as Record<string, string>) : {},
-      url: current.transport === "http" ? String(current.url ?? "") : "",
+      url: current.transport !== "stdio" ? String(current.url ?? "") : "",
       enabled: typeof current.enabled === "boolean" ? current.enabled : true,
       tools: mockMcpServers.find((server) => server.id === id)?.tools ?? [],
       calls: Number(current.calls ?? mockMcpServers.find((server) => server.id === id)?.calls ?? 0),
@@ -3160,7 +3160,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const current = b as Partial<MCPServer>;
     if (current.transport === "stdio" && !String(current.command ?? "").trim())
       return { ok: false, error: "配置错误：stdio 传输缺少命令" };
-    if (current.transport === "http" && !String(current.url ?? "").trim())
+    if (current.transport !== "stdio" && !String(current.url ?? "").trim())
       return { ok: false, error: "配置错误：http 传输缺少 URL" };
     const tools = current.name ? [{ name: `${current.name}_tool`, description: "（Mock）工具" }] : [];
     return { ok: true, tool_count: tools.length, tools, latency_ms: 12 };
