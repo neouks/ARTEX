@@ -5,6 +5,7 @@ import * as React from "react";
 import {
   CheckCircle2Icon,
   CpuIcon,
+  FlaskConicalIcon,
   GlobeIcon,
   KeyboardIcon,
   Loader2Icon,
@@ -56,6 +57,8 @@ export default function SystemSettingsPage() {
   // 操作约束注入范围(默认都开)。
   const [injectPlanner, setInjectPlanner] = React.useState(true);
   const [injectWorker, setInjectWorker] = React.useState(true);
+  // 实验功能:noa 上下文压缩(默认关)。
+  const [noaCompaction, setNoaCompaction] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -74,6 +77,7 @@ export default function SystemSettingsPage() {
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
+    setNoaCompaction(!!s.noa_compaction);
   }, []);
 
   const saveWorkers = () => {
@@ -161,6 +165,20 @@ export default function SystemSettingsPage() {
       .setSettings({ constraints_inject_worker: v })
       .then(apply)
       .catch(() => setInjectWorker(!v)); // revert on failure
+  };
+
+  const toggleNoaCompaction = (v: boolean) => {
+    setNoaCompaction(v); // optimistic
+    api
+      .setSettings({ noa_compaction: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v ? "已开启 noa 上下文压缩（对之后启动的运行生效）" : "已关闭 noa 上下文压缩（恢复内置压缩）");
+      })
+      .catch((e) => {
+        setNoaCompaction(!v); // revert on failure
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
   };
 
   // Persist a web-search patch (enable and/or backend). Optimistic with refetch.
@@ -529,6 +547,34 @@ export default function SystemSettingsPage() {
                 onCheckedChange={toggleInjectWorker}
               />
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FlaskConicalIcon className="size-4" />
+              实验功能
+            </CardTitle>
+            <CardDescription>
+              尚在验证中的机制，默认关闭。可能改变 Agent 行为或影响稳定性，请在了解影响后启用。
+              <br />
+              <b>noa 上下文压缩</b>：由模型主动压缩长对话历史（norma v0.4.0）。开启后平台接入的四类 Agent（
+              <b>规划者 / 执行者 / 主 Agent / 对话</b>）改用 noa 接管上下文，取代内置压缩，
+              压缩原文会归档到任务工作目录下便于回溯。切换即时生效（对之后启动的运行生效），无需重建 Agent；
+              关闭后立即恢复内置压缩。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="noa-compaction" className="text-sm font-normal text-muted-foreground">
+              noa 上下文压缩{noaCompaction ? " · 已开启" : " · 已关闭"}
+            </Label>
+            <Switch
+              id="noa-compaction"
+              checked={noaCompaction}
+              disabled={!loaded}
+              onCheckedChange={toggleNoaCompaction}
+            />
           </CardContent>
         </Card>
 
