@@ -1817,21 +1817,24 @@ export function SessionsTab({
                           新建
                         </button>
                       )}
+                      {role === "worker" && (
+                        <div className="ml-auto flex shrink-0 items-center gap-1">
+                          <WorkerQueue key={taskId} taskId={taskId} disabled={controllingIntent !== null} />
+                          {selectableWorkers.length > 0 && !workerSelectionMode && (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              title="多选 Worker"
+                              aria-label="多选 Worker"
+                              disabled={controllingIntent !== null}
+                              onClick={() => setWorkerSelectionMode(true)}
+                            >
+                              <ListChecksIcon />
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    {role === "worker" && (
-                      <WorkerQueue key={taskId} taskId={taskId} disabled={controllingIntent !== null} />
-                    )}
-                    {role === "worker" && selectableWorkers.length > 0 && !workerSelectionMode && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={controllingIntent !== null}
-                        onClick={() => setWorkerSelectionMode(true)}
-                      >
-                        <ListChecksIcon data-icon="inline-start" />
-                        多选
-                      </Button>
-                    )}
                     {role === "worker" && workerSelectionMode && (
                       <div className="flex flex-wrap items-center gap-2 border-b px-2 py-2">
                         <label htmlFor="worker-select-all" className="flex items-center gap-1 text-xs">

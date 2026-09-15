@@ -516,7 +516,7 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 		obj(map[string]any{
 			"dsl": str("与 id、ids 三选一，必须为非空查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。任务审批筛选用 approval_state==approved（approved/pending/blocked/revoked）；status_code==200 表示 HTTP 状态码，status 的整数值仍是 HTTP 状态码。审批筛选不会扩大当前角色的可见范围，Planner 查非批准资产管理摘要应使用 list_task_assets。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
 			"id": idp("单个正整数资产 ID；与 ids、dsl 三选一"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "非空正整数 ID 数组，与 id、dsl 三选一；最多50个 ID，详情最多5个"},
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "仅控制分页，不能单独使用；必须同时提供 id、ids 或 dsl。默认10，最大50；续页保留查询条件并使用 next_offset"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
+			"limit": map[string]any{"type": "integer", "minimum": 1, "description": "仅控制分页，不能单独使用；必须同时提供 id、ids 或 dsl。默认10，每页最多50，超出自动按50处理；续页保留查询条件并使用 next_offset"}, "offset": intp("列表偏移，使用返回的 next_offset；默认0"), "detail": map[string]any{"type": "boolean"},
 			"fields": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "详情字段组，默认 identity/fingerprint"},
 			"field":  str("详情延期字段 JSON Pointer"), "index": intp("详情集合续页"), "text_offset": intp("详情文本字符偏移"), "max_chars": intp("详情字符预算，默认8000，最大24000"),
 		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
@@ -540,7 +540,10 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			if a.Limit == 0 {
 				a.Limit = 10
 			}
-			if a.Limit < 1 || a.Limit > 50 {
+			if a.Limit > 50 {
+				a.Limit = 50
+			}
+			if a.Limit < 1 {
 				return actool.Errorf(fmt.Sprintf("limit=%d 超出范围：list_assets 默认10、最大50；请使用 limit=50，并以返回的 next_offset 继续读取。", a.Limit)), nil
 			}
 			if a.Offset < 0 {

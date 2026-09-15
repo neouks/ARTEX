@@ -76,19 +76,21 @@ function TaskFindings({ taskId }: { taskId: string }) {
       }
     >
       <Card className="min-w-0">
-        <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-          <CardTitle>漏洞 · {data?.total ?? "…"}</CardTitle>
-          <FindingLayoutToggle value={presentation.layout} onChange={presentation.changeLayout} />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setSort({ field: "time", direction: sort.direction === "asc" ? "desc" : "asc" });
-              setPage(1);
-            }}
-          >
-            发现时间 {sort.direction === "asc" ? "↑" : "↓"}
-          </Button>
+        <CardHeader className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+          <CardTitle className="shrink-0">漏洞 · {data?.total ?? "…"}</CardTitle>
+          <div className="flex shrink-0 items-center gap-2">
+            <FindingLayoutToggle value={presentation.layout} onChange={presentation.changeLayout} />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setSort({ field: "time", direction: sort.direction === "asc" ? "desc" : "asc" });
+                setPage(1);
+              }}
+            >
+              发现时间 {sort.direction === "asc" ? "↑" : "↓"}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="px-0">
           {error && (

@@ -374,7 +374,7 @@ export default function ToolsPage() {
   const [customEdit, setCustomEdit] = React.useState<Tool | "new" | null>(null);
 
   const reload = React.useCallback(() => {
-    api.tools().then(setTools).catch(() => setTools([]));
+    api.tools().then(setTools).catch((error: Error) => toast.error("工具列表读取失败：" + error.message));
   }, []);
   React.useEffect(() => {
     reload();

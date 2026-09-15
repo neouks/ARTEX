@@ -631,10 +631,10 @@ export default function DashboardPage() {
               type="button"
               onClick={() => setTokenTab("all")}
               className={cn(
-                "rounded-md px-2.5 py-1 text-[10px] font-medium transition-colors",
+                "rounded-md border px-2.5 py-1 text-[10px] font-medium transition-colors",
                 tokenTab === "all"
-                  ? "bg-foreground text-background"
-                  : "bg-muted/30 text-muted-foreground hover:text-foreground",
+                  ? "border-foreground bg-transparent text-foreground"
+                  : "border-transparent bg-muted/30 text-muted-foreground hover:text-foreground",
               )}
             >
               全部
@@ -649,10 +649,10 @@ export default function DashboardPage() {
                   key={p.id}
                   onClick={() => setTokenTab(resolvedKey)}
                   className={cn(
-                    "flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-medium transition-colors",
+                    "flex items-center gap-1 rounded-md border px-2.5 py-1 text-[10px] font-medium transition-colors",
                     tokenTab === resolvedKey
-                      ? "bg-foreground text-background"
-                      : "bg-muted/30 text-muted-foreground hover:text-foreground",
+                      ? "border-foreground bg-transparent text-foreground"
+                      : "border-transparent bg-muted/30 text-muted-foreground hover:text-foreground",
                     !hasData && "opacity-40",
                   )}
                 >
@@ -662,7 +662,7 @@ export default function DashboardPage() {
                       className={cn(
                         "rounded px-1 py-0 text-[8px]",
                         tokenTab === resolvedKey
-                          ? "bg-background/20 text-background"
+                          ? "bg-transparent text-foreground"
                           : "bg-emerald-500/20 text-emerald-400",
                       )}
                     >

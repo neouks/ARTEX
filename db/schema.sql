@@ -1198,6 +1198,13 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool_key, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_usage_task ON tool_usage(task_id);
 
+-- Startup backfills are transactional and must not run again after history is
+-- cleared or archived. Kept independently of task/session lifetimes.
+CREATE TABLE IF NOT EXISTS tool_usage_migrations (
+    name TEXT PRIMARY KEY,
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- MCP tool calls use a dedicated ledger instead of parsing the dynamic
 -- mcp__server__tool runtime name. No foreign keys by design: task/session or MCP
 -- deletion must not erase historical usage statistics.

@@ -134,7 +134,7 @@ func assetPolicyAuditSubject(name string, input []byte) string {
 	}
 }
 
-var urlPattern = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>]+`)
+var urlPattern = regexp.MustCompile(`(?i)(?:https?|wss?)://[^\s"'<>（），；。‘’“”]+`)
 
 func (p TaskAssetPolicy) Check(tool string, input []byte) string {
 	reason, _ := p.check(tool, input)

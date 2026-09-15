@@ -1,5 +1,19 @@
 package db
 
+import _ "embed"
+
+//go:embed tool_usage_backfill.sql
+var toolUsageBackfillSQL string
+
+// backfillToolUsage reconciles retained activity from before metering existed.
+// Legacy rows have no shared invocation key with the ledger, so reconcile counts
+// per tool and owning exploration/conversation, retaining the oldest missing
+// calls. Never add the full history on top of already metered calls.
+func (d *DB) backfillToolUsage() error {
+	_, err := d.Exec(toolUsageBackfillSQL)
+	return err
+}
+
 // ToolUsage is one catalog tool invocation. It stores attribution dimensions only:
 // tool arguments and results are deliberately excluded from the ledger.
 type ToolUsage struct {

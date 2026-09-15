@@ -44,6 +44,13 @@ func TestToolAssetsSummaryAndExplicitCredentials(t *testing.T) {
 			t.Fatalf("unselected auth was fetched: %v", err)
 		}
 	}
+	for _, limit := range []int{50, 51, 100} {
+		result, err := tools.listAssets().Call(t.Context(), json.RawMessage(fmt.Sprintf(`{"dsl":"url=tool-budget.test","limit":%d}`, limit)), nil)
+		if err != nil || result.IsError {
+			t.Fatalf("limit %d: %s %v", limit, result.Flatten(), err)
+		}
+	}
+
 	var restored strings.Builder
 	for offset := 0; ; {
 		query := fmt.Sprintf(`{"id":%d,"detail":true,"fields":["auth"],"field":"/auth/0/token","text_offset":%d}`, id, offset)
@@ -82,7 +89,7 @@ func TestToolAssetsSummaryAndExplicitCredentials(t *testing.T) {
 	if restored.String() != secret {
 		t.Fatal("credential detail not reconstructible")
 	}
-	for _, query := range []string{fmt.Sprintf(`{"id":%d,"dsl":"test"}`, id), `{"dsl":"test","limit":51}`, `{"dsl":"test","detail":true}`, `{"dsl":"test","fields":["auth"]}`} {
+	for _, query := range []string{fmt.Sprintf(`{"id":%d,"dsl":"test"}`, id), `{"dsl":"test","limit":-1}`, `{"dsl":"test","detail":true}`, `{"dsl":"test","fields":["auth"]}`} {
 		r, _ := tools.listAssets().Call(t.Context(), json.RawMessage(query), nil)
 		if !r.IsError {
 			t.Fatalf("accepted invalid %s", query)

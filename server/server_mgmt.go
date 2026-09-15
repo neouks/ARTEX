@@ -753,15 +753,16 @@ func (s *Server) pgListTools(w http.ResponseWriter, r *http.Request) {
 	if ts == nil {
 		ts = []*db.Tool{}
 	}
-	// Usage is best-effort decoration. Runtime tool resolution keeps using the plain
-	// catalog query, so agent assembly never pays for this aggregate.
+	// Runtime resolution uses the plain catalog query. The management API must
+	// surface aggregation failures instead of presenting unavailable totals as zero.
 	counts, countErr := pg.ToolUsageCounts()
 	if countErr != nil {
 		log.Printf("[tools] 读取调用统计失败: %v", countErr)
-	} else {
-		for _, tool := range ts {
-			tool.Calls = counts[tool.Key]
-		}
+		writeErr(w, 500, "读取工具调用统计失败")
+		return
+	}
+	for _, tool := range ts {
+		tool.Calls = counts[tool.Key]
 	}
 	writeJSON(w, 200, map[string]any{"tools": ts})
 }

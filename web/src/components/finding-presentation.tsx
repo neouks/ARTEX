@@ -28,6 +28,8 @@ export function FindingLayoutToggle({ value, onChange }: { value: string; onChan
       type="single"
       variant="outline"
       size="sm"
+      spacing={0}
+      className="shrink-0"
       value={value}
       onValueChange={onChange}
       aria-label="漏洞展示方式"

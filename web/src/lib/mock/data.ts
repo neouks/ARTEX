@@ -1002,7 +1002,7 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
     {
       id: "i14",
       type: "intent",
-      payload: P({ summary: "核对订单接口的权限边界（等待运行）" }),
+      payload: P({ summary: "核对订单接口的权限边界" }),
       priority: 5,
       state: "open",
       origin: "planner",
@@ -1011,7 +1011,7 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
     {
       id: "i15",
       type: "intent",
-      payload: P({ summary: "核对用户资料接口授权（等待运行）" }),
+      payload: P({ summary: "核对用户资料接口授权" }),
       priority: 5,
       state: "open",
       origin: "planner",
@@ -1020,7 +1020,7 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
     {
       id: "i16",
       type: "intent",
-      payload: P({ summary: "检查订单导出权限（等待运行）" }),
+      payload: P({ summary: "检查订单导出权限" }),
       priority: 5,
       state: "open",
       origin: "planner",

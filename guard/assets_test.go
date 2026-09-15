@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,23 @@ func TestCollectHostsRequiresPositiveTargetIdentification(t *testing.T) {
 	sort.Strings(got)
 	if want := []string{"2001:db8::7", "target.test"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestCollectHostsIntentChineseAnnotation(t *testing.T) {
+	for _, summary := range []string{
+		"验证 https://example.net（组件平台，mediacomponents）",
+		"验证 https://example.net；再测 https://second.test。",
+		"验证“https://example.net”，检查接口",
+	} {
+		input, _ := json.Marshal(map[string]any{"intents": []any{map[string]string{"summary": summary}}})
+		got := collectHosts(string(input))
+		want := []string{"example.net"}
+		if strings.Contains(summary, "second.test") {
+			want = append(want, "second.test")
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v want %v", summary, got, want)
+		}
 	}
 }

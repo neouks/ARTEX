@@ -43,12 +43,12 @@ export function UpdateBadge() {
     <Link
       href="/system/settings"
       title={`发现新版本 ${latest}，点击前往更新`}
-      className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 font-medium text-primary-foreground text-xs transition-opacity hover:opacity-90"
+      className="inline-flex items-center gap-1.5 rounded-md border border-foreground bg-transparent px-2.5 py-1 font-medium text-foreground text-xs transition-opacity hover:opacity-90"
     >
       {/* 呼吸点：顶栏元素很多，纯文字容易被忽略，动效让它一眼可见。 */}
       <span className="relative flex size-1.5">
-        <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary-foreground opacity-75" />
-        <span className="relative inline-flex size-1.5 rounded-full bg-primary-foreground" />
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-foreground opacity-75" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-foreground" />
       </span>
       <ArrowUpCircleIcon className="size-3.5" />
       <span className="hidden sm:inline">新版本 {latest}</span>

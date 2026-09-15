@@ -1,6 +1,77 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
+
+func TestToolUsageBackfill(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	task, err := d.CreateTask("tool usage migration", "", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := d.CreateConversation("mainagent", "tool usage migration", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("backfill_%d", task.ID)
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM tool_usage WHERE tool_key=$1`, key)
+		_, _ = d.Exec(`DELETE FROM tasks WHERE id=$1`, task.ID)
+		_, _ = d.Exec(`DELETE FROM explorations WHERE id=$1`, task.ExplorationID)
+		_, _ = d.Exec(`DELETE FROM conversations WHERE id=$1`, conversation.ID)
+	})
+	// Task has three legacy calls, one already metered. Conversation has two
+	// calls and no ledger. Results/text must never count as additional calls.
+	for _, kind := range []string{"tool_use", "tool_use", "tool_use", "tool_result", "text"} {
+		if _, err = d.Exec(`INSERT INTO activity(exploration_id,worker,kind,tool) VALUES($1,'planner',$2,$3)`, task.ExplorationID, kind, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if _, err = d.Exec(`INSERT INTO conversation_activities(conversation_id,kind,tool) VALUES($1,'tool_use',$2)`, conversation.ID, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = d.InsertToolUsage(&ToolUsage{ToolKey: key, ExplorationID: task.ExplorationID, TaskID: task.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.Exec(`DELETE FROM tool_usage_migrations WHERE name='legacy_activity_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.backfillToolUsage(); err != nil {
+		t.Fatal(err)
+	}
+	assertCount := func(want int) {
+		t.Helper()
+		counts, err := d.ToolUsageCounts()
+		if err != nil || counts[key] != want {
+			t.Fatalf("calls=%d want=%d err=%v", counts[key], want, err)
+		}
+	}
+	assertCount(5)
+	// Restart, new metered calls and deletion of original history don't inflate
+	// or reduce the migrated lifetime total.
+	if err = d.backfillToolUsage(); err != nil {
+		t.Fatal(err)
+	}
+	assertCount(5)
+	if err = d.InsertToolUsage(&ToolUsage{ToolKey: key, SessionID: fmt.Sprintf("conv-%d", conversation.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.Exec(`DELETE FROM activity WHERE exploration_id=$1`, task.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.backfillToolUsage(); err != nil {
+		t.Fatal(err)
+	}
+	assertCount(6)
+}
 
 func TestToolUsageLedger(t *testing.T) {
 	d, err := Open(testDSN(t))

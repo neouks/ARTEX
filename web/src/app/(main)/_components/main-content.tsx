@@ -1,13 +1,12 @@
 "use client";
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode } from "react";
 
 import { usePathname } from "next/navigation";
 
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useCurrentUser } from "@/hooks/use-current-user";
-import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 import { AccountSwitcher } from "./sidebar/account-switcher";
@@ -32,15 +31,6 @@ function isFullBleed(pathname: string) {
 export function MainContent({ children }: { children: ReactNode }) {
   const currentUser = useCurrentUser();
   const pathname = usePathname();
-  const [version, setVersion] = useState("");
-
-  useEffect(() => {
-    api
-      .health()
-      .then((h) => setVersion((h.version ?? "").replace(/^v(?=\d)/, "")))
-      .catch(() => setVersion(""));
-  }, []);
-
   if (isFullBleed(pathname)) {
     return <>{children}</>;
   }
@@ -63,9 +53,7 @@ export function MainContent({ children }: { children: ReactNode }) {
             <SearchDialog />
           </div>
           <div className="flex items-center gap-2">
-            {version && (
-              <span className="font-medium text-muted-foreground text-xs tabular-nums">版本 · {version}</span>
-            )}
+            <span className="font-medium text-muted-foreground text-xs">GOLDENSHEILD</span>
             <UpdateBadge />
             <LayoutControls />
             <ThemeSwitcher />

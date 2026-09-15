@@ -18,7 +18,7 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { GripVerticalIcon, ListOrderedIcon } from "lucide-react";
+import { ClockIcon, GripVerticalIcon, ListOrderedIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 type Queue = Awaited<ReturnType<typeof api.workerQueue>>;
 function titleOf(node: TaskNode) {
   try {
-    return String(JSON.parse(node.payload ?? "{}").summary ?? `Worker #${node.id}`);
+    return String(JSON.parse(node.payload ?? "{}").summary ?? `Worker #${node.id}`).replace(/\s*[（(]等待运行[）)]\s*$/, "");
   } catch {
     return `Worker #${node.id}`;
   }
@@ -60,7 +60,12 @@ function QueueRow({ node, index, disabled }: { node: TaskNode; index: number; di
       </Button>
       <span className="text-muted-foreground text-sm tabular-nums">{index + 1}</span>
       <div className="min-w-0">
-        <span className="text-muted-foreground text-xs">#{node.id}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground text-xs">#{node.id}</span>
+          <span role="img" aria-label="等待运行" title="等待运行" className="inline-flex text-muted-foreground">
+            <ClockIcon className="size-3.5" aria-hidden="true" />
+          </span>
+        </div>
         <p className="break-words text-sm">{titleOf(node)}</p>
       </div>
     </li>

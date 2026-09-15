@@ -157,6 +157,9 @@ func Open(dsn string) (*DB, error) {
 		if err := d.seedBuiltins(); err != nil {
 			return fmt.Errorf("seed builtins: %w", err)
 		}
+		if err := d.backfillToolUsage(); err != nil {
+			return fmt.Errorf("backfill tool usage: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
