@@ -15,13 +15,13 @@ func ResolveBuiltinTool(t actool.CoreTool, description string, saved map[string]
 	_ = json.Unmarshal(raw, &schema)
 	// Asset selector and pagination instructions are executable contract metadata.
 	// Persisted descriptions/defaults may advertise obsolete limit-only calls.
-	if t.Name() != "list_assets" {
+	if t.Name() != "list_assets" && t.Name() != "check_target_access" {
 		mergeToolMetadata(schema, saved)
 	}
 	// These descriptions contain versioned pagination/write protocols. Old saved
 	// text must not replace the current contract (e.g. "all findings").
 	switch t.Name() {
-	case "get_finding_retest_context", "list_facts", "list_findings", "list_task_findings", "list_assets", "node_detail", "get_task_node_detail", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces", "get_task_worker_trace", "list_task_worker_traces", "search_task_worker_traces", "get_task_graph", "add_task_hint", "expand_index", "expand_digest", "record_fact", "report_finding":
+	case "check_target_access", "add_intent", "get_finding_retest_context", "list_facts", "list_findings", "list_task_findings", "list_assets", "node_detail", "get_task_node_detail", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces", "get_task_worker_trace", "list_task_worker_traces", "search_task_worker_traces", "get_task_graph", "add_task_hint", "expand_index", "expand_digest", "record_fact", "report_finding":
 		description = t.Description()
 	}
 	return DecorateTool(t, description, schema)

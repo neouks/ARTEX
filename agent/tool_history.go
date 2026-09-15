@@ -21,6 +21,13 @@ func cloneToolMessages(req llm.CompletionRequest) llm.CompletionRequest {
 func normalizedReadQuery(name string, raw json.RawMessage) string {
 	defaults := map[string]any{}
 	switch name {
+	case "check_target_access":
+		q, err := decodeTargetAccess(raw)
+		if err != nil {
+			return ""
+		}
+		data, _ := json.Marshal(q)
+		return name + ":" + string(data)
 	case "list_facts", "list_findings", "list_worker_traces":
 		defaults = map[string]any{"limit": json.Number("20"), "before": json.Number("0"), "q": "", "severity": "", "asset_id": json.Number("0")}
 	case "list_task_assets":

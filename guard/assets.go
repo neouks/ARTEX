@@ -166,7 +166,10 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	}
 	// Discovery registers candidates; authorization belongs to the transaction
 	// and the returned executable view, not a pre-tool test of its new hosts.
-	if tool == "insert_assets" || tool == "register_user_target" || tool == "list_task_assets" {
+	// Approval metadata reads enforce their own task/role boundary. add_intent
+	// checks IDs, lineage and URL hosts per item before creating any node, so a
+	// denied item does not block the other items in the same batch.
+	if tool == "insert_assets" || tool == "register_user_target" || tool == "list_task_assets" || tool == "check_target_access" || tool == "add_intent" {
 		return "", false
 	}
 	var value any
@@ -328,3 +331,7 @@ func collectIDValue(v any, seen map[int64]bool, out *[]int64) {
 		}
 	}
 }
+
+// CollectTargetHosts exposes the same positive URL/structured-target extraction
+// for per-item intent admission.
+func CollectTargetHosts(input []byte) []string { return collectHosts(string(input)) }

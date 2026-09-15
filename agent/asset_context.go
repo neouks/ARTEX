@@ -175,6 +175,14 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	worker := ri.AgentKey == "worker" && ri.TaskID == p.taskID && ri.IntentID > 0
 	req = deduplicateToolHistory(req)
 	var refreshErr error
+	var accessSnapshot *targetAccessSnapshot
+	req, accessSnapshot, refreshErr = p.refreshTargetAccess(ctx, req)
+	if refreshErr != nil {
+		return req, refreshErr
+	}
+	if ri.TaskID == p.taskID && (ri.AgentKey == "planner" || ri.AgentKey == "mainagent") {
+		req.System = append(append([]string(nil), req.System...), targetAccessRule)
+	}
 	req, refreshErr = p.refreshApprovalManagementHistory(ctx, req)
 	if refreshErr != nil {
 		return req, refreshErr
@@ -249,7 +257,12 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	for id := range ids {
 		list = append(list, id)
 	}
-	states, err := p.assets.WithReadContext(ctx).TaskAssetApprovalStates(p.taskID, list)
+	var states map[int64]string
+	if accessSnapshot != nil {
+		states = accessSnapshot.assets
+	} else {
+		states, err = p.assets.WithReadContext(ctx).TaskAssetApprovalStates(p.taskID, list)
+	}
 	if err != nil {
 		return req, err
 	}
@@ -264,7 +277,19 @@ func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequ
 	if worker {
 		nodeStore = nodeStore.WithWorkerRead()
 	}
-	nodeStates, err := nodeStore.TaskNodeApprovalStates(p.taskID, list)
+	var nodeStates map[int64]string
+	if accessSnapshot != nil {
+		nodeStates = map[int64]string{}
+		for id, row := range accessSnapshot.nodes {
+			if row.CanRead {
+				nodeStates[id] = db.ApprovalApproved
+			} else {
+				nodeStates[id] = "unavailable"
+			}
+		}
+	} else {
+		nodeStates, err = nodeStore.TaskNodeApprovalStates(p.taskID, list)
+	}
 	if err != nil {
 		return req, err
 	}

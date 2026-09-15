@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -866,6 +868,23 @@ func (t *ToolSet) authorizedNodesForStore(nodes []*db.Node, store *db.Exploratio
 	if t.as == nil || t.taskID <= 0 || store == nil {
 		return nodes, nil
 	}
+	if !t.workerExecution {
+		ids := make([]int64, 0, len(nodes))
+		for _, n := range nodes {
+			ids = append(ids, n.ID)
+		}
+		access, err := t.as.TaskNodeAccess(t.taskID, ids)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*db.Node, 0, len(nodes))
+		for _, n := range nodes {
+			if access[n.ID].CanRead {
+				out = append(out, n)
+			}
+		}
+		return out, nil
+	}
 	nodeIDs := make([]int64, 0, len(nodes))
 	for _, node := range nodes {
 		nodeIDs = append(nodeIDs, node.ID)
@@ -931,6 +950,10 @@ func (t *ToolSet) nodeAuthorized(n *db.Node) bool {
 func (t *ToolSet) nodeAuthorization(n *db.Node) (bool, error) {
 	if n == nil || t.as == nil || t.taskID <= 0 {
 		return n != nil, nil
+	}
+	if !t.workerExecution {
+		access, err := t.as.TaskNodeAccess(t.taskID, []int64{n.ID})
+		return access[n.ID].CanRead, err
 	}
 	if !n.Inherited {
 		nodes, err := t.authorizedNodesForStore([]*db.Node{n}, t.ts, t.taskID)
@@ -1461,7 +1484,7 @@ func compactFact(n *db.Node) map[string]any {
 }
 
 func (t *ToolSet) nodeDetail() actool.CoreTool {
-	return t.readExpTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets。",
+	return t.readExpTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets。未知授权的节点先批量 check_target_access，已复核可用的直接读取。",
 		obj(map[string]any{"id": idp("探索图节点 id(非资产 id)"), "field": str("延期字段的 JSON Pointer，默认整个 payload"), "index": intp("集合 next_index 续页"), "offset": intp("文本 next_offset 续读"), "max_chars": intp("默认8000，最大24000")}, "id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
@@ -1482,6 +1505,15 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			id := a.ID
 			if id <= 0 {
 				return actool.Errorf("id 必填"), nil
+			}
+			if t.as != nil && t.taskID > 0 && !t.workerExecution {
+				access, err := queryTargetAccess(t.as, t.taskID, targetAccessQuery{NodeIDs: []int64{id}})
+				if err != nil {
+					return actool.Errorf("审批查询失败: " + err.Error()), nil
+				}
+				if targetDenied(access) {
+					return accessErrorResult(&targetAccessError{access}, access)
+				}
 			}
 			n, err := t.ts.GetNodeWithSources(id)
 			if err != nil {
@@ -1541,6 +1573,41 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, false, fmt.Errorf("summary 不能为空")
 	}
+	if t.as != nil && t.taskID > 0 {
+		access, err := queryTargetAccess(t.as, t.taskID, targetAccessQuery{AssetIDs: pidList(it.AssetIDs), NodeIDs: pidList(it.ParentIDs)})
+		if err != nil {
+			return 0, false, fmt.Errorf("审批查询失败: %w", err)
+		}
+		if targetDenied(access) {
+			return 0, false, &targetAccessError{access}
+		}
+		raw, err := json.Marshal(it)
+		if err != nil {
+			return 0, false, err
+		}
+		hosts := guard.CollectTargetHosts(raw)
+		if err := t.as.ValidateTaskHostsApproved(t.taskID, hosts); err != nil {
+			if !errors.Is(err, db.ErrTaskAssetBlocked) && !errors.Is(err, db.ErrTaskAssetNotApproved) {
+				return 0, false, err
+			}
+			states, queryErr := t.as.TaskHostApprovalStates(t.taskID, hosts)
+			if queryErr != nil {
+				return 0, false, queryErr
+			}
+			reasons := map[string]bool{}
+			for _, state := range states {
+				if state != db.ApprovalApproved {
+					reasons[state] = true
+				}
+			}
+			for _, state := range []string{db.ApprovalBlocked, db.ApprovalPending, db.ApprovalRevoked} {
+				if reasons[state] {
+					access.Reasons = append(access.Reasons, state)
+				}
+			}
+			return 0, false, &targetAccessError{access}
+		}
+	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
 	parents := pidList(it.ParentIDs)
 	parentNodes := make([]*db.Node, 0, len(parents))
@@ -1552,7 +1619,11 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 		if n.Kind != db.KindFact && n.Kind != db.KindFinding {
 			return 0, false, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
-		if !t.nodeAuthorized(n) {
+		authorized, authErr := t.nodeAuthorization(n)
+		if authErr != nil {
+			return 0, false, authErr
+		}
+		if !authorized {
 			return 0, false, fmt.Errorf("parent_id %d 关联的任务资产未获授权或已被封禁", pidv)
 		}
 		parentNodes = append(parentNodes, n)
@@ -1615,7 +1686,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
-		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
+		"已知未授权候选本轮跳过；未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "maxItems": 4, "description": "【优先用这个】要新增的探索方向数组，最多 4 条，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
@@ -1646,12 +1717,17 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			accessErrors := map[string]targetAccessView{}
 			duplicates := map[string]int64{}
 			createdAny := false
 			for i, it := range items {
 				id, created, err := t.addOneIntentResult(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
+					var denied *targetAccessError
+					if errors.As(err, &denied) {
+						accessErrors[strconv.Itoa(i)] = denied.Access
+					}
 					continue
 				}
 				ids[i] = id
@@ -1672,6 +1748,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 
 			if !batch { // 单条：保持原返回
 				if e, bad := errs["0"]; bad {
+					if access, ok := accessErrors["0"]; ok {
+						return accessErrorResult(errors.New(e), access)
+					}
 					return actool.Errorf(e), nil
 				}
 				if existingID, duplicate := duplicates["0"]; duplicate {
@@ -1680,6 +1759,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
 			}
 			out := map[string]any{"ids": ids}
+			if len(accessErrors) > 0 {
+				out["access_errors"] = accessErrors
+			}
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}
@@ -2698,7 +2780,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.listTaskAssets(),
+		t.listTaskAssets(), t.checkTargetAccess(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(), t.expandIndex(),
