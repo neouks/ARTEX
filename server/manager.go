@@ -1936,3 +1936,21 @@ func (t *Task) hasPendingTriggers() bool {
 	defer t.trigMu.Unlock()
 	return len(t.pendingTriggers) > 0
 }
+
+// NotifyFindingDeleted only wakes the planner; it never wakes or resumes workers.
+func (t *Task) NotifyFindingDeleted(feedbackID int64) {
+	if feedbackID <= 0 {
+		return
+	}
+	state := t.lifecycleSnapshot()
+	if isTerminalStatus(state.Status) || state.Status == "paused" || state.Paused || state.Queued {
+		return
+	}
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "finding_deleted", FeedbackID: feedbackID})
+	t.trigMu.Unlock()
+	select {
+	case t.notify <- struct{}{}:
+	default:
+	}
+}

@@ -102,7 +102,13 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.SplitN(result, "\n", 2)[1]), &recorded); err != nil {
 		t.Fatal(err)
 	}
-	if recorded.FindingID == recorded.NodeID || len(recorded.Traffic.Bindings) != 3 || notices != 1 {
+	// Independent sequences may legitimately allocate the same numeric value.
+	// Verify the relationship instead of assuming the numbers must differ.
+	stored, err := pg.GetFinding(recorded.FindingID)
+	if err != nil || stored == nil || stored.NodeID == nil || *stored.NodeID != recorded.NodeID {
+		t.Fatalf("finding/node relationship mismatch: %+v %v", stored, err)
+	}
+	if len(recorded.Traffic.Bindings) != 3 || notices != 1 {
 		t.Fatal("bad finding/traffic result", result)
 	}
 	for i, b := range recorded.Traffic.Bindings {

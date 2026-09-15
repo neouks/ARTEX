@@ -2,7 +2,7 @@
 import * as React from "react";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { ArrowLeftIcon } from "lucide-react";
 
@@ -16,6 +16,7 @@ import type { Finding } from "@/lib/types";
 import { FindingLineageView } from "./lineage";
 
 function FindingDetailInner({ id, contextTask }: { id: string; contextTask?: string }) {
+  const router = useRouter();
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [error, setError] = React.useState("");
   const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
@@ -73,7 +74,16 @@ function FindingDetailInner({ id, contextTask }: { id: string; contextTask?: str
         ) : (
           <>
             <TabsContent value="overview">
-              <FindingDetailContent finding={finding} contextTask={contextTask} onRefresh={reload} />
+              <FindingDetailContent
+                finding={finding}
+                contextTask={contextTask}
+                onRefresh={reload}
+                onDelete={async (finding, reason) => {
+                  if (!finding.finding_id) return;
+                  await api.deleteFinding(finding.finding_id, reason);
+                  router.replace("/function/findings");
+                }}
+              />
             </TabsContent>
             <TabsContent value="lineage">
               <FindingLineageView findingId={id} />

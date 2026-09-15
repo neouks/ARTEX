@@ -590,31 +590,26 @@ export default function FindingsPage() {
 
   // deleteFinding 删除一个漏洞(需二次确认):删成功后从列表移除、收起行、刷新统计。
   const deleteFinding = React.useCallback(
-    async (f: Finding) => {
+    async (f: Finding, reason: string) => {
       if (!f.finding_id) return;
-      try {
-        await api.deleteFinding(f.finding_id);
-        setFindings((cur) => cur.filter((x) => !isSameFinding(x, f)));
-        setSelectedIds((current) => {
-          const next = new Set(current);
-          next.delete(f.finding_id as string);
-          return next;
+      await api.deleteFinding(f.finding_id, reason);
+      setFindings((cur) => cur.filter((x) => !isSameFinding(x, f)));
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        next.delete(f.finding_id as string);
+        return next;
+      });
+      setTotal((t) => Math.max(0, t - 1));
+      setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - 1) }));
+      const rowKey = findingRowKey(f);
+      setExpanded((cur) => (cur === rowKey ? null : cur));
+      api
+        .findingStats()
+        .then(setStats)
+        .catch(() => {
+          // The deletion remains valid even if the aggregate refresh fails.
         });
-        setTotal((t) => Math.max(0, t - 1));
-        setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - 1) }));
-        const rowKey = findingRowKey(f);
-        setExpanded((cur) => (cur === rowKey ? null : cur));
-        toast.success("已删除漏洞");
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The deletion remains valid even if the aggregate refresh fails.
-          });
-        refreshAfterMutation(f, true);
-      } catch (e) {
-        toast.error(`删除失败：${(e as Error).message}`);
-      }
+      refreshAfterMutation(f, true);
     },
     [refreshAfterMutation, setFindings],
   );

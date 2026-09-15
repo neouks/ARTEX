@@ -1587,3 +1587,15 @@ CREATE TRIGGER trg_worker_queue_version AFTER INSERT OR UPDATE OR DELETE ON expl
 FOR EACH ROW EXECUTE FUNCTION bump_worker_queue_version();
 CREATE INDEX IF NOT EXISTS idx_worker_queue_position ON exploration_nodes(exploration_id,queue_position,id)
 WHERE kind='intent' AND state='open';
+
+-- Deletion feedback survives its finding and is private to the owning planner.
+CREATE TABLE IF NOT EXISTS finding_deletion_feedback (
+ id BIGSERIAL PRIMARY KEY,
+ finding_id BIGINT NOT NULL,
+ task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+ title TEXT NOT NULL DEFAULT '',
+ vulnclass TEXT NOT NULL DEFAULT '',
+ reason TEXT NOT NULL DEFAULT '' CHECK (char_length(reason)<=2000),
+ deleted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_deletion_feedback_task ON finding_deletion_feedback(task_id,id DESC);

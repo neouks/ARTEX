@@ -7,22 +7,12 @@ import Link from "next/link";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingDeleteDialog } from "@/components/finding-delete-dialog";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +37,7 @@ type DetailProps = {
   finding: Finding;
   contextTask?: string;
   onChanged?: (finding: Finding) => void;
-  onDelete?: (finding: Finding) => Promise<void>;
+  onDelete?: (finding: Finding, reason: string) => Promise<void>;
   onDeepen?: (finding: Finding) => void;
 };
 
@@ -207,27 +197,7 @@ export function FindingDetailContent({
                   深化测试
                 </Button>
               )}
-              {!readOnly && onDelete && (
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button variant="destructive" size="sm" disabled={busy}>
-                      删除
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>删除此漏洞？</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        删除后将无法在发现列表中查看此漏洞，请先导出需要保留的报告。
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>取消</AlertDialogCancel>
-                      <AlertDialogAction onClick={() => void onDelete(finding)}>确认删除</AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              )}
+              {!readOnly && onDelete && <FindingDeleteDialog finding={finding} disabled={busy} onDelete={onDelete} />}
             </div>
           </div>
           <h2 className="break-words font-semibold text-base">{finding.name || finding.vulnclass || "未分类"}</h2>

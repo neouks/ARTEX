@@ -69,7 +69,18 @@ function TaskFindings({ taskId }: { taskId: string }) {
       onOpenChange={presentation.setDetailOpen}
       detail={
         selected ? (
-          <FindingWorkspaceDetail finding={selected} contextTask={taskId} onChanged={refresh} />
+          <FindingWorkspaceDetail
+            finding={selected}
+            contextTask={taskId}
+            onChanged={refresh}
+            onDelete={async (finding, reason) => {
+              if (!finding.finding_id) return;
+              await api.deleteFinding(finding.finding_id, reason);
+              setSelectedKey(null);
+              presentation.setDetailOpen(false);
+              refresh();
+            }}
+          />
         ) : (
           <p>请选择漏洞查看详情。</p>
         )

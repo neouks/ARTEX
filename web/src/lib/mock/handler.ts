@@ -1389,6 +1389,16 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
   const q = new URLSearchParams(qs ?? "");
   const seg = path.split("/").filter(Boolean); // ["exploration","activity"]
   const m = method.toUpperCase();
+  if (m === "DELETE" && /^\/exploration\/findings\/[^/]+$/.test(path) && typeof body === "string" && body.trim()) {
+    const input: unknown = JSON.parse(body);
+    if (
+      input === null ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      Object.keys(input).some((key) => key !== "reason")
+    )
+      throw new Error("删除参数格式错误");
+  }
   const b = parseBody(body);
   return route(m, path, seg, q, b) as T;
 }
@@ -2713,8 +2723,19 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       throw new Error("finding not found in task");
     if (m !== "GET" && context && f.task_id !== context) throw new Error("来源任务漏洞只读");
     if (m === "DELETE") {
+      if (b.reason !== undefined && typeof b.reason !== "string") throw new Error("删除原因须为字符串");
+      const reason = String(b.reason ?? "").trim();
+      if (Array.from(reason).length > 2000) throw new Error("删除原因最多2000字符");
+      mockFindingDeletionFeedback.push({
+        finding_id: f.id,
+        task_id: f.task_id ?? null,
+        title: f.name || "",
+        vulnclass: f.vulnclass,
+        reason,
+        deleted_at: new Date().toISOString(),
+      });
       mockFindings.splice(mockFindings.indexOf(f), 1);
-      return { deleted: f.id };
+      return { deleted: true, id: f.id };
     }
     if (m === "PATCH") {
       if (typeof b.status === "string") f.status = b.status as typeof f.status;
@@ -3291,3 +3312,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     ? []
     : {};
 }
+
+export const mockFindingDeletionFeedback: {
+  finding_id: string;
+  task_id: string | null;
+  title: string;
+  vulnclass: string;
+  reason: string;
+  deleted_at: string;
+}[] = [];

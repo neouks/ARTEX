@@ -2429,15 +2429,49 @@ func (s *Server) deleteFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad finding id")
 		return
 	}
-	n, err := s.m.pg.DeleteFinding(id)
+	type deleteInput struct {
+		Reason json.RawMessage `json:"reason"`
+	}
+	var input *deleteInput
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32768))
+	decoder.DisallowUnknownFields()
+	decodeErr := decoder.Decode(&input)
+	if errors.Is(decodeErr, io.EOF) {
+		input = &deleteInput{}
+	} else if decodeErr != nil || input == nil {
+		writeErr(w, 400, "删除参数格式错误")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeErr(w, 400, "删除参数格式错误")
+		return
+	}
+	reasonText := ""
+	if len(input.Reason) > 0 && (string(input.Reason) == "null" || json.Unmarshal(input.Reason, &reasonText) != nil) {
+		writeErr(w, 400, "删除原因须为字符串")
+		return
+	}
+	reason, err := db.NormalizeFindingDeletionReason(reasonText)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	feedback, err := s.m.pg.DeleteFindingWithFeedback(id, reason)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if n == 0 {
+	if feedback == nil {
 		writeErr(w, 404, "finding not found")
 		return
 	}
+	if feedback.TaskID != nil {
+		if task := s.m.ResolveTask(strconv.FormatInt(*feedback.TaskID, 10)); task != nil && s.engine != nil && s.resolvedTaskStatus(task) == "running" {
+			task.NotifyFindingDeleted(feedback.ID)
+		}
+	}
+
 	writeJSON(w, 200, map[string]any{"deleted": true, "id": id})
 }
 

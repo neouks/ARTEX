@@ -153,13 +153,14 @@ func renderPlannerTodos(items []actool.Todo) string {
 //	"cancelled" — the human deleted intent IntentID (Detail = 删除原因). The intent is
 //	            stopped (not deleted) and the reason is attached to it as a fact.
 type TriggerEvent struct {
-	Kind     string
-	IntentID int64
-	Detail   string
-	Goals    []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
-	OldGoal  string   // Kind=="goal_edited" 专用：修改前的目标文本
-	NewGoal  string   // Kind=="goal_edited" 专用：修改后的目标文本
-	Hints    []string // Kind=="hint" 专用：本次 add_hint 新增的提示文本（1 条或多条）
+	FeedbackID int64 // finding_deleted: persisted task-local feedback identity only
+	Kind       string
+	IntentID   int64
+	Detail     string
+	Goals      []string // Kind=="goal" 专用：本次 set_goals 新增的目标文本（1 条或多条）
+	OldGoal    string   // Kind=="goal_edited" 专用：修改前的目标文本
+	NewGoal    string   // Kind=="goal_edited" 专用：修改后的目标文本
+	Hints      []string // Kind=="hint" 专用：本次 add_hint 新增的提示文本（1 条或多条）
 }
 
 // renderTriggers spells out the change(s) that fired this round: for a finished
@@ -174,6 +175,8 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 	b.WriteString("\n\n【本次触发本轮的实际变动（先看这里，再决定是否补方向）】：")
 	for _, ev := range evs {
 		switch ev.Kind {
+		case "finding_deleted":
+			fmt.Fprintf(&b, "\n用户删除了漏洞，反馈 #%d；参考本任务删除反馈，较早记录可用 list_finding_deletion_feedback 分页读取。", ev.FeedbackID)
 		case "goal":
 			if len(ev.Goals) == 1 {
 				b.WriteString(fmt.Sprintf("\n- 人（主 agent）新增了一个目标：%s —— 新的待达成目标，请据此补充探索方向（若尚无对应意图）。", ev.Goals[0]))
@@ -423,6 +426,15 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	feedback, feedbackErr := tsx.findingDeletionFeedbackPage(0, 20)
+	if feedbackErr != nil {
+		return false, "", feedbackErr
+	}
+	sysBody += "\n" + findingDeletionFeedbackRule
+	if len(feedback.Groups) > 0 {
+		raw, _ := json.Marshal(feedback)
+		sysBody += "\n本任务漏洞删除反馈：" + string(raw)
+	}
 	sysBody += "\n仅未知候选按需批量调用 check_target_access；已知不可用项本轮跳过，继续已授权方向。"
 	sysBody += "\n审批态势只附计数，需要管理详情时才按需分页调用 list_task_assets。管理可见不等于允许测试：只有 can_schedule=true 的当前已授权资产可下发；pending/blocked/revoked 仅供解释，不要每轮查询全部状态。"
 	if p.wantConstraints() {

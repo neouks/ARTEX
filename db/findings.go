@@ -660,13 +660,27 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 // list, the per-task 发现 Tab, and the exploration graph alike. Deleting the node
 // cascades its edges + node_assets and nulls any activity referencing it. Returns
 // rows affected (0 = no finding with that id).
-func (d *DB) DeleteFinding(id int64) (n int64, err error) {
+func (d *DB) DeleteFinding(id int64) (int64, error) {
+	n, _, err := d.deleteFinding(id, nil)
+	return n, err
+}
+
+func (d *DB) deleteFinding(id int64, reason *string) (n int64, feedback *FindingDeletionFeedback, err error) {
 	err = d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
 		if err := LockFindingEvidenceTx(tx, id, nil); err != nil {
 			if errors.Is(err, ErrFindingNotFound) {
 				return nil
 			}
 			return err
+		}
+		if reason != nil {
+			feedback = &FindingDeletionFeedback{}
+			if err := tx.QueryRow(`INSERT INTO finding_deletion_feedback(finding_id,task_id,title,vulnclass,reason)
+ SELECT f.id,t.id,left(f.name,500),left(f.vulnclass,200),$2 FROM findings f
+ LEFT JOIN tasks t ON t.id=f.task_id AND t.deleted_at IS NULL WHERE f.id=$1
+ RETURNING id,finding_id,task_id,title,vulnclass,reason,deleted_at`, id, *reason).Scan(&feedback.ID, &feedback.FindingID, &feedback.TaskID, &feedback.Title, &feedback.VulnClass, &feedback.Reason, &feedback.DeletedAt); err != nil {
+				return err
+			}
 		}
 		var nodeID sql.NullInt64
 		if err := tx.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID); err != nil {
