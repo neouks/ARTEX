@@ -21,7 +21,9 @@ import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { Activity } from "@/lib/types";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ApprovalDetail } from "@/components/approval-records";
+import type { Activity, InterceptPending } from "@/lib/types";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
 const workerColors = [
@@ -204,6 +206,10 @@ function InterceptCard({
   const [detail, setDetail] = React.useState<Record<string, unknown> | null>(null);
   const [decided, setDecided] = React.useState<"allowed" | "denied" | "timeout" | null>(null);
   const [deciding, setDeciding] = React.useState(false);
+  const [expanded, setExpanded] = React.useState(false);
+  const [pending, setPending] = React.useState<InterceptPending | null>(null);
+  const [statusError, setStatusError] = React.useState("");
+  const [retry, setRetry] = React.useState(0);
 
   // Load persisted detail JSON + check the real current status from the backend
   // so that a page refresh shows the already-decided state instead of re-offering buttons.
@@ -218,17 +224,20 @@ function InterceptCard({
     return () => { live = false; };
   }, [step.seq, getDetail]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry explicitly reloads the same approval after a failed request.
   React.useEffect(() => {
     if (!pendingId) return;
     let live = true;
     api.interceptGetOne(pendingId)
       .then((p) => {
         if (!live) return;
+        setPending(p);
+        setStatusError("");
         if (p.status !== "pending") setDecided(p.status as "allowed" | "denied" | "timeout");
       })
-      .catch(() => {/* ignore */});
+      .catch((error) => { if (live) setStatusError((error as Error).message || "审批详情加载失败"); });
     return () => { live = false; };
-  }, [pendingId]);
+  }, [pendingId, retry]);
 
   async function decide(decision: "allowed" | "denied") {
     if (step.inherited || !pendingId || deciding) return;
@@ -248,9 +257,11 @@ function InterceptCard({
     ? JSON.stringify(detail.input).slice(0, 200)
     : null;
 
+  const row = pending ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" } : null;
+
   return (
     <div className="my-2 rounded-lg border border-amber-400/50 bg-amber-50/40 dark:bg-amber-950/15 p-3 text-xs">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-2 min-w-0">
           <ShieldAlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
           <div className="min-w-0 space-y-0.5">
@@ -306,6 +317,34 @@ function InterceptCard({
           </div>
         )}
       </div>
+      {pendingId ? (
+        <Collapsible open={expanded} onOpenChange={setExpanded} className="mt-2 min-w-0">
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" aria-label={expanded ? "收起审批详情" : "展开审批详情"}>
+              {expanded ? <ChevronDown data-icon="inline-start" /> : <ChevronRight data-icon="inline-start" />}
+              {expanded ? "收起审批详情" : "展开审批详情"}
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            {expanded && row ? (
+              <ApprovalDetail
+                row={row}
+                busy={deciding}
+                decide={(_id, decision) => decide(decision)}
+                revision={retry}
+                readOnly={Boolean(step.inherited)}
+                defaultExpanded
+                onResolved={setDecided}
+              />
+            ) : statusError ? (
+              <div className="flex flex-wrap items-center gap-2 p-3" role="alert">
+                <span>{statusError}</span>
+                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试详情</Button>
+              </div>
+            ) : <p className="p-3 text-muted-foreground">正在加载审批详情…</p>}
+          </CollapsibleContent>
+        </Collapsible>
+      ) : null}
     </div>
   );
 }
@@ -377,7 +416,7 @@ function ToolBlock({
     return () => {
       live = false;
     };
-  }, [open, detailKey, use, result, getDetail]);
+  }, [open, detailKey, use, result, getDetail, toolName]);
 
   React.useEffect(() => {
     if (!focused || !open || !detail || loadError || !root.current) return;
@@ -392,7 +431,7 @@ function ToolBlock({
   return (
     <div ref={root} data-source-call={focused || undefined} className={cn("text-xs", focused && "rounded-md border border-primary bg-accent/30 p-2")}>
       {focused && <Badge variant="outline">来源调用</Badge>}
-      <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
+      <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </span>
@@ -438,7 +477,7 @@ function MessageBlock({
   React.useEffect(() => {
     if (!open || loadedKey.current === detailKey) return;
     let live = true;
-    Promise.all(
+    void Promise.all(
       group.steps.map((s) =>
         getDetail(s.seq)
           .then((d) => d || s.summary)
@@ -460,7 +499,7 @@ function MessageBlock({
 
   return (
     <div className="text-xs">
-      <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
+      <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </span>

@@ -425,6 +425,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		situational += "\n\n【任务终局收尾（本轮特殊指令，覆盖上面的常规规划流程）】：" + resolveTaskTimeoutWrapup("planner")
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
+	ctx = withTaskReviewContext(ctx, taskID, ts, taskDir, nil)
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
 	feedback, feedbackErr := tsx.findingDeletionFeedbackPage(0, 20)
 	if feedbackErr != nil {

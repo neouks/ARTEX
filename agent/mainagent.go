@@ -133,6 +133,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		return "", err
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
+	ctx = withTaskReviewContext(ctx, taskID, ts, mainDir, nil)
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
 	runProxyAddr := TaskProxyAddr(m.proxyAddr, m.proxyCACert, taskID, guard.AssetSkipScope(ctx))
 	opts := agentcore.Options{
