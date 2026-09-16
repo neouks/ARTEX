@@ -60,8 +60,8 @@ type CompressConfig struct {
 	MaxSummaryLength int
 }
 
-// Config is the full knob set. DefaultConfig supplies values converged on
-// upstream over months of production use; changing one is rarely a good idea.
+// Config is the full knob set. Defaults pace compression by window size,
+// with absolute bounds to avoid excessive nudges at either extreme.
 type Config struct {
 	ModelContextLimit int
 
@@ -100,9 +100,9 @@ func DefaultConfig(modelContextLimit int) Config {
 			MinContextLimitPct:    0.45,
 			EmergencyThresholdPct: 0.95,
 			GrowthRatio:           0.05,
-			GrowthFloor:           50_000,
+			GrowthFloor:           2_000,
 			GrowthCap:             50_000,
-			MinGrowthFloor:        20_000,
+			MinGrowthFloor:        1_000,
 			MinGrowthRatio:        0.45,
 			Tier2GrowthMultiplier: 1.5,
 		},

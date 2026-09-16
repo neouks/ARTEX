@@ -160,3 +160,28 @@ func TestReactiveRefusesWhenItCannotShrink(t *testing.T) {
 		t.Fatal("disarmed but still reporting a floor")
 	}
 }
+
+func TestOverflowLearningSurvivesRetries(t *testing.T) {
+	c := &Compactor{sess: simSession(t, 200000)}
+	for _, tc := range []struct {
+		message string
+		want    int
+	}{
+		{"prompt is too long: 215000 tokens > 128000 maximum", 128000},
+		{"error: context_length_exceeded", 128000},
+		{"maximum context length is 64000 tokens", 64000},
+		{"maximum context length is 256000 tokens", 64000},
+	} {
+		if !c.IsOverflow(errors.New(tc.message)) {
+			t.Fatal("missed overflow")
+		}
+		c.overflow.arm(c.sess.Config().ModelContextLimit)
+		if got := c.overflow.armedFloor(); got != tc.want*95/100 {
+			t.Fatalf("%q: floor=%d", tc.message, got)
+		}
+	}
+	before := c.overflow.armedFloor()
+	if c.IsOverflow(errors.New("rate limit: limited to 10000 tokens per minute")) || c.overflow.armedFloor() != before {
+		t.Fatal("learned from a non-context error")
+	}
+}

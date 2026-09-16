@@ -236,9 +236,14 @@ func (s *Session) nudgeAllowed(tokenCount int) bool {
 		return true
 	}
 	floor := noa.NudgeGrowthFloor(s.cfg)
+	// Retry once after growth, not a fresh batch of MaxCompressAttempts. A
+	// repeatedly uncooperative model backs off, while a transient mistake gets
+	// another chance within one cadence step. Success/user input resets this.
+	ceiling := max(floor, s.cfg.ModelContextLimit/4)
+	for i := s.cfg.MaxCompressAttempts; i < s.attempts && floor < ceiling; i++ {
+		floor = min(ceiling, floor*2)
+	}
 	if tokenCount-s.suppressedAtTokens >= floor {
-		s.attempts = 0
-		s.suppressedAtTokens = 0
 		return true
 	}
 	return false
@@ -407,7 +412,7 @@ func (s *Session) recordParseFailure() {
 // lock.
 func (s *Session) noteFailedAttempt() {
 	s.attempts++
-	if s.attempts == s.cfg.MaxCompressAttempts {
+	if s.attempts >= s.cfg.MaxCompressAttempts {
 		s.suppressedAtTokens = s.lastTokenCount
 	}
 }

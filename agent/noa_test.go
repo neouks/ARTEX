@@ -3,16 +3,16 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/llm"
 )
 
 func TestNoaSwitchAndArchiveFallback(t *testing.T) {
@@ -111,4 +111,20 @@ func TestNoaViewRefreshesTaskAssetAuthorization(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("mutated audit/noa view")
 	}
+}
+
+func TestNoaUsesConfiguredModelWindow(t *testing.T) {
+	opts := agentcore.Options{Compaction: &compaction.Config{ContextWindow: 40000}}
+	enableNoa(&opts, func() bool { return true }, t.TempDir(), "small-window", nil)
+	var history []llm.Message
+	for i := 0; i < 20; i++ {
+		history = append(history, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.TextBlock(fmt.Sprintf("message %d: %s", i, strings.Repeat("history ", 625)))}})
+	}
+	view := opts.Compactor.(harness.ContextView).View(t.Context(), history)
+	for _, m := range view {
+		if strings.Contains(m.Text(), "HOW TO COMPRESS") {
+			return
+		}
+	}
+	t.Fatal("40k window did not request compression; noa may still be using its 200k fallback")
 }

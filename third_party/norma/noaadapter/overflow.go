@@ -24,7 +24,7 @@ func (o *overflowState) arm(configured int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.armed = true
-	if o.learnedWindow == 0 {
+	if o.learnedWindow == 0 || configured > 0 && configured < o.learnedWindow {
 		o.learnedWindow = configured
 	}
 }
@@ -53,12 +53,15 @@ func (o *overflowState) learn(window int) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.learnedWindow = window
+	if o.learnedWindow == 0 || window < o.learnedWindow {
+		o.learnedWindow = window
+	}
 }
 
 // windowPatterns extract the real context window from an overflow error.
 // Providers phrase this several ways; each pattern captures the limit.
 var windowPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)prompt is too long:.*?>\s*(\d+)\s*(?:tokens?\s*)?maximum`),
 	regexp.MustCompile(`(?i)maximum context length is (\d+)`),
 	regexp.MustCompile(`(?i)context (?:window|length) (?:of|is) (\d+)`),
 	regexp.MustCompile(`(?i)max(?:imum)?[ _-]?tokens?[^0-9]{0,20}(\d{4,})`),

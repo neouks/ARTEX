@@ -260,3 +260,21 @@ func TestEnableAppendsResidentPromptOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestSuppressionRetryBacksOffWithoutResettingFailures(t *testing.T) {
+	s := simSession(t, 40000)
+	floor := noa.NudgeGrowthFloor(s.cfg)
+	s.attempts = s.cfg.MaxCompressAttempts
+	s.suppressedAtTokens = 30000
+	if s.nudgeAllowed(30000+floor-1) || !s.nudgeAllowed(30000+floor) {
+		t.Fatal("initial retry cadence")
+	}
+	s.lastTokenCount = 30000 + floor
+	s.noteFailedAttempt()
+	if s.attempts != s.cfg.MaxCompressAttempts+1 {
+		t.Fatal("growth discarded failures")
+	}
+	if s.nudgeAllowed(s.lastTokenCount+floor) || !s.nudgeAllowed(s.lastTokenCount+2*floor) {
+		t.Fatal("failed retry did not back off")
+	}
+}
