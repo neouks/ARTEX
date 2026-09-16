@@ -209,8 +209,14 @@ func hostOnly(hostport string) string {
 	return hostport
 }
 
-// ProxyAddr returns the address workers should set as HTTP(S)_PROXY.
-func (t *Traffic) ProxyAddr() string { return "http://127.0.0.1" + t.addr }
+// ProxyAddr returns the address workers should set as HTTP(S)_PROXY. A bare
+// ":port" means "bind all interfaces" (legacy default), so map it to loopback.
+func (t *Traffic) ProxyAddr() string {
+	if strings.HasPrefix(t.addr, ":") {
+		return "http://127.0.0.1" + t.addr
+	}
+	return "http://" + t.addr
+}
 
 // SetAssetPolicyStore enables task authorization at the recording proxy edge.
 func (t *Traffic) SetAssetPolicyStore(store *db.AssetStore) { t.assets = store }
