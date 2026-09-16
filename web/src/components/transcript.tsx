@@ -422,7 +422,9 @@ function ToolBlock({
   }, [open, detailKey, use, result, getDetail, toolName]);
 
   React.useEffect(() => {
-    if (!focused || !open || !detail || loadError || !root.current) return;
+    // A failed detail request is also a settled view: keep its retry control
+    // visible at the source call instead of leaving it buried in old history.
+    if (!focused || !open || (!detail && !loadError) || !root.current) return;
     if (onLocated) {
       const frame = requestAnimationFrame(() => {
         if (root.current) onLocated(root.current);

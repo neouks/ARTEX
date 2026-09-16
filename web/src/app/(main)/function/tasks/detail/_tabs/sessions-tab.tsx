@@ -1547,7 +1547,9 @@ export function SessionsTab({
   );
 
   // Keep the SSE dispatcher's notion of the active session current, and lazily load
-  // + clear unread whenever the active session changes.
+  // + clear unread whenever the active session changes. Recheck after boot resolves
+  // the current segment: it releases the initial main:0 reservation, which may
+  // still be selected by an approval link into an older segment.
   // biome-ignore lint/correctness/useExhaustiveDependencies: cache updates must not reactivate the current session.
   React.useEffect(() => {
     activeKeyRef.current = activeKey;
@@ -1557,7 +1559,7 @@ export function SessionsTab({
     } else if (st.unread) {
       patchStore(activeKey, (s) => ({ ...s, unread: 0 }));
     }
-  }, [activeKey]);
+  }, [activeKey, currentSeg]);
 
   const focusKey = approvalFocus.state?.source?.session;
   const loadFocusPage = React.useCallback(
