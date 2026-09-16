@@ -7,8 +7,8 @@
 - 原 `main` 的已跟踪及未跟踪改动已保存为 `8c1426b`（资产审批来源定位、排序等）。
 - 备份引用：`codex/backup-before-official-sync-20260916` → `8c1426b`。
 - 同步分支：`codex/sync-official-20260916`；隔离工作区：`/tmp/artex-sync-official-20260916`。
-- 功能整合提交：`6aff823`；随后文档提交为交付端点。
-- 当前 `main` 保持检查点，尚未快进：等待确认是否接受以下官方 noa 基线失败。
+- 功能整合提交：`6aff823`；noa 修复提交：`65b2c68`；随后文档提交为交付端点。
+- 用户随后要求修复 noa：原 4 项官方失败已修复，完成最终回归后将 `main` 快进到本报告所在提交。
 - 不推送远端、不重写历史。未引入 `f4d89c6`、`8ee8907` 的补丁。
 
 ## 逐项对应
@@ -56,7 +56,7 @@ Go 工具链命令使用 `GOSUMDB=sum.golang.org`。测试 PostgreSQL 使用专�
 | `go test ./agent -count=1`（独立库，最终适配后） | 通过：无任务工具保护、审批复核/恢复、删除反馈、来源登记、noa 开关/回退/标签授权刷新。 |
 | `go test ./server -count=1`（全新独立库，最终适配后） | 通过：分页、来源历史接口、删除反馈等。 |
 | `go test ./... -run '^$'` | 全仓库编译通过。 |
-| `go -C third_party/norma test ./...` | agentcore、harness、llm、tool 等通过；noa / noaadapter 有下述 4 项官方既有失败。 |
+| `go -C third_party/norma test ./...` | 全部通过（含 noa / noaadapter）；原 4 项官方失败已修复，详见下文。 |
 | `tsc --noEmit -p web/tsconfig.json` | 通过。 |
 | `npx tsx --test src/lib/mock/*.test.ts` | 10/10 通过，包含分页、两类来源和删除反馈。 |
 | Chrome 无头浏览器 + mock | 默认未审批/最新优先、切换最早优先、点击资产来源、完整命令和结果展开、浏览器返回恢复排序通过；从动作审批来源链接跳转 Worker 会话，展开及居中通过，居中偏差约 0.03 px；无页面 JS 错误。 |
@@ -65,7 +65,7 @@ Go 工具链命令使用 `GOSUMDB=sum.golang.org`。测试 PostgreSQL 使用专�
 
 浏览器使用 webpack 开发模式：隔离工作区共享 node_modules 软链接位于 Turbopack 根目录之外，Turbopack 拒绝该路径；未为测试修改产品构建配置。浏览器测试使用 mock，未调用真实目标或 LLM。
 
-## 官方 norma v0.4.0 已知限制（未隐藏或跳过测试）
+## 官方 norma v0.4.0 初始失败与后续修复
 
 以下失败在未修改的 Go 模块缓存 `github.com/Autumn-27/norma@v0.4.0` 中同样复现，失败文本与本地一致：
 
@@ -74,7 +74,20 @@ Go 工具链命令使用 `GOSUMDB=sum.golang.org`。测试 PostgreSQL 使用专�
 3. `TestMostlyCompetentModelStaysBounded/seed11`：上述间隔使 40,000 窗口用量达到 48,201。
 4. `TestOverflowLearningIsWiredIn`：提供商报告的窗口上限尚未接入恢复逻辑。
 
-本次同步未调整官方 noa 调参或溢出学习算法，实验开关继续默认关闭。**不能将 norma 全量测试描述为全部通过，也未验证开启 noa 后的真实长会话效果。**其余主线功能与本地兼容回归通过；以上作为官方基线已知失败单独列示。
+用户要求修复后，已完成：
+
+- 提醒增长单位保留窗口的 5%，下限由 50,000 改为 2,000，上限仍为 50,000；提醒最小间隔由 20,000 改为 1,000，使小窗口可以在溢出前再次请求压缩。
+- 连续失败后的增长仅允许一次重试，不再重置整批尝试次数；重复拒绝时逐步增加间隔，最多为窗口的四分之一（或显式配置的最小间隔）。压缩成功及新用户输入继续重置失败记录，避免反复提醒不配合的模型。
+- 溢出检测接入真实窗口解析，兼容 `prompt is too long: … > … maximum`；未知格式保留已学习上限，后续重试不会扩大已知限制，也不会从非上下文错误学习。
+- ARTEX 将模型已配置的 ContextWindow 传给 noa，不再总是使用 200k 默认窗口。
+- 更新与旧默认常量绑定的单元测试，保留原 4 项失败测试；新增退避、跨重试窗口学习及 ARTEX 小窗口接入回归。未删除、跳过或放宽原 4 项失败断言。
+
+**最终 norma 全量测试全部通过。**默认关闭、集中归档、失败回退、本地授权刷新与删除反馈设计不变。Agent / 服务端使用独立测试库再次全量通过；新增溢出和退避相关竞态测试通过。未使用真实 LLM 长会话测试，本次长会话验证使用确定性模拟模型。
+
+- [修复后 norma 全量输出](upstream-sync-20260916/norma-fixed.log)
+- [最终 Agent 回归](upstream-sync-20260916/agent-fixed.log)
+- [最终服务端回归](upstream-sync-20260916/server-fixed.log)
+- [noa 竞态回归](upstream-sync-20260916/noa-race.log)
 
 - [本地 norma 全量输出](upstream-sync-20260916/norma-local.log)
 - [未修改官方 noa 输出](upstream-sync-20260916/norma-upstream.log)
