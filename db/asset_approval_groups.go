@@ -10,11 +10,12 @@ import (
 
 type TaskAssetApprovalGroup struct {
 	TaskAssetApproval
-	GroupKey    string   `json:"group_key"`
-	AssetIDs    []int64  `json:"asset_ids"`
-	RecordTypes []string `json:"record_types"`
-	Sources     []string `json:"sources"`
-	MixedState  bool     `json:"mixed_state"`
+	GroupKey    string        `json:"group_key"`
+	AssetIDs    []int64       `json:"asset_ids"`
+	RecordTypes []string      `json:"record_types"`
+	Sources     []string      `json:"sources"`
+	Origins     []AssetOrigin `json:"origins,omitempty"`
+	MixedState  bool          `json:"mixed_state"`
 }
 
 func approvalGroupKey(v TaskAssetApproval) string {
@@ -38,6 +39,10 @@ func approvalRank(v TaskAssetApproval) int {
 }
 func (s *AssetStore) ListTaskAssetApprovalGroups(taskID int64) ([]TaskAssetApprovalGroup, error) {
 	rows, err := s.ListTaskAssetApprovals(taskID)
+	if err != nil {
+		return nil, err
+	}
+	origins, err := s.approvalOrigins(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -69,8 +74,29 @@ func (s *AssetStore) ListTaskAssetApprovalGroups(taskID int64) ([]TaskAssetAppro
 		if approvalRank(g.TaskAssetApproval) != approvalRank(v) {
 			g.MixedState = true
 		}
+		createdAt := g.CreatedAt
+		if v.CreatedAt.Before(createdAt) {
+			createdAt = v.CreatedAt
+		}
 		if approvalRank(v) > approvalRank(g.TaskAssetApproval) {
 			g.TaskAssetApproval = v
+		}
+		g.CreatedAt = createdAt
+		for _, origin := range origins[fmt.Sprintf("%d:%d", v.SourceTaskID, v.AssetID)] {
+			found := false
+			for j := range g.Origins {
+				if g.Origins[j].ActivityID == origin.ActivityID {
+					g.Origins[j].AssetIDs = append(g.Origins[j].AssetIDs, v.AssetID)
+					if origin.CreatedAt.Before(g.Origins[j].CreatedAt) {
+						g.Origins[j].CreatedAt = origin.CreatedAt
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				g.Origins = append(g.Origins, origin)
+			}
 		}
 		if v.AssetID > 0 && !slices.Contains(g.AssetIDs, v.AssetID) {
 			g.AssetIDs = append(g.AssetIDs, v.AssetID)

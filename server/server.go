@@ -2776,11 +2776,42 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var items []db.Activity
-	var hasMore bool
+	var hasMore, hasNewer bool
+	anchor, after := int64(0), int64(0)
+	for name, target := range map[string]*int64{"around": &anchor, "after": &after} {
+		if raw := q.Get(name); raw != "" {
+			value, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || value <= 0 {
+				writeErr(w, 400, "bad "+name)
+				return
+			}
+			*target = value
+		}
+	}
+	if (anchor > 0 && after > 0) || ((anchor > 0 || after > 0) && before != 0) {
+		writeErr(w, 400, "conflicting cursors")
+		return
+	}
+	if (anchor > 0 || after > 0) && sourceTaskID > 0 {
+		writeErr(w, 404, "source activity unavailable; open the source task")
+		return
+	}
+	if limit < 1 {
+		writeErr(w, 400, "bad limit")
+		return
+	}
 	if sourceTaskID > 0 {
 		// Source sessions are readable only while the intent remains terminal. The
 		// DB query also removes model reasoning/accounting rows from inherited data.
 		items, hasMore, err = store.ActivityPageForTerminalIntent(*filter.NodeID, before, limit)
+	} else if anchor > 0 || after > 0 {
+		var window db.ActivityWindow
+		window, err = store.ActivityWindow(filter, anchor, after, limit)
+		items, hasMore, hasNewer = window.Items, window.HasOlder, window.HasNewer
+		if errors.Is(err, db.ErrActivityAnchor) {
+			writeErr(w, 404, "source activity unavailable")
+			return
+		}
 	} else {
 		items, hasMore, err = store.ActivityPage(filter, before, limit)
 	}
@@ -2799,11 +2830,17 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 	if len(items) > 0 {
 		earliest = items[0].ID
 	}
+	latest := after
+	if len(items) > 0 {
+		latest = items[len(items)-1].ID
+	}
 	writeJSON(w, 200, map[string]any{
 		"items":           activityDTOs(items),
 		"snapshot_cursor": snapshot,
 		"earliest_cursor": earliest,
 		"has_more":        hasMore,
+		"has_newer":       hasNewer,
+		"latest_cursor":   latest,
 	})
 }
 

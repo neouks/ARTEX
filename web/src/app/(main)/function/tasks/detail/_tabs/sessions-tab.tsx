@@ -1,6 +1,9 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { SourceTranscript } from "@/components/source-transcript";
 
 import {
   ArrowUpIcon,
@@ -528,6 +531,21 @@ export function SessionsTab({
   pendingIntercepts: InterceptApprovalRow[];
 }) {
   const [activeId, setActiveId] = React.useState(MAIN_ID);
+  const [sourceIntent, setSourceIntent] = React.useState<TaskNode | null>(null);
+  const [sourceSession, setSourceSession] = React.useState<Session | null>(null);
+  const route = useRouter();
+  const params = useSearchParams();
+  const focusSession = params.get("session") || "";
+  const focusSeq = Number(params.get("activity"));
+  const focused =
+    Number.isSafeInteger(focusSeq) && focusSeq > 0 && /^(main:\d+|plan|intent:[1-9]\d*)$/.test(focusSession);
+  const invalidFocus = (params.has("session") || params.has("activity")) && !focused;
+  const clearFocus = () => {
+    const next = new URLSearchParams(params);
+    next.delete("session");
+    next.delete("activity");
+    route.replace(`/function/tasks/detail?${next}`, { scroll: false });
+  };
   // Main-agent conversation segments (newest-first); currentSeg is the writable one.
   const [mainSegs, setMainSegs] = React.useState<{ seq: number; created_at: string }[]>([{ seq: 0, created_at: "" }]);
   const [currentSeg, setCurrentSeg] = React.useState(0);
@@ -1220,13 +1238,31 @@ export function SessionsTab({
       .finally(() => setLoadingOlderIntents(false));
   }, [taskId, intents, olderIntents, loadingOlderIntents]);
 
+  React.useEffect(() => {
+    if (!focused || !focusSession.startsWith("intent:")) return;
+    let alive = true;
+    const id = focusSession.slice(7);
+    void api
+      .intentsPage(taskId, Number(id) + 1, 1)
+      .then((page) => {
+        if (alive) setSourceIntent(page.items.find((n) => n.id === id) ?? null);
+      })
+      .catch(() => {
+        /* The history endpoint reports an unavailable source. */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [taskId, focused, focusSession]);
+
   // Combined, de-duplicated worker list (newest first page + older loaded pages).
   const allIntents = React.useMemo(() => {
     const byId = new Map<string, TaskNode>();
+    if (sourceIntent) byId.set(sourceIntent.id, sourceIntent);
     for (const n of olderIntents) byId.set(n.id, n);
     for (const n of intents) byId.set(n.id, n); // fresh poll wins over older snapshot
     return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
-  }, [intents, olderIntents]);
+  }, [intents, olderIntents, sourceIntent]);
   const intentAssetsByID = React.useMemo(() => {
     const grouped = new Map<string, IntentAsset[]>();
     for (const asset of [...intentAssets, ...olderIntentAssets]) {
@@ -1423,7 +1459,31 @@ export function SessionsTab({
     system: sessions.filter((s) => s.role === "system"),
   };
 
-  const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
+  const focusedSession: Session | undefined = focused
+    ? sessions.find((s) => keyForSession(s) === focusSession) ||
+      (focusSession === "plan"
+        ? PLANNER_SESSION
+        : focusSession.startsWith("main:")
+          ? {
+              ...MAIN_SESSION,
+              id: mainSessionId(Number(focusSession.split(":")[1])),
+              seg: Number(focusSession.split(":")[1]),
+              title: mainSessionTitle(Number(focusSession.split(":")[1])),
+            }
+          : {
+              id: focusSession.split(":")[1],
+              role: "worker",
+              intent_id: focusSession.split(":")[1],
+              title: `Worker · 意图 #${focusSession.split(":")[1]}`,
+              status: "done",
+              live: false,
+              last_activity: "",
+            })
+    : undefined;
+  const active =
+    focusedSession ??
+    sessions.find((s) => s.id === activeId) ??
+    (sourceSession?.id === activeId ? sourceSession : MAIN_SESSION);
   const side = useSideQuestions(
     active.role === "mainagent"
       ? `/api/tasks/${taskId}/chat`
@@ -1585,7 +1645,7 @@ export function SessionsTab({
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, activeId, loadEarlier]);
+  }, [viewport, activeId, loadEarlier, focused]);
   // open/switch a session → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: activeId intentionally scrolls a newly selected session.
   React.useLayoutEffect(() => {
@@ -1594,14 +1654,14 @@ export function SessionsTab({
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
-  }, [activeId, viewport]);
+  }, [activeId, viewport, focused]);
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: activity growth intentionally drives live-edge scrolling.
   React.useLayoutEffect(() => {
     if (!atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [activity, viewport]);
+  }, [activity, viewport, focused]);
   // Lazy detail loads (AnswerBlock / ToolBlock / Markdown) grow the content AFTER the
   // activity array settles, WITHOUT changing its reference — so the layout effects
   // above never re-fire and a freshly opened session would leave its last message
@@ -1621,7 +1681,7 @@ export function SessionsTab({
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [activeId, viewport]);
+  }, [activeId, viewport, focused]);
 
   function stop() {
     if (stopping) return;
@@ -1918,11 +1978,12 @@ export function SessionsTab({
                         <SessionItem
                           key={s.id}
                           s={s}
-                          active={s.id === activeId}
+                          active={s.id === active.id}
                           displayTitle={meta?.title ?? s.title}
                           hasPending={hasPendingForSession(s)}
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => {
+                            if (focused || invalidFocus) clearFocus();
                             setActiveId(s.id);
                             setListOpen(false); // 手机端选完即收起，把高度还给会话记录
                             setWorkerMessage("");
@@ -2117,48 +2178,71 @@ export function SessionsTab({
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
             <SessionToolCalls
-              key={`${taskId}:${activeKey}`}
+              key={`${taskId}:${activeKey}:${focused ? focusSeq : "latest"}`}
               base={`/exploration/tool-calls?${new URLSearchParams({ task: taskId, session: activeKey })}`}
               revision={toolCallRevision(activity, active.live)}
             >
-              <ScrollArea
-                type="auto"
-                className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
-              >
-                <div className="min-w-0 max-w-full p-4" ref={contentRef}>
-                  {activeState?.loadingMore && (
-                    <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                      加载更早历史…
-                    </div>
-                  )}
-                  {showLoader ? (
-                    <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                      加载活动流…
-                    </div>
-                  ) : activeState?.error ? (
-                    <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
-                      <CircleXIcon className="size-3.5" />
-                      加载失败：{activeState.error}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 px-2 text-xs"
-                        onClick={() => loadSession(activeKey)}
-                      >
-                        重试
-                      </Button>
-                    </div>
-                  ) : activity.length ? (
-                    <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
-                  ) : (
-                    <div className="pl-9 text-xs text-muted-foreground">
-                      {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
-                    </div>
-                  )}
-                </div>
-              </ScrollArea>
+              {invalidFocus ? (
+                <Alert variant="destructive">
+                  <AlertDescription>来源定位参数无效，请返回资产审批重新打开来源。</AlertDescription>
+                  <Button variant="outline" onClick={clearFocus}>
+                    返回会话
+                  </Button>
+                </Alert>
+              ) : focused ? (
+                <SourceTranscript
+                  key={`${taskId}:${focusSession}:${focusSeq}`}
+                  taskId={taskId}
+                  session={focusSession}
+                  anchor={focusSeq}
+                  intro={activity.find((step) => step.seq === -1 && step.kind === "intent")}
+                  onLatest={() => {
+                    setSourceSession(active);
+                    setActiveId(active.id);
+                    clearFocus();
+                    loadSession(activeKey);
+                  }}
+                />
+              ) : (
+                <ScrollArea
+                  type="auto"
+                  className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+                >
+                  <div className="min-w-0 max-w-full p-4" ref={contentRef}>
+                    {activeState?.loadingMore && (
+                      <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                        加载更早历史…
+                      </div>
+                    )}
+                    {showLoader ? (
+                      <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                        加载活动流…
+                      </div>
+                    ) : activeState?.error ? (
+                      <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
+                        <CircleXIcon className="size-3.5" />
+                        加载失败：{activeState.error}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-xs"
+                          onClick={() => loadSession(activeKey)}
+                        >
+                          重试
+                        </Button>
+                      </div>
+                    ) : activity.length ? (
+                      <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
+                    ) : (
+                      <div className="pl-9 text-xs text-muted-foreground">
+                        {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
+                      </div>
+                    )}
+                  </div>
+                </ScrollArea>
+              )}
             </SessionToolCalls>
             {isMain ? (
               <div className="border-t p-3">

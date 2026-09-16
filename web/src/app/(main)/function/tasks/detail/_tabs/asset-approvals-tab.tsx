@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { useRouter, useSearchParams } from "next/navigation";
+
 import { CheckIcon, CircleAlertIcon, RefreshCwIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
 import { toast } from "sonner";
 
@@ -21,6 +23,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -28,7 +37,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { taskAssetSourceLabel } from "@/lib/task-assets";
-import type { Task, TaskAssetApproval } from "@/lib/types";
+import type { AssetOrigin, Task, TaskAssetApproval } from "@/lib/types";
 
 type ApprovalFilter = "all" | "pending" | "approved" | "revoked" | "blocked";
 
@@ -78,7 +87,44 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
   }, []);
   const [task, setTask] = React.useState<Task | null>(null);
   const [items, setItems] = React.useState<TaskAssetApproval[]>([]);
-  const [filter, setFilter] = React.useState<ApprovalFilter>("all");
+  const [filter, setFilter] = React.useState<ApprovalFilter>("pending");
+  const [sort, setSort] = React.useState("desc");
+  const router = useRouter();
+  const viewToken = useSearchParams().get("approval_view");
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const restoreRef = React.useRef<{ row: string; top: number } | null>(null);
+  React.useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(`asset-approvals:${taskId}`) || "null");
+      if (saved && viewToken && saved.token === viewToken) {
+        if (["all", "pending", "approved", "revoked", "blocked"].includes(saved.filter)) setFilter(saved.filter);
+        if (["asc", "desc"].includes(saved.sort)) setSort(saved.sort);
+        restoreRef.current = saved;
+      }
+    } catch {
+      /* Optional navigation state. */
+    }
+  }, [taskId, viewToken]);
+  const openOrigin = (origin: AssetOrigin, row: string) => {
+    const el = rootRef.current?.querySelector(`[data-approval-key="${CSS.escape(row)}"]`);
+    const token = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    try {
+      sessionStorage.setItem(
+        `asset-approvals:${taskId}`,
+        JSON.stringify({ token, filter, sort, row, top: el?.getBoundingClientRect().top ?? 0 }),
+      );
+    } catch {
+      /* Navigation still works when session storage is unavailable. */
+    }
+    const back = new URL(window.location.href);
+    back.searchParams.set("tab", "asset-approvals");
+    back.searchParams.set("approval_view", token);
+    window.history.replaceState(window.history.state, "", back);
+    router.push(
+      `/function/tasks/detail?${new URLSearchParams({ id: String(origin.task_id), tab: "sessions", session: origin.session, activity: String(origin.activity_id) })}`,
+      { scroll: false },
+    );
+  };
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
   const [loaded, setLoaded] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -129,13 +175,38 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
 
   const visible = React.useMemo(
     () =>
-      items.filter((item) => {
-        if (filter === "all") return true;
-        if (filter === "blocked") return item.blocked;
-        return !item.blocked && item.approval_state === filter;
-      }),
-    [filter, items],
+      items
+        .filter((item) => {
+          if (filter === "all") return true;
+          if (filter === "blocked") return item.blocked;
+          return !item.blocked && item.approval_state === filter;
+        })
+        .sort((a, b) => {
+          const at = Date.parse(a.created_at),
+            bt = Date.parse(b.created_at);
+          if (Number.isFinite(at) !== Number.isFinite(bt)) return Number.isFinite(at) ? -1 : 1;
+          if (Number.isFinite(at) && at !== bt) return sort === "desc" ? bt - at : at - bt;
+          return (a.group_key || `${a.source_task_id}:${a.asset_id}`).localeCompare(
+            b.group_key || `${b.source_task_id}:${b.asset_id}`,
+          );
+        }),
+    [filter, items, sort],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: restore after the filtered/sorted rows are rendered.
+  React.useEffect(() => {
+    if (!loaded || !restoreRef.current) return;
+    const saved = restoreRef.current;
+    const frame = requestAnimationFrame(() => {
+      const row = rootRef.current?.querySelector(`[data-approval-key="${CSS.escape(saved.row)}"]`);
+      if (!row) return;
+      row.scrollIntoView({ block: "center" });
+      let parent = row.parentElement;
+      while (parent && parent.scrollHeight <= parent.clientHeight) parent = parent.parentElement;
+      if (parent) parent.scrollTop += row.getBoundingClientRect().top - saved.top;
+      restoreRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loaded, visible]);
   const selectableIDs = visible.filter((item) => canSelectApproval(item)).map((item) => item.asset_id);
   const selectedVisible = selectableIDs.filter((id) => selected.has(id));
   const allSelected = selectableIDs.length > 0 && selectedVisible.length === selectableIDs.length;
@@ -308,7 +379,11 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
               );
             }
             return (
-              <TableRow key={rowKey} data-state={selected.has(item.asset_id) ? "selected" : undefined}>
+              <TableRow
+                key={rowKey}
+                data-approval-key={item.group_key || rowKey}
+                data-state={selected.has(item.asset_id) ? "selected" : undefined}
+              >
                 <TableCell>
                   <Checkbox
                     checked={selected.has(item.asset_id)}
@@ -350,6 +425,42 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                         (item.source ? taskAssetSourceLabel(item.source) : "—")}
                     </span>
                     <span className="text-muted-foreground">{item.source_summary || "—"}</span>
+                    {item.origins?.length === 1 ? (
+                      <Button
+                        variant="link"
+                        size="xs"
+                        className="justify-start px-0"
+                        disabled={!item.origins[0].available}
+                        onClick={() => openOrigin(item.origins![0], item.group_key || rowKey)}
+                      >
+                        {item.origins[0].available ? "来源 · 查看原始调用" : "来源记录已删除或不可访问"}
+                      </Button>
+                    ) : item.origins?.length ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="link" size="xs" className="justify-start px-0">
+                            来源 · {item.origins.length} 次登记
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent>
+                          <DropdownMenuGroup>
+                            {item.origins.map((origin) => (
+                              <DropdownMenuItem
+                                key={origin.activity_id}
+                                disabled={!origin.available}
+                                onSelect={() => openOrigin(origin, item.group_key || rowKey)}
+                              >
+                                {formatTime(origin.created_at)} · 资产{" "}
+                                {origin.asset_ids.map((id) => `#${id}`).join(", ")}
+                                {!origin.available && " · 来源不可用"}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : item.source === "agent" || item.source_node_id ? (
+                      <span className="text-muted-foreground">历史记录无精确来源</span>
+                    ) : null}
                     {item.inherited ? (
                       <span className="text-muted-foreground">来源任务 #{item.source_task_id} · 状态只读</span>
                     ) : null}
@@ -385,7 +496,7 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
   }
 
   return (
-    <div className="flex min-h-0 flex-col gap-4">
+    <div ref={rootRef} className="flex min-h-0 flex-col gap-4">
       {task && (
         <AssetApprovalTemplateField
           value={task.asset_approval_template ?? "explicit_targets"}
@@ -429,6 +540,17 @@ export function AssetApprovalsTab({ taskId }: { taskId: string }) {
                 <SelectItem value="pending">未审批 {counts.pending}</SelectItem>
                 <SelectItem value="revoked">已撤回 {counts.revoked}</SelectItem>
                 <SelectItem value="blocked">已封禁 {counts.blocked}</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Select value={sort} onValueChange={setSort}>
+            <SelectTrigger size="sm" className="w-52" aria-label="按登记时间排序">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="desc">登记时间：最新优先</SelectItem>
+                <SelectItem value="asc">登记时间：最早优先</SelectItem>
               </SelectGroup>
             </SelectContent>
           </Select>

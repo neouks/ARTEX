@@ -408,11 +408,16 @@ func readTool(name, desc string, schema map[string]any, run func(context.Context
 	})
 }
 
+type toolUseContextKey struct{}
+
 func writeTool(name, desc string, schema map[string]any, run func(context.Context, json.RawMessage) (actool.Result, error)) actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name: name, Description: desc, Schema: schema,
 		Permissions: func(context.Context, json.RawMessage, acperm.Context) acperm.Decision { return acperm.Allowed() },
-		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		Run: func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
+			if tc != nil {
+				ctx = context.WithValue(ctx, toolUseContextKey{}, tc.ToolUseID)
+			}
 			return run(ctx, in)
 		},
 	})

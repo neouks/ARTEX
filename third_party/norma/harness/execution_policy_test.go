@@ -37,7 +37,10 @@ func TestExecutionPolicyResultAndPermissionEdges(t *testing.T) {
 					d.UpdatedInput = json.RawMessage(`{"limit":"bad"}`)
 				}
 				return d
-			}, Run: func(_ context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
+			}, Run: func(_ context.Context, in json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
+				if tc == nil || tc.ToolUseID != "id" {
+					t.Fatalf("lost invocation context: %+v", tc)
+				}
 				calls++
 				if scenario == "run_error" {
 					return tool.Result{}, errors.New("synthetic error")

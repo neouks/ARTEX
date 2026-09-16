@@ -234,7 +234,11 @@ function TaskDetailInner() {
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState(() =>
-    ["findings", "retests"].includes(searchParams.get("tab") ?? "") ? "findings" : "sessions",
+    searchParams.get("tab") === "retests"
+      ? "findings"
+      : TABS.some((item) => item.value === searchParams.get("tab"))
+        ? searchParams.get("tab")!
+        : "sessions",
   );
   const { counts: unread, refresh: refreshNotifications, capture } = useTaskNotifications([id], "all");
   const activeTab = React.useRef(tab);
@@ -516,7 +520,6 @@ function TaskDetailInner() {
           <TabsContent value="intercept" className="mt-0">
             <InterceptTab taskId={id} />
           </TabsContent>
-
         </div>
       </NotificationReadContext.Provider>
     </Tabs>

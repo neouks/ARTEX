@@ -99,6 +99,7 @@ func (l *loop) execOne(toolCtx context.Context, settling bool, use llm.ContentBl
 	}
 
 	tc := &tool.ToolContext{
+		ToolUseID: use.ID,
 		ExecuteTool: func(_ context.Context, name string, input json.RawMessage) (tool.Result, error) {
 			if !slices.Contains(l.in.DeferredTools, name) || name == tool.ExecuteExtraToolName || name == tool.SearchExtraToolsName {
 				return tool.Errorf("Error: nested execution requires a registered deferred target"), nil

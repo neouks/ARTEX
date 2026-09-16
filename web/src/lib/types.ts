@@ -272,7 +272,18 @@ export interface Asset {
   block_reason?: string;
 }
 
+export interface AssetOrigin {
+  task_id: number;
+  session: string;
+  tool_use_id: string;
+  activity_id: number;
+  asset_ids: number[];
+  created_at: string;
+  available: boolean;
+}
+
 export interface TaskAssetApproval {
+  origins?: AssetOrigin[];
   group_key?: string;
   asset_ids?: number[];
   record_types?: string[];

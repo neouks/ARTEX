@@ -13,6 +13,7 @@ import {
   normalizeCompanyScopeValue,
 } from "../company-scope";
 import type {
+  AssetOrigin,
   Activity,
   ArchiveBatchItem,
   Asset,
@@ -147,6 +148,53 @@ type MockTaskAssetSource = Pick<
   | "block_reason"
 >;
 const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
+// Two explicit discovery fixtures exercise sorting and source navigation.
+const mockOrigins = new Map<number, AssetOrigin>();
+for (const [index, domain] of ["new-api.acme.com", "new-admin.acme.com"].entries()) {
+  const id = Math.max(...mockAssets.map((a) => a.id)) + 1;
+  const seq = Math.max(...mockActivity.map((a) => a.seq)) + 1;
+  const ts = `2026-07-26T04:0${index}:00Z`;
+  mockAssets.push({ id, type: "subdomain", domain, root_domain: "acme.com", task_ids: [1], last_seen: ts });
+  mockTaskAssetSources.set(JSON.stringify([D.tasks[0].id, id]), {
+    task_source: "agent",
+    task_source_summary: "主 Agent 通过 insert_assets 登记",
+    approval_state: "pending",
+  });
+  const call = `mock-insert-${id}`;
+  mockActivity.push(
+    {
+      seq,
+      worker: "mainagent",
+      main_seg: 0,
+      kind: "tool_use",
+      tool: "insert_assets",
+      tool_use_id: call,
+      ts,
+      summary: `insert_assets ${domain}`,
+      detail: JSON.stringify({ assets: [{ type: "subdomain", domain }] }),
+    },
+    {
+      seq: seq + 1,
+      worker: "mainagent",
+      main_seg: 0,
+      kind: "tool_result",
+      tool: "insert_assets",
+      tool_use_id: call,
+      ts,
+      summary: `已登记资产 #${id}`,
+      detail: JSON.stringify({ results: [{ id, type: "subdomain", approval_state: "pending" }] }),
+    },
+  );
+  mockOrigins.set(id, {
+    task_id: 1,
+    session: "main:0",
+    tool_use_id: call,
+    activity_id: seq,
+    asset_ids: [id],
+    created_at: ts,
+    available: true,
+  });
+}
 type MockTaskAssetBlock = {
   block_kind?: "manual" | "deleted";
   blocked_at: string;
@@ -692,6 +740,7 @@ function mockTaskAssetApprovals(taskID: string): TaskAssetApproval[] {
         source: source?.task_source ?? "legacy",
         source_summary: source?.task_source_summary ?? "由任务资产关联迁移",
         source_node_id: source?.task_source_node_id,
+        origins: mockOrigins.has(asset.id) ? [mockOrigins.get(asset.id)!] : undefined,
         source_task_id: owner.numericTaskID,
         inherited: owner.inherited,
         read_only: owner.inherited,
@@ -747,6 +796,8 @@ function mockApprovalGroups(taskID: string): TaskAssetApproval[] {
     const ids = [...new Set([...(old?.asset_ids ?? []), row.asset_id])];
     groups.set(groupKey, {
       ...(old && rank(old) >= rank(row) ? old : row),
+      created_at: old && Date.parse(old.created_at) < Date.parse(row.created_at) ? old.created_at : row.created_at,
+      origins: [...new Map([...(old?.origins ?? []), ...(row.origins ?? [])].map((o) => [o.activity_id, o])).values()],
       group_key: groupKey,
       asset_ids: ids,
       record_types: [...new Set([...(old?.record_types ?? []), ...(asset?.record_type ? [asset.record_type] : [])])],
@@ -1385,9 +1436,15 @@ function parseBody(body?: BodyInit | null): Record<string, unknown> {
 export async function mockHandle<T>(method: string, rawPath: string, body?: BodyInit | null): Promise<T> {
   advanceMockRetests();
   await delay();
-  const [path, qs] = rawPath.split("?");
+  let [path, qs] = rawPath.split("?");
   const q = new URLSearchParams(qs ?? "");
   const seg = path.split("/").filter(Boolean); // ["exploration","activity"]
+  const canonicalTask = (value: string) => [...mockTaskAssetIDs].find(([, id]) => String(id) === value)?.[0] || value;
+  if (q.has("task")) q.set("task", canonicalTask(q.get("task")!));
+  if (seg[0] === "tasks" && seg[1]) {
+    seg[1] = canonicalTask(seg[1]);
+    path = "/" + seg.join("/");
+  }
   const m = method.toUpperCase();
   if (m === "DELETE" && /^\/exploration\/findings\/[^/]+$/.test(path) && typeof body === "string" && body.trim()) {
     const input: unknown = JSON.parse(body);
@@ -2883,6 +2940,46 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const limit = Math.max(1, Number(q.get("limit") ?? 300));
     const items = mockActivity.filter((item) => item.seq > since).slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since };
+  }
+  if (path === "/exploration/activity/history") {
+    const session = q.get("session") || "main:0";
+    const events = (task === D.tasks[0].id ? mockActivity : [])
+      .filter((a) =>
+        session === "plan"
+          ? a.worker === "planner"
+          : session.startsWith("intent:")
+            ? a.intent_id === session.slice(7)
+            : a.worker === "mainagent" && (a.main_seg ?? 0) === Number(session.split(":")[1] || 0),
+      )
+      .sort((a, b) => a.seq - b.seq);
+    const around = Number(q.get("around")),
+      after = Number(q.get("after")),
+      before = Number(q.get("before")),
+      limit = Number(q.get("limit") || 200);
+    let items: Activity[];
+    if (around) {
+      const i = events.findIndex((a) => a.seq === around && a.kind === "tool_use");
+      if (i < 0) throw new Error("来源调用不存在或不可访问");
+      const next = events.findIndex(
+        (a, j) => j > i && a.kind === "tool_use" && a.tool_use_id === events[i].tool_use_id,
+      );
+      const pair = events.findIndex(
+        (a, j) =>
+          j > i && (next < 0 || j < next) && a.kind === "tool_result" && a.tool_use_id === events[i].tool_use_id,
+      );
+      items = events.slice(Math.max(0, i - Math.floor(limit / 2) + 1), Math.max(i, pair) + Math.floor(limit / 2));
+    } else if (after) items = events.filter((a) => a.seq > after).slice(0, limit);
+    else items = events.filter((a) => !before || a.seq < before).slice(-limit);
+    const first = items[0]?.seq ?? before,
+      last = items.at(-1)?.seq ?? after;
+    return {
+      items,
+      snapshot_cursor: mockActivity.at(-1)?.seq ?? 0,
+      earliest_cursor: first,
+      latest_cursor: last,
+      has_more: events.some((a) => a.seq < first),
+      has_newer: events.some((a) => a.seq > last),
+    };
   }
   if (seg[0] === "exploration" && seg[1] === "activity" && seg.length === 3) {
     const a = mockActivity.find((x) => x.seq === Number(seg[2]));

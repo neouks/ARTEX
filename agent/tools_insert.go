@@ -168,7 +168,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				}, "type"),
 			},
 		}, "assets"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
 				return actool.Errorf("insert_assets 未启用: AssetStore 未初始化"), nil
 			}
@@ -181,6 +181,11 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			// task_id 由程序权威赋值(worker: SetTaskID)，不接受模型传入——避免模型漏传/错传
 			// 导致资产未归任务或归错任务。无任务上下文的调用方(auto/pentest/chat)其 t.taskID=0。
 			taskID := t.taskID
+			toolUseID, _ := ctx.Value(toolUseContextKey{}).(string)
+			originWorker := RunInfoFrom(ctx).AgentKey
+			if originWorker == "" {
+				originWorker = t.worker
+			}
 
 			type result struct {
 				Index         int    `json:"index"`
@@ -202,7 +207,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				var id int64
 				var err error
 
-				id, err = t.as.RegisterAgentAsset(taskID, t.worker, t.ownerNode, func(scoped *db.AssetStore) (int64, error) {
+				id, err = t.as.RegisterAgentAssetWithOrigin(taskID, originWorker, t.ownerNode, toolUseID, func(scoped *db.AssetStore) (int64, error) {
 					switch typ {
 					case "root_domain":
 						id, err = scoped.UpsertRootDomain(db.UpsertRootDomainReq{

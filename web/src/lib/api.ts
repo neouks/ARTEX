@@ -738,16 +738,31 @@ export const api = {
   // snapshotCursor is the TASK-level max id at query time — open the task SSE at
   // since=snapshotCursor so history (id≤cursor) and the live tail (id>cursor) meet
   // gap-free. hasMore = still-older steps exist (drives scroll-up loading).
-  activityHistory: (task: string, session: string, before = 0, limit = 200) => {
+  activityHistory: (
+    task: string,
+    session: string,
+    before = 0,
+    limit = 200,
+    position?: { around?: number; after?: number },
+  ) => {
     const q = new URLSearchParams({ session, limit: String(limit) });
     if (task) q.set("task", task);
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; snapshot_cursor: number; earliest_cursor: number; has_more: boolean }>(
-      `/exploration/activity/history?${q.toString()}`,
-    ).then((r) => ({
+    if (position?.around) q.set("around", String(position.around));
+    if (position?.after) q.set("after", String(position.after));
+    return get<{
+      items: Activity[];
+      snapshot_cursor: number;
+      earliest_cursor: number;
+      latest_cursor: number;
+      has_newer: boolean;
+      has_more: boolean;
+    }>(`/exploration/activity/history?${q.toString()}`).then((r) => ({
       items: arr(r.items),
       snapshotCursor: r.snapshot_cursor ?? 0,
       earliestCursor: r.earliest_cursor ?? 0,
+      latestCursor: r.latest_cursor ?? 0,
+      hasNewer: !!r.has_newer,
       hasMore: !!r.has_more,
     }));
   },

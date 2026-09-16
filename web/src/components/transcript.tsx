@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -316,12 +317,20 @@ function ToolBlock({
   group,
   getDetail,
   showWorker,
+  focused,
+  onLocated,
 }: {
   group: Extract<Group, { type: "tool" }>;
   getDetail: (seq: number) => Promise<string>;
   showWorker?: boolean;
+  focused?: boolean;
+  onLocated?: (el: HTMLElement) => void;
 }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(!!focused);
+  const root = React.useRef<HTMLDivElement>(null);
+  const [loadError, setLoadError] = React.useState(false);
+  const [retry, setRetry] = React.useState(0);
+  React.useEffect(() => { if (focused) setOpen(true); }, [focused]);
   const [detail, setDetail] = React.useState<string | null>(null);
   // what we last loaded, keyed by the underlying step seqs. When the tool result
   // arrives after we expanded mid-run (command only), this key changes and the
@@ -344,19 +353,16 @@ function ToolBlock({
   const statusText = running ? "执行中…" : ok ? "✓" : "✕ 失败";
 
   // key over the seqs we'd load; changes when the result (or command) arrives.
-  const detailKey = `${use?.seq ?? ""}:${result?.seq ?? ""}`;
+  const detailKey = `${use?.seq ?? ""}:${result?.seq ?? ""}:${retry}`;
   React.useEffect(() => {
     if (!open || loadedKey.current === detailKey) return;
     let live = true;
     const segs: { label: string; seq: number }[] = [];
     if (use) segs.push({ label: "命令", seq: use.seq });
     if (result) segs.push({ label: "输出" + (result.is_error ? " ✕" : " ✓"), seq: result.seq });
+    setLoadError(false);
     Promise.all(
-      segs.map((x) =>
-        getDetail(x.seq)
-          .then((d) => d || "（空）")
-          .catch(() => "（加载失败）"),
-      ),
+      segs.map((x) => getDetail(x.seq).then((d) => d || "（空）")),
     ).then((parts) => {
       if (!live) return;
       setDetail(
@@ -365,18 +371,27 @@ function ToolBlock({
           .join("\n\n"),
       );
       loadedKey.current = detailKey;
+    }).catch(() => {
+      if (live) setLoadError(true);
     });
     return () => {
       live = false;
     };
   }, [open, detailKey, use, result, getDetail]);
 
+  React.useEffect(() => {
+    if (!focused || !open || !detail || loadError || !root.current) return;
+    const frame=requestAnimationFrame(() => { if(root.current) onLocated?.(root.current); });
+    return () => cancelAnimationFrame(frame);
+  }, [focused, open, detail, loadError, onLocated]);
+
   function toggle() {
     setOpen((o) => !o);
   }
 
   return (
-    <div className="text-xs">
+    <div ref={root} data-source-call={focused || undefined} className={cn("text-xs", focused && "rounded-md border border-primary bg-accent/30 p-2")}>
+      {focused && <Badge variant="outline">来源调用</Badge>}
       <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
@@ -389,7 +404,7 @@ function ToolBlock({
       </button>
       {open && (
         <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {detail ?? "加载中…"}
+          {loadError ? <Button size="sm" variant="outline" onClick={() => setRetry(n => n+1)}>加载失败，重试</Button> : detail ?? "加载中…"}
         </pre>
       )}
     </div>
@@ -598,11 +613,15 @@ function ExecView({
   taskId,
   chat,
   fetchDetail,
+  focusActivity,
+  onLocated,
 }: {
   activity: Activity[];
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusActivity?: number;
+  onLocated?: (el: HTMLElement) => void;
 }) {
   const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
@@ -626,7 +645,7 @@ function ExecView({
         ) : g.type === "answer" ? (
           <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
         ) : g.type === "tool" ? (
-          <ToolBlock key={"t" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+          <ToolBlock key={"t" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)} onLocated={onLocated} />
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
         ) : (
@@ -646,16 +665,20 @@ export function Transcript({
   taskId,
   chat,
   fetchDetail,
+  focusActivity,
+  onLocated,
 }: {
   activity: Activity[];
   live?: boolean;
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusActivity?: number;
+  onLocated?: (el: HTMLElement) => void;
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} />
+      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusActivity={focusActivity} onLocated={onLocated} />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">

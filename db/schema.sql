@@ -662,6 +662,7 @@ CREATE TABLE IF NOT EXISTS task_asset_links (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (task_id, asset_id)
 );
+ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS source_origin JSONB;
 ALTER TABLE task_asset_links ADD COLUMN IF NOT EXISTS tested BOOLEAN;
 UPDATE task_asset_links SET tested=false WHERE tested IS NULL;
 ALTER TABLE task_asset_links ALTER COLUMN tested SET DEFAULT false;
@@ -896,7 +897,7 @@ DECLARE
     user_registration boolean := COALESCE(current_setting('artex.user_asset_registration', true), '') = 'on';
 BEGIN
     INSERT INTO task_asset_links(
-        task_id, asset_id, source, source_summary, approval_state, approval_reason
+        task_id, asset_id, source, source_summary, approval_state, approval_reason, source_origin
     )
     SELECT task.id,
            NEW.id,
@@ -904,7 +905,9 @@ BEGIN
            CASE WHEN agent_discovery THEN 'Agent 通过 insert_assets 登记' ELSE '任务执行期间自动关联' END,
            CASE WHEN (agent_discovery OR user_registration) AND NEW.type NOT IN ('service','endpoint') THEN 'pending' ELSE 'approved' END,
            CASE WHEN NEW.type IN ('service','endpoint') THEN '继承父资产授权'
-                WHEN agent_discovery THEN 'Agent 发现，等待用户审批' ELSE '' END
+                WHEN agent_discovery THEN 'Agent 发现，等待用户审批' ELSE '' END,
+           CASE WHEN agent_discovery AND task.id::text = current_setting('artex.origin_task',true)
+                THEN NULLIF(current_setting('artex.asset_origin',true),'')::jsonb ELSE NULL END
     FROM unnest(NEW.task_ids) AS requested(task_id)
     JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
     ON CONFLICT (task_id, asset_id) DO NOTHING;

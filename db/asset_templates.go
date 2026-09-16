@@ -80,7 +80,14 @@ func (s *AssetStore) TaskApprovalTemplate(taskID int64) (string, error) {
 // RegisterAgentAsset commits discovery, provenance and template authorization
 // together. All side-effect hosts share this transaction via the scoped store.
 func (s *AssetStore) RegisterAgentAsset(taskID int64, agentKey string, ownerNode int64, write func(*AssetStore) (int64, error)) (int64, error) {
+	return s.RegisterAgentAssetWithOrigin(taskID, agentKey, ownerNode, "", write)
+}
+
+func (s *AssetStore) RegisterAgentAssetWithOrigin(taskID int64, agentKey string, ownerNode int64, toolUseID string, write func(*AssetStore) (int64, error)) (int64, error) {
 	return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
+		if err := scoped.setRegistrationOrigin(taskID, agentKey, ownerNode, toolUseID); err != nil {
+			return 0, err
+		}
 		if err := scoped.enableAgentDiscoveryMode(); err != nil {
 			return 0, err
 		}
