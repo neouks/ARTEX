@@ -116,6 +116,33 @@ const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
 const mockAssets = structuredClone(D.assets);
 const mockActivity = structuredClone(D.activity);
+// Exact approval fixture also lives in the original contiguous worker history.
+const approvalSeq = Math.max(...mockActivity.map((a) => a.seq)) + 1;
+mockActivity.push(
+  {
+    seq: approvalSeq,
+    worker: "work#1",
+    intent_id: "i-1",
+    kind: "tool_use",
+    tool: "Write",
+    tool_use_id: "call-write-report",
+    ts: "2026-07-26T08:00:00Z",
+    summary: "Write reports/summary.md",
+    detail: JSON.stringify(D.interceptHistory.find((r) => r.id === 94)?.tool_input),
+  },
+  {
+    seq: approvalSeq + 1,
+    worker: "work#1",
+    intent_id: "i-1",
+    kind: "tool_result",
+    tool: "Write",
+    tool_use_id: "call-write-report",
+    ts: "2026-07-26T08:00:02Z",
+    summary: "报告写入完成",
+    detail: "报告写入完成",
+  },
+);
+mockActivity.sort((a, b) => a.seq - b.seq);
 const mockTools: Tool[] = structuredClone(D.tools);
 const mockMcpServers: MCPServer[] = structuredClone(D.mcpServers);
 const mockMcpToolsById: Record<number, import("../types").MCPTool[]> = structuredClone(D.mcpToolsById);
@@ -3353,6 +3380,23 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       detail.output = b.decision === "allowed" ? "演示模式未执行工具。" : "";
     }
     return { ok: true };
+  }
+  if (seg[0] === "intercept" && seg[1] === "history" && seg[3] === "execution" && m === "GET") {
+    const row = mockInterceptHistory.find((r) => r.id === Number(seg[2]));
+    const audit = row && mockInterceptDetails[row.id];
+    const command = audit && mockActivity.find((a) => a.kind === "tool_use" && a.tool_use_id === audit.tool_use_id);
+    if (!row || !command || q.has("conversation")) throw new Error("原始执行不存在或不可访问");
+    return {
+      conversation_id: null,
+      task_id: row.task_id,
+      session: command.intent_id
+        ? `intent:${command.intent_id}`
+        : command.worker === "planner"
+          ? "plan"
+          : `main:${command.main_seg ?? 0}`,
+      seq: command.seq,
+      items: mockActivity.filter((a) => a.tool_use_id === command.tool_use_id),
+    };
   }
   if (seg[0] === "intercept" && seg[1] === "history" && seg.length === 3) {
     const row = mockInterceptHistory.find((r) => r.id === Number(seg[2]));

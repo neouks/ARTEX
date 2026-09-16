@@ -1560,16 +1560,27 @@ export function SessionsTab({
   }, [activeKey]);
 
   const focusKey = approvalFocus.state?.source?.session;
-  const loadFocusPage = React.useCallback((before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE), [taskId, focusKey]);
-  const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
-    if (!focusKey) return;
-    patchStore(focusKey, (s) => {
-      const items = mergeBySeq(page.items, s.items);
-      return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
-    });
-  }, [focusKey, patchStore]);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, !!focusKey && !!store[focusKey]?.loaded,
-    focusKey ? store[focusKey]?.items ?? [] : [], loadFocusPage, mergeFocusPage);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE),
+    [taskId, focusKey],
+  );
+  const mergeFocusPage = React.useCallback(
+    (page: { items: Activity[]; hasMore: boolean }) => {
+      if (!focusKey) return;
+      patchStore(focusKey, (s) => {
+        const items = mergeBySeq(page.items, s.items);
+        return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
+      });
+    },
+    [focusKey, patchStore],
+  );
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    !!focusKey && !!store[focusKey]?.loaded,
+    focusKey ? (store[focusKey]?.items ?? []) : [],
+    loadFocusPage,
+    mergeFocusPage,
+  );
   React.useEffect(() => {
     if (approvalFocus.state) atBottomRef.current = false;
   }, [approvalFocus.state]);
@@ -2223,16 +2234,22 @@ export function SessionsTab({
                 </div>
               );
             })()}
-            <ApprovalExecutionFocus focus={{ ...approvalFocus, close: () => {
-              setActiveId(activeId);
-              approvalFocus.close();
-            } }} history={focusHistory} />
+            <ApprovalExecutionFocus
+              focus={{
+                ...approvalFocus,
+                close: () => {
+                  setActiveId(activeId);
+                  approvalFocus.close();
+                },
+              }}
+              history={focusHistory}
+            />
             {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
             <SessionToolCalls
-              key={`${taskId}:${activeKey}:${focused ? focusSeq : approvalFocus.state?.id ?? "latest"}`}
+              key={`${taskId}:${activeKey}:${focused ? focusSeq : (approvalFocus.state?.id ?? "latest")}`}
               base={`/exploration/tool-calls?${new URLSearchParams({ task: taskId, session: activeKey })}`}
               revision={toolCallRevision(activity, active.live)}
             >
@@ -2288,7 +2305,13 @@ export function SessionsTab({
                         </Button>
                       </div>
                     ) : activity.length ? (
-                      <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+                      <Transcript
+                        activity={activity}
+                        live={active.live}
+                        taskId={taskId}
+                        chat={isMain}
+                        focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+                      />
                     ) : (
                       <div className="pl-9 text-xs text-muted-foreground">
                         {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}

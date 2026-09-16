@@ -26,13 +26,7 @@ import { ApprovalDetail } from "@/components/approval-records";
 import type { Activity, InterceptPending } from "@/lib/types";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
-const workerColors = [
-  "bg-sky-600",
-  "bg-violet-600",
-  "bg-teal-600",
-  "bg-pink-600",
-  "bg-orange-600",
-];
+const workerColors = ["bg-sky-600", "bg-violet-600", "bg-teal-600", "bg-pink-600", "bg-orange-600"];
 function workerColor(name: string): string {
   if (name === "planner") return "bg-amber-600"; // the intent generator, distinct
   if (name === "mainagent") return "bg-primary";
@@ -174,9 +168,7 @@ function toolInputText(tool: string, raw: string): string {
       return JSON.parse('"' + m[1] + '"');
     } catch {
       // truncated mid-escape — unescape the common sequences best-effort.
-      return m[1].replace(/\\(["\\/nrt])/g, (_s, c) =>
-        c === "n" ? "\n" : c === "r" ? "\r" : c === "t" ? "\t" : c,
-      );
+      return m[1].replace(/\\(["\\/nrt])/g, (_s, c) => (c === "n" ? "\n" : c === "r" ? "\r" : c === "t" ? "\t" : c));
     }
   }
   return raw;
@@ -185,13 +177,7 @@ function toolInputText(tool: string, raw: string): string {
 // InterceptCard renders an inline intercept_request approval card. The pending_id
 // is extracted from the summary (format: "工具 X 请求审批 (#N)") so buttons are
 // available immediately without waiting for the detail load.
-function InterceptCard({
-  step,
-  getDetail,
-}: {
-  step: Activity;
-  getDetail: (seq: number) => Promise<string>;
-}) {
+function InterceptCard({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
   // extract pending_id from summary: "工具 Bash 请求审批 (#42)"
   const pendingId = React.useMemo(() => {
     const m = /\(#(\d+)\)/.exec(step.summary);
@@ -218,25 +204,38 @@ function InterceptCard({
     getDetail(step.seq)
       .then((raw) => {
         if (!live || !raw) return;
-        try { setDetail(JSON.parse(raw)); } catch { /* ignore */ }
+        try {
+          setDetail(JSON.parse(raw));
+        } catch {
+          /* ignore */
+        }
       })
-      .catch(() => {/* ignore */});
-    return () => { live = false; };
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      live = false;
+    };
   }, [step.seq, getDetail]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Retry explicitly reloads the same approval after a failed request.
   React.useEffect(() => {
     if (!pendingId) return;
     let live = true;
-    api.interceptGetOne(pendingId)
+    api
+      .interceptGetOne(pendingId)
       .then((p) => {
         if (!live) return;
         setPending(p);
         setStatusError("");
         if (p.status !== "pending") setDecided(p.status as "allowed" | "denied" | "timeout");
       })
-      .catch((error) => { if (live) setStatusError((error as Error).message || "审批详情加载失败"); });
-    return () => { live = false; };
+      .catch((error) => {
+        if (live) setStatusError((error as Error).message || "审批详情加载失败");
+      });
+    return () => {
+      live = false;
+    };
   }, [pendingId, retry]);
 
   async function decide(decision: "allowed" | "denied") {
@@ -253,11 +252,11 @@ function InterceptCard({
     }
   }
 
-  const inputStr = detail?.input
-    ? JSON.stringify(detail.input).slice(0, 200)
-    : null;
+  const inputStr = detail?.input ? JSON.stringify(detail.input).slice(0, 200) : null;
 
-  const row = pending ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" } : null;
+  const row = pending
+    ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" }
+    : null;
 
   return (
     <div className="my-2 rounded-lg border border-amber-400/50 bg-amber-50/40 dark:bg-amber-950/15 p-3 text-xs">
@@ -270,27 +269,25 @@ function InterceptCard({
               <code className="rounded bg-amber-100 dark:bg-amber-900/50 px-1 font-mono text-amber-800 dark:text-amber-300">
                 {toolName}
               </code>
-              {pendingId && (
-                <span className="text-muted-foreground">#{pendingId}</span>
-              )}
+              {pendingId && <span className="text-muted-foreground">#{pendingId}</span>}
             </div>
-            {inputStr && (
-              <p className="font-mono text-muted-foreground truncate">{inputStr}</p>
-            )}
+            {inputStr && <p className="font-mono text-muted-foreground truncate">{inputStr}</p>}
           </div>
         </div>
 
         {step.inherited ? (
           <Badge variant="outline">历史记录 · 只读</Badge>
         ) : decided ? (
-          <span className={
-            "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
-            (decided === "allowed"
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-              : decided === "timeout"
-                ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-                : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400")
-          }>
+          <span
+            className={
+              "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
+              (decided === "allowed"
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+                : decided === "timeout"
+                  ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                  : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400")
+            }
+          >
             {decided === "allowed" ? "已允许" : decided === "timeout" ? "已超时" : "已拒绝"}
           </span>
         ) : (
@@ -339,9 +336,13 @@ function InterceptCard({
             ) : statusError ? (
               <div className="flex flex-wrap items-center gap-2 p-3" role="alert">
                 <span>{statusError}</span>
-                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试详情</Button>
+                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>
+                  重试详情
+                </Button>
               </div>
-            ) : <p className="p-3 text-muted-foreground">正在加载审批详情…</p>}
+            ) : (
+              <p className="p-3 text-muted-foreground">正在加载审批详情…</p>
+            )}
           </CollapsibleContent>
         </Collapsible>
       ) : null}
@@ -369,7 +370,9 @@ function ToolBlock({
   const root = React.useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = React.useState(false);
   const [retry, setRetry] = React.useState(0);
-  React.useEffect(() => { if (focused) setOpen(true); }, [focused]);
+  React.useEffect(() => {
+    if (focused) setOpen(true);
+  }, [focused]);
   const [detail, setDetail] = React.useState<string | null>(null);
   // what we last loaded, keyed by the underlying step seqs. When the tool result
   // arrives after we expanded mid-run (command only), this key changes and the
@@ -400,19 +403,19 @@ function ToolBlock({
     if (use) segs.push({ label: "命令", seq: use.seq });
     if (result) segs.push({ label: "输出" + (result.is_error ? " ✕" : " ✓"), seq: result.seq });
     setLoadError(false);
-    Promise.all(
-      segs.map((x) => getDetail(x.seq).then((d) => d || "（空）")),
-    ).then((parts) => {
-      if (!live) return;
-      setDetail(
-        segs
-          .map((x, i) => `【${x.label}】\n${x.label === "命令" ? toolInputText(toolName, parts[i]) : parts[i]}`)
-          .join("\n\n"),
-      );
-      loadedKey.current = detailKey;
-    }).catch(() => {
-      if (live) setLoadError(true);
-    });
+    Promise.all(segs.map((x) => getDetail(x.seq).then((d) => d || "（空）")))
+      .then((parts) => {
+        if (!live) return;
+        setDetail(
+          segs
+            .map((x, i) => `【${x.label}】\n${x.label === "命令" ? toolInputText(toolName, parts[i]) : parts[i]}`)
+            .join("\n\n"),
+        );
+        loadedKey.current = detailKey;
+      })
+      .catch(() => {
+        if (live) setLoadError(true);
+      });
     return () => {
       live = false;
     };
@@ -421,19 +424,33 @@ function ToolBlock({
   React.useEffect(() => {
     if (!focused || !open || !detail || loadError || !root.current) return;
     if (onLocated) {
-      const frame=requestAnimationFrame(() => { if(root.current) onLocated(root.current); });
+      const frame = requestAnimationFrame(() => {
+        if (root.current) onLocated(root.current);
+      });
       return () => cancelAnimationFrame(frame);
     }
-    const el=root.current;
-    const viewport=el.closest('[data-slot="scroll-area-viewport"]');
+    const el = root.current;
+    const viewport = el.closest('[data-slot="scroll-area-viewport"]');
     if (!viewport) return;
-    const center=() => { const rect=el.getBoundingClientRect(),bounds=viewport.getBoundingClientRect(); viewport.scrollTop += rect.top+rect.height/2-bounds.top-bounds.height/2; };
-    const observer=new ResizeObserver(center);
-    observer.observe(el.parentElement ?? el);observer.observe(viewport);
-    const stop=() => observer.disconnect();
-    for (const event of ["wheel","touchstart","pointerdown","keydown"]) viewport.addEventListener(event,stop,{passive:true,once:true});
-    const frame=requestAnimationFrame(center),timer=setTimeout(stop,2000);
-    return () => {cancelAnimationFrame(frame);clearTimeout(timer);stop();for(const event of ["wheel","touchstart","pointerdown","keydown"])viewport.removeEventListener(event,stop);};
+    const center = () => {
+      const rect = el.getBoundingClientRect(),
+        bounds = viewport.getBoundingClientRect();
+      viewport.scrollTop += rect.top + rect.height / 2 - bounds.top - bounds.height / 2;
+    };
+    const observer = new ResizeObserver(center);
+    observer.observe(el.parentElement ?? el);
+    observer.observe(viewport);
+    const stop = () => observer.disconnect();
+    for (const event of ["wheel", "touchstart", "pointerdown", "keydown"])
+      viewport.addEventListener(event, stop, { passive: true, once: true });
+    const frame = requestAnimationFrame(center),
+      timer = setTimeout(stop, 2000);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      stop();
+      for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) viewport.removeEventListener(event, stop);
+    };
   }, [focused, open, detail, loadError, onLocated]);
 
   function toggle() {
@@ -441,7 +458,11 @@ function ToolBlock({
   }
 
   return (
-    <div ref={root} data-source-call={focused || undefined} className={cn("text-xs", focused && "rounded-md border border-primary bg-accent/30 p-2")}>
+    <div
+      ref={root}
+      data-source-call={focused || undefined}
+      className={cn("text-xs", focused && "rounded-md border border-primary bg-accent/30 p-2")}
+    >
       {focused && <Badge variant="outline">来源调用</Badge>}
       <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
@@ -455,7 +476,13 @@ function ToolBlock({
       </button>
       {open && (
         <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {loadError ? <Button size="sm" variant="outline" onClick={() => setRetry(n => n+1)}>加载失败，重试</Button> : detail ?? "加载中…"}
+          {loadError ? (
+            <Button size="sm" variant="outline" onClick={() => setRetry((n) => n + 1)}>
+              加载失败，重试
+            </Button>
+          ) : (
+            (detail ?? "加载中…")
+          )}
         </pre>
       )}
     </div>
@@ -562,7 +589,15 @@ function parseUserBody(body: string): { text: string; attachments: MsgAttachment
   return { text: body, attachments: [] };
 }
 
-function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean; getDetail: (seq: number) => Promise<string> }) {
+function UserRow({
+  step,
+  intent,
+  getDetail,
+}: {
+  step: Activity;
+  intent?: boolean;
+  getDetail: (seq: number) => Promise<string>;
+}) {
   const Icon = intent ? CrosshairIcon : UserIcon;
   const [ref, inView] = useInView();
   // Optimistic echoes carry their detail inline; persisted rows lazy-load it on scroll.
@@ -695,7 +730,14 @@ function ExecView({
         ) : g.type === "answer" ? (
           <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
         ) : g.type === "tool" ? (
-          <ToolBlock key={"t" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)} onLocated={onLocated} />
+          <ToolBlock
+            key={"t" + g.key}
+            group={g}
+            getDetail={getDetail}
+            showWorker={showWorker}
+            focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)}
+            onLocated={onLocated}
+          />
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
         ) : (
@@ -731,7 +773,10 @@ export function Transcript({
   const transcriptRef = React.useRef<HTMLDivElement>(null);
   const [focusPadding, setFocusPadding] = React.useState(0);
   React.useLayoutEffect(() => {
-    if (focusedSeq == null) { setFocusPadding(0); return; }
+    if (focusedSeq == null) {
+      setFocusPadding(0);
+      return;
+    }
     const viewport = transcriptRef.current?.closest('[data-slot="scroll-area-viewport"]');
     if (!viewport) return;
     const measure = () => setFocusPadding(viewport.clientHeight / 2);
@@ -741,8 +786,19 @@ export function Transcript({
     return () => observer.disconnect();
   }, [focusedSeq]);
   return (
-    <div ref={transcriptRef} className="flex flex-col gap-1" style={focusPadding ? {paddingBlock:focusPadding} : undefined}>
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusActivity={focusActivity ?? focusedSeq} onLocated={onLocated} />
+    <div
+      ref={transcriptRef}
+      className="flex flex-col gap-1"
+      style={focusPadding ? { paddingBlock: focusPadding } : undefined}
+    >
+      <ExecView
+        activity={activity}
+        taskId={taskId}
+        chat={chat}
+        fetchDetail={fetchDetail}
+        focusActivity={focusActivity ?? focusedSeq}
+        onLocated={onLocated}
+      />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">

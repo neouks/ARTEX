@@ -2,6 +2,7 @@ package agent
 
 import (
 	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/Autumn-27/norma/agentcore"
@@ -28,6 +29,26 @@ func noaWarn(session string) func(string) {
 // 启用成功时清掉 opts.Compaction,避免 agentcore 因「两个上下文管理器同时设置」告警。
 func enableNoa(opts *agentcore.Options, enabled func() bool, archiveRoot, sessionID string, onWarn func(string)) {
 	if enabled == nil || !enabled() {
+		return
+	}
+	// Check durability before replacing the built-in compactor. The adapter
+	// loads lazily and otherwise accepts an unwritable archive directory.
+	archiveDir := filepath.Join(archiveRoot, "noa", sessionID)
+	err := os.MkdirAll(archiveDir, 0o700)
+	if err == nil {
+		var probe *os.File
+		probe, err = os.CreateTemp(archiveDir, ".write-check-*")
+		if err == nil {
+			err = probe.Close()
+			if removeErr := os.Remove(probe.Name()); err == nil {
+				err = removeErr
+			}
+		}
+	}
+	if err != nil {
+		if onWarn != nil {
+			onWarn("noa 归档目录不可写,回退内置压缩:" + err.Error())
+		}
 		return
 	}
 	if opts.OnWarn == nil {

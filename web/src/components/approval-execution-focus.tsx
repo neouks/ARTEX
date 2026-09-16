@@ -7,7 +7,15 @@ import { api } from "@/lib/api";
 import type { Activity, InterceptExecution } from "@/lib/types";
 
 // Resolve one exact persisted call, independently of transcript pagination.
-export function useApprovalFocus({ taskId, conversationId, enabled = true }: { taskId?: string; conversationId?: number; enabled?: boolean }) {
+export function useApprovalFocus({
+  taskId,
+  conversationId,
+  enabled = true,
+}: {
+  taskId?: string;
+  conversationId?: number;
+  enabled?: boolean;
+}) {
   const params = useSearchParams();
   const query = params.toString();
   const [state, setState] = React.useState<{

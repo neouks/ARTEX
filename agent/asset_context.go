@@ -170,7 +170,7 @@ func filterStructuredRows(value any, states map[int64]string, collect map[int64]
 	return value, true
 }
 
-func (p assetContextProvider) filter(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, error) {
+func (p assetContextProvider) filterPlain(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, error) {
 	ri := RunInfoFrom(ctx)
 	worker := ri.AgentKey == "worker" && ri.TaskID == p.taskID && ri.IntentID > 0
 	req = deduplicateToolHistory(req)
