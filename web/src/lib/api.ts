@@ -39,6 +39,8 @@ import type {
   DeleteTaskResult,
   Edge,
   EvidenceBodyPreview,
+  ExplorationNodePage,
+  ExplorationNodeQuery,
   Finding,
   FindingAssetTree,
   FindingDeepenResponse,
@@ -730,6 +732,25 @@ export const api = {
       .then(arr)
       .catch(() => [] as ConvTokenSummary[]),
   explorationGraph: (task?: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/graph${tq(task)}`),
+  // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
+  explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {
+    const q = new URLSearchParams();
+    if (task) q.set("task", task);
+    q.set("page", String(query.page ?? 1));
+    q.set("size", String(query.size ?? 20));
+    if (query.kinds?.length) q.set("kind", query.kinds.join(","));
+    if (query.states?.length) q.set("state", query.states.join(","));
+    if (query.q?.trim()) q.set("q", query.q.trim());
+    if (query.order === "asc") q.set("order", "asc");
+    return get<ExplorationNodePage>(`/exploration/nodes?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? 0,
+      page: r.page ?? 1,
+      size: r.size ?? query.size ?? 20,
+      edges: arr(r.edges),
+      refs: r.refs ?? {},
+    }));
+  },
   activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number }) => {
     const q = new URLSearchParams();
     if (task) q.set("task", task);
@@ -824,7 +845,10 @@ export const api = {
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
   testGlobalProxy: (proxy: string) => post<GlobalProxyProbeResult>(`/settings/global-proxy/test`, { proxy }),
   chatMentions: (kind: string, query: string, signal?: AbortSignal, cursor = "") =>
-    http<{ items: ChatMention[]; next_cursor?: string }>(`/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`, { signal }),
+    http<{ items: ChatMention[]; next_cursor?: string }>(
+      `/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`,
+      { signal },
+    ),
   chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
     post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
@@ -1194,16 +1218,18 @@ export const api = {
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
   interceptExecution: (id: number, conversationId?: number) =>
-    get<import("@/lib/types").InterceptExecution>(`/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`),
+    get<import("@/lib/types").InterceptExecution>(
+      `/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`,
+    ),
   interceptDetail: (id: number) => get<InterceptDetail>(`/intercept/history/${id}`),
   interceptHistory: () => get<{ items: InterceptApprovalRow[] }>("/intercept/history").then((r) => arr(r.items)),
   interceptHistoryPage: (page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>
-    get<{ items: InterceptApprovalRow[]; total?: number }>(`/intercept/history?${interceptPageQuery(page, size, filter)}`).then(
-      (r) => ({
-        items: arr(r.items),
-        total: r.total ?? r.items?.length ?? 0,
-      }),
-    ),
+    get<{ items: InterceptApprovalRow[]; total?: number }>(
+      `/intercept/history?${interceptPageQuery(page, size, filter)}`,
+    ).then((r) => ({
+      items: arr(r.items),
+      total: r.total ?? r.items?.length ?? 0,
+    })),
   interceptTask: (taskId: string) =>
     get<{ items: InterceptApprovalRow[] }>(`/intercept/task/${taskId}`).then((r) => arr(r.items)),
   interceptTaskPage: (taskId: string, page = 1, size = 20, filter: InterceptApprovalFilter = {}) =>

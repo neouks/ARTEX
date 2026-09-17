@@ -1554,14 +1554,42 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const kind = q.get("kind") ?? "";
     const query = (q.get("q") ?? "").trim().toLowerCase();
     const candidates = [
-      ...D.findings.map((finding, index) => ({ kind: "finding", id: index + 1, label: finding.name || finding.vulnclass, description: `${finding.severity} · ${finding.summary}` })),
+      ...D.findings.map((finding, index) => ({
+        kind: "finding",
+        id: index + 1,
+        label: finding.name || finding.vulnclass,
+        description: `${finding.severity} · ${finding.summary}`,
+      })),
       ...D.companies.map((company) => ({ kind: "company", id: company.id, label: company.name, description: "企业" })),
-      ...D.assets.map((asset) => ({ kind: asset.type, id: asset.id, label: asset.type === "endpoint" ? `${asset.method || "GET"} ${asset.url}` : asset.app_name || asset.url || asset.domain || asset.ip || asset.bundle_id || `资产 #${asset.id}`, description: [asset.type, asset.page_title, asset.service_name, asset.bundle_id, asset.ip].filter(Boolean).join(" · ") })),
+      ...D.assets.map((asset) => ({
+        kind: asset.type,
+        id: asset.id,
+        label:
+          asset.type === "endpoint"
+            ? `${asset.method || "GET"} ${asset.url}`
+            : asset.app_name || asset.url || asset.domain || asset.ip || asset.bundle_id || `资产 #${asset.id}`,
+        description: [asset.type, asset.page_title, asset.service_name, asset.bundle_id, asset.ip]
+          .filter(Boolean)
+          .join(" · "),
+      })),
     ];
-    const filtered = candidates.filter((item) => (!kind || kind === item.kind || (kind === "asset" && item.kind !== "finding" && item.kind !== "company")) && (!query || String(item.id) === query || `${item.label} ${item.description}`.toLowerCase().includes(query)))
-      .sort((a, b) => Number(String(b.id) === query) - Number(String(a.id) === query) || b.id - a.id || a.kind.localeCompare(b.kind));
+    const filtered = candidates
+      .filter(
+        (item) =>
+          (!kind || kind === item.kind || (kind === "asset" && item.kind !== "finding" && item.kind !== "company")) &&
+          (!query || String(item.id) === query || `${item.label} ${item.description}`.toLowerCase().includes(query)),
+      )
+      .sort(
+        (a, b) =>
+          Number(String(b.id) === query) - Number(String(a.id) === query) ||
+          b.id - a.id ||
+          a.kind.localeCompare(b.kind),
+      );
     const offset = Math.max(0, Number(q.get("cursor")) || 0);
-    return { items: filtered.slice(offset, offset + 20), next_cursor: offset + 20 < filtered.length ? String(offset + 20) : undefined };
+    return {
+      items: filtered.slice(offset, offset + 20),
+      next_cursor: offset + 20 < filtered.length ? String(offset + 20) : undefined,
+    };
   }
 
   // ── auth：让 demo 直接进主界面 ──
@@ -2976,6 +3004,37 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     mockMainSessions.set(key, [session, ...sessions]);
     return { ...session, current: session.seq };
   }
+  // 播报板:和后端 /exploration/nodes 同语义 —— 按创建顺序(mock 里用 ts + id)分页,
+  // 并带上这一页涉及的边与边另一端的节点。
+  if (path === "/exploration/nodes") {
+    const all = D.explorationGraph.nodes;
+    const kinds = new Set((q.get("kind") ?? "").split(",").filter(Boolean));
+    const states = new Set((q.get("state") ?? "").split(",").filter(Boolean));
+    const needle = (q.get("q") ?? "").trim().toLowerCase();
+    const asc = q.get("order") === "asc";
+    const page = Math.max(1, Number(q.get("page") ?? 1));
+    const size = Math.min(200, Math.max(1, Number(q.get("size") ?? 20)));
+    const rank = (id: string) => all.findIndex((n) => n.id === id);
+    const matched = all
+      .filter((n) => (kinds.size === 0 || kinds.has(n.type)) && (states.size === 0 || states.has(n.state)))
+      .filter((n) => !needle || `${n.payload ?? ""} ${n.origin}`.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        const d = Date.parse(a.ts) - Date.parse(b.ts) || rank(a.id) - rank(b.id);
+        return asc ? d : -d;
+      });
+    const items = matched.slice((page - 1) * size, page * size);
+    const onPage = new Set(items.map((n) => n.id));
+    const edges = D.explorationGraph.edges.filter((e) => onPage.has(e.src) || onPage.has(e.dst));
+    const refs: Record<string, (typeof all)[number]> = {};
+    for (const e of edges) {
+      for (const id of [e.src, e.dst]) {
+        if (onPage.has(id) || refs[id]) continue;
+        const node = all.find((n) => n.id === id);
+        if (node) refs[id] = node;
+      }
+    }
+    return { items, total: matched.length, page, size, edges, refs };
+  }
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
     const limit = Math.max(1, Number(q.get("limit") ?? 300));
@@ -3425,11 +3484,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (status && !["pending", "allowed", "denied", "timeout"].includes(status)) throw new Error("无效审批状态");
     if (decisionSource && !["model", "rule", "unknown"].includes(decisionSource)) throw new Error("无效判定来源");
     const filtered = mockInterceptHistory.filter((row) => {
-      const source = row.decision_source || (row.rule_id ? "rule" : row.reason?.startsWith("[模型]") ? "model" : "unknown");
-      return (seg[1] !== "task" || row.task_id === decodeURIComponent(seg[2])) &&
-        (!status || row.status === status) && (!decisionSource || source === decisionSource);
+      const source =
+        row.decision_source || (row.rule_id ? "rule" : row.reason?.startsWith("[模型]") ? "model" : "unknown");
+      return (
+        (seg[1] !== "task" || row.task_id === decodeURIComponent(seg[2])) &&
+        (!status || row.status === status) &&
+        (!decisionSource || source === decisionSource)
+      );
     });
-    if (!q.has("page") && !q.has("size") && !status && !decisionSource) return { items: filtered, total: filtered.length };
+    if (!q.has("page") && !q.has("size") && !status && !decisionSource)
+      return { items: filtered, total: filtered.length };
     const page = Math.max(1, Number(q.get("page")) || 1);
     const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
     const offset = (page - 1) * size;

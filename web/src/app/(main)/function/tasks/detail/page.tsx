@@ -47,6 +47,7 @@ import { SessionsTab } from "./_tabs/sessions-tab";
 // Secondary tabs (graphs and tables) are not on the session
 // startup path. Load their code only when the corresponding tab mounts.
 const AssetApprovalsTab = dynamic(() => import("./_tabs/asset-approvals-tab").then((m) => m.AssetApprovalsTab));
+const BroadcastTab = dynamic(() => import("./_tabs/broadcast-tab").then((m) => m.BroadcastTab));
 const AssetsTab = dynamic(() => import("./_tabs/assets-tab").then((m) => m.AssetsTab));
 const CoverageGraphTab = dynamic(() => import("./_tabs/coverage-graph-tab").then((m) => m.CoverageGraphTab));
 const FindingsTab = dynamic(() => import("./_tabs/findings-tab").then((m) => m.FindingsTab));
@@ -58,6 +59,7 @@ const TABS = [
   { value: "sessions", label: "会话" },
   { value: "overview", label: "总览" },
   { value: "graph", label: "探索链路" },
+  { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
   { value: "assets", label: "测试资产" },
   { value: "asset-approvals", label: "资产审批" },
@@ -504,6 +506,9 @@ function TaskDetailInner() {
           </TabsContent>
           <TabsContent value="graph" className="mt-0">
             <GraphTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="broadcast" className="mt-0">
+            <BroadcastTab taskId={id} />
           </TabsContent>
           <TabsContent value="findings" className="mt-0">
             <FindingsTab taskId={id} />
