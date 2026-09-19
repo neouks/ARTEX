@@ -592,7 +592,9 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// (agentsForTask),所以 Compactor 必须接在这里;buildPlannerWorker 那套全局 pair 被解析器
 	// 旁路、从不跑规划轮,接在那里等于不生效。走任务路由的 planner provider(§4:与 agent 同模型),
 	// 压缩用 Complete 一次性生成 body。
-	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
+	compactor := agent.NewCompactor(plannerRuntime, "task-router")
+	compactor.SetAssetStore(s.m.Assets()) // 保留本地冷节点压缩的任务资产授权校验
+	pl.SetCompactor(compactor)
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
