@@ -1013,6 +1013,10 @@ type NodeFilter struct {
 // is BIGSERIAL and therefore creation order — stable when several nodes share a
 // created_at second.
 func (s *ExplorationStore) NodesPage(f NodeFilter, page, size int) ([]*Node, int, error) {
+	return s.NodesPageContext(context.Background(), f, page, size, false)
+}
+
+func (s *ExplorationStore) NodesPageContext(ctx context.Context, f NodeFilter, page, size int, countOnly bool) ([]*Node, int, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -1040,30 +1044,29 @@ func (s *ExplorationStore) NodesPage(f NodeFilter, page, size int) ([]*Node, int
 	addIn("kind", f.Kinds)
 	addIn("state", f.States)
 	if q := strings.TrimSpace(f.Query); q != "" {
-		args = append(args, "%"+q+"%")
-		mark := "$" + fmt.Sprint(len(args))
-		ors := []string{"payload::text ILIKE " + mark, "COALESCE(origin,'') ILIKE " + mark}
-		// 纯数字(或 UI 里带 # 前缀的形式,如「#41」)当作节点 id 精确匹配,方便直接定位某个节点。
-		if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
-			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-				args = append(args, id)
-				ors = append(ors, "id = $"+fmt.Sprint(len(args)))
-			}
+		if id, err := strconv.ParseInt(strings.TrimPrefix(q, "#"), 10, 64); err == nil && id > 0 {
+			args = append(args, id)
+			conds = append(conds, "id=$"+fmt.Sprint(len(args)))
+		} else {
+			args = append(args, "%"+strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(q)+"%")
+			conds = append(conds, "(payload::text || ' ' || COALESCE(origin,'')) ILIKE $"+fmt.Sprint(len(args)))
 		}
-		conds = append(conds, "("+strings.Join(ors, " OR ")+")")
 	}
 	where := " WHERE " + strings.Join(conds, " AND ")
 
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes`+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM exploration_nodes`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if countOnly {
+		return nil, total, nil
 	}
 	order := "DESC"
 	if f.Asc {
 		order = "ASC"
 	}
 	args = append(args, size, offset)
-	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes`+where+
+	rows, err := s.db.QueryContext(ctx, `SELECT `+broadcastNodeCols+` FROM exploration_nodes`+where+
 		` ORDER BY id `+order+
 		` LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
 	if err != nil {

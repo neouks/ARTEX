@@ -889,6 +889,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/nodes", s.explorationNodes)
+	mux.HandleFunc("GET /api/exploration/nodes/{id}", s.explorationNodeDetail)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
 	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
 	mux.HandleFunc("GET /api/exploration/tool-calls", s.taskToolCalls)
@@ -2653,12 +2654,25 @@ func (s *Server) explorationGraph(w http.ResponseWriter, r *http.Request) {
 // and a payload substring. Inherited nodes are deliberately out of scope — the
 // board reports what this task is doing right now, and paging across the source
 // tasks' stores would make the cursor meaningless.
-// Response also carries the edges touching the page plus the neighbour nodes
-// they point at, so each row can state where it came from and what it produced.
+// Lists contain summaries only. Body and relation pages are fetched explicitly
+// through explorationNodeDetail when a user expands a row.
 func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page := atoiDefault(q.Get("page"), 1)
 	size := atoiDefault(q.Get("size"), 20)
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 200 {
+		size = 200
+	}
+	if len([]rune(q.Get("q"))) > 200 {
+		writeErr(w, 400, "search exceeds 200 characters")
+		return
+	}
 	t := s.m.ResolveTask(q.Get("task"))
 	if t == nil {
 		writeJSON(w, 200, map[string]any{
@@ -2673,52 +2687,14 @@ func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 		Query:  q.Get("q"),
 		Asc:    q.Get("order") == "asc",
 	}
-	nodes, total, err := t.Store.NodesPage(filter, page, size)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	nodes, total, err := t.Store.NodesPageContext(ctx, filter, page, size, q.Get("count_only") == "1")
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	ids := make([]int64, 0, len(nodes))
-	onPage := make(map[int64]bool, len(nodes))
-	for _, n := range nodes {
-		ids = append(ids, n.ID)
-		onPage[n.ID] = true
-	}
-	edges, err := t.Store.EdgesTouching(ids)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	neighbourSet := map[int64]bool{}
-	for _, e := range edges {
-		if !onPage[e.From] {
-			neighbourSet[e.From] = true
-		}
-		if !onPage[e.To] {
-			neighbourSet[e.To] = true
-		}
-	}
-	neighbourIDs := make([]int64, 0, len(neighbourSet))
-	for id := range neighbourSet {
-		neighbourIDs = append(neighbourIDs, id)
-	}
-	neighbours, err := t.Store.NodesByIDs(neighbourIDs)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	refs := make(map[string]TaskNodeDTO, len(neighbours))
-	for _, n := range neighbours {
-		refs[i64s(n.ID)] = taskNodeDTO(n)
-	}
-	writeJSON(w, 200, map[string]any{
-		"items": taskNodeDTOs(nodes),
-		"total": total,
-		"page":  page,
-		"size":  size,
-		"edges": edgeDTOs(edges),
-		"refs":  refs,
-	})
+	writeJSON(w, 200, map[string]any{"items": taskNodeDTOs(nodes), "total": total, "page": page, "size": size, "edges": []any{}, "refs": map[string]any{}})
 }
 
 // csvValues splits a comma-separated query parameter, dropping empty entries.

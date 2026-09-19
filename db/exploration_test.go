@@ -501,6 +501,10 @@ func TestNodesPageQueryMatchesID(t *testing.T) {
 		}
 	}
 
+	// An ID lookup must not scan/match unrelated payload text containing the ID.
+	if _, err := d.Exec(`UPDATE exploration_nodes SET payload=jsonb_build_object('summary',$1::text) WHERE id=$2`, fmt.Sprint(target), other); err != nil {
+		t.Fatal(err)
+	}
 	onlyTarget("bare id", fmt.Sprint(target))
 	onlyTarget("hash id", "#"+fmt.Sprint(target))
 	onlyTarget("payload still works", "needle-alpha")

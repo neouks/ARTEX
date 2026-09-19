@@ -26,6 +26,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { startPolling } from "@/lib/polling";
 import { api } from "@/lib/api";
 import type {
   InterceptApprovalFilter,
@@ -674,56 +675,63 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     setPage(1);
   }, [taskId]);
 
+  const poll = React.useRef<ReturnType<typeof startPolling> | null>(null);
   const load = React.useCallback(
-    async (manual = false) => {
+    async (signal: AbortSignal, manual: boolean) => {
       const markRead = beginRead();
       const id = ++request.current;
+      const current = () => id === request.current && !signal.aborted;
       if (manual) setRefreshing(true);
-      try {
-        // The approval queue is independent of the current history page and its
-        // filter. Older requests must remain actionable even when newer decisions
-        // fill the page or a filter would hide them.
-        const [history, pending] = await Promise.allSettled([
-          taskId ? api.interceptTaskPage(taskId, page, pageSize, filter) : api.interceptHistoryPage(page, pageSize, filter),
-          api.interceptPending(),
-        ]);
-        if (id !== request.current) return;
-        if (history.status === "fulfilled") {
-          setRows(history.value.items);
-          markRead();
-          setTotal(history.value.total);
-          setError("");
-        } else {
-          setError((history.reason as Error).message || "加载失败");
-        }
-        if (pending.status === "fulfilled") {
-          setPendingRows(pending.value);
-          setPendingError("");
-        } else {
-          setPendingError((pending.reason as Error).message || "加载失败");
-        }
-
-        if (manual) setRevision((v) => v + 1);
-      } catch (e) {
-        if (id === request.current) setError((e as Error).message || "加载失败");
-      } finally {
-        if (id === request.current) {
-          setLoading(false);
-          setRefreshing(false);
-        }
+      // Publish each response independently: a slow pending queue must not hold
+      // a completed history page (or the other way round).
+      await Promise.allSettled([
+        (taskId
+          ? api.interceptTaskPage(taskId, page, pageSize, filter, signal)
+          : api.interceptHistoryPage(page, pageSize, filter, signal)
+        )
+          .then((history) => {
+            if (!current()) return;
+            setRows(history.items);
+            setTotal(history.total);
+            setError("");
+            markRead();
+          })
+          .catch((e: Error) => {
+            if (
+              id === request.current &&
+              (!signal.aborted || (signal.reason instanceof Error && signal.reason.message.includes("超时")))
+            )
+              setError(e.message);
+          })
+          .finally(() => {
+            if (id === request.current) setLoading(false);
+          }),
+        api
+          .interceptPending(signal, taskId)
+          .then((pending) => {
+            if (!current()) return;
+            setPendingRows(pending);
+            setPendingError("");
+          })
+          .catch((e: Error) => {
+            if (id === request.current && (!signal.aborted || signal.reason?.message?.includes("超时")))
+              setPendingError(e.message);
+          }),
+      ]);
+      if (id === request.current) {
+        setRefreshing(false);
+        if (manual && !signal.aborted) setRevision((v) => v + 1);
       }
     },
     [taskId, page, pageSize, filter, beginRead],
   );
-  const latestLoad = React.useRef(load);
-  latestLoad.current = load;
-
+  const latestLoad = React.useRef((_manual = false) => poll.current?.refresh());
   React.useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 5000);
+    const next = startPolling(load, 5000);
+    poll.current = next;
     return () => {
       request.current++;
-      clearInterval(timer);
+      next.stop();
     };
   }, [load]);
 
@@ -789,7 +797,12 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           <h1 className="font-semibold text-xl">{title}</h1>
           {pending.length ? <Badge variant="secondary">{pending.length} 待审批</Badge> : null}
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load(true)} disabled={loading || refreshing}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void latestLoad.current(true)}
+          disabled={loading || refreshing}
+        >
           <RefreshCwIcon data-icon="inline-start" className={cn(refreshing && "animate-spin")} />
           刷新
         </Button>

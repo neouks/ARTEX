@@ -1487,6 +1487,17 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
   return route(m, path, seg, q, b) as T;
 }
 
+function broadcastSummary(node: (typeof D.explorationGraph.nodes)[number]) {
+  let summary = "";
+  try {
+    const p = JSON.parse(node.payload || "{}");
+    summary = String(p.name || p.summary || p.text || p.description || p.body || "");
+  } catch {
+    summary = node.payload || "";
+  }
+  return { ...node, payload: JSON.stringify({ summary: Array.from(summary).slice(0, 500).join("") }) };
+}
+
 function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Record<string, unknown>): unknown {
   if (m === "GET" && path === "/tasks/notifications") {
     const queries = JSON.parse(q.get("queries") ?? "[]") as NotificationQuery[];
@@ -3007,7 +3018,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // 播报板:和后端 /exploration/nodes 同语义 —— 按创建顺序(mock 里用 ts + id)分页,
   // 并带上这一页涉及的边与边另一端的节点。
   if (path === "/exploration/nodes") {
-    const all = D.explorationGraph.nodes;
+    const all = task === D.tasks[0]?.id ? D.explorationGraph.nodes : [];
     const kinds = new Set((q.get("kind") ?? "").split(",").filter(Boolean));
     const states = new Set((q.get("state") ?? "").split(",").filter(Boolean));
     const needle = (q.get("q") ?? "").trim().toLowerCase();
@@ -3020,25 +3031,40 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       .filter(
         (n) =>
           !needle ||
-          // 内容 / 来源 / 节点 id 任一命中即可(id 兼容「#41」写法)。
-          `${n.payload ?? ""} ${n.origin} ${n.id}`.toLowerCase().includes(needle.replace(/^#/, "")),
+          (/^#?\d+$/.test(needle)
+            ? n.id === needle.replace(/^#/, "")
+            : `${n.payload ?? ""} ${n.origin}`.toLowerCase().includes(needle)),
       )
       .sort((a, b) => {
         const d = Date.parse(a.ts) - Date.parse(b.ts) || rank(a.id) - rank(b.id);
         return asc ? d : -d;
       });
-    const items = matched.slice((page - 1) * size, page * size);
-    const onPage = new Set(items.map((n) => n.id));
-    const edges = D.explorationGraph.edges.filter((e) => onPage.has(e.src) || onPage.has(e.dst));
-    const refs: Record<string, (typeof all)[number]> = {};
-    for (const e of edges) {
-      for (const id of [e.src, e.dst]) {
-        if (onPage.has(id) || refs[id]) continue;
-        const node = all.find((n) => n.id === id);
-        if (node) refs[id] = node;
-      }
-    }
-    return { items, total: matched.length, page, size, edges, refs };
+    const items =
+      q.get("count_only") === "1" ? [] : matched.slice((page - 1) * size, page * size).map(broadcastSummary);
+    return { items, total: matched.length, page, size, edges: [], refs: {} };
+  }
+  if (seg[0] === "exploration" && seg[1] === "nodes" && seg.length === 3) {
+    const node = task === D.tasks[0]?.id ? D.explorationGraph.nodes.find((n) => n.id === seg[2]) : undefined;
+    if (!node) throw new Error("node not found");
+    const body = Number(q.get("body_offset") ?? 0),
+      edge = Number(q.get("edge_offset") ?? 0);
+    if (!Number.isInteger(body) || !Number.isInteger(edge) || body < -1 || edge < -1) throw new Error("bad offset");
+    const chars = Array.from(node.payload ?? "");
+    const allEdges = D.explorationGraph.edges
+      .filter((e) => e.src === node.id || e.dst === node.id)
+      .sort((a, b) => a.src.localeCompare(b.src) || a.dst.localeCompare(b.dst) || a.rel.localeCompare(b.rel));
+    const edges = edge < 0 ? [] : allEdges.slice(edge, edge + 50);
+    const ids = new Set(edges.flatMap((e) => [e.src, e.dst]));
+    return {
+      node: broadcastSummary(node),
+      payload: body < 0 ? "" : chars.slice(body, body + 16000).join(""),
+      payload_next_offset: body >= 0 && body + 16000 < chars.length ? body + 16000 : -1,
+      edges,
+      edges_next_offset: edge >= 0 && edge + 50 < allEdges.length ? edge + 50 : -1,
+      refs: Object.fromEntries(
+        D.explorationGraph.nodes.filter((n) => ids.has(n.id)).map((n) => [n.id, broadcastSummary(n)]),
+      ),
+    };
   }
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);

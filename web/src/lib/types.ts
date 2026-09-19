@@ -484,8 +484,7 @@ export interface TaskNode {
   inherited?: boolean;
 }
 
-// 播报板一页:按创建顺序分页的节点 + 这一页涉及的边 + 边另一端的节点(refs,按 id 索引),
-// 这样每条播报都能说清「从哪来、产出了什么」,而不用把整张图拉下来。
+// 播报板列表仅返回精简摘要；edges/refs 保留兼容字段，详情由展开后的分页接口读取。
 export interface ExplorationNodePage {
   items: TaskNode[];
   total: number;
@@ -495,7 +494,17 @@ export interface ExplorationNodePage {
   refs: Record<string, TaskNode>;
 }
 
+export interface ExplorationNodeDetail {
+  node: TaskNode;
+  payload: string;
+  payload_next_offset: number;
+  edges: Edge[];
+  edges_next_offset: number;
+  refs: Record<string, TaskNode>;
+}
+
 export interface ExplorationNodeQuery {
+  countOnly?: boolean;
   page?: number;
   size?: number;
   kinds?: ExploreKind[];

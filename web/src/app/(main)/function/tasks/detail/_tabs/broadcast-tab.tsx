@@ -27,6 +27,7 @@ import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { startPolling } from "@/lib/polling";
 import { api } from "@/lib/api";
 import { type Tone, toneClasses, toneDot } from "@/lib/status";
 import type { Edge, ExploreKind, TaskNode } from "@/lib/types";
@@ -142,7 +143,7 @@ const SUMMARY_FIELDS: Record<string, string[]> = {
 function summaryOf(n: TaskNode): string {
   const raw = n.payload ?? "";
   if (!raw.trim()) return "";
-  for (const field of SUMMARY_FIELDS[viewKind(n)] ?? []) {
+  for (const field of [...(SUMMARY_FIELDS[viewKind(n)] ?? []), "summary"]) {
     try {
       const obj: unknown = JSON.parse(raw);
       if (obj && typeof obj === "object") {
@@ -247,20 +248,54 @@ function RelatedList({
   );
 }
 
-function BroadcastRow({
-  node,
-  edges,
-  refs,
-  now,
-  fresh,
-}: {
-  node: TaskNode;
-  edges: Edge[];
-  refs: Record<string, TaskNode>;
-  now: number;
-  fresh: boolean;
-}) {
+function BroadcastRow({ node, taskId, now, fresh }: { node: TaskNode; taskId: string; now: number; fresh: boolean }) {
   const [open, setOpen] = React.useState(false);
+  const [detail, setDetail] = React.useState<import("@/lib/types").ExplorationNodeDetail | null>(null);
+  const [error, setError] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const lastDetailPage = React.useRef<[number, number]>([0, 0]);
+  const controller = React.useRef<AbortController | null>(null);
+  const loadDetail = async (body = 0, edge = 0) => {
+    lastDetailPage.current = [body, edge];
+    controller.current?.abort();
+    const c = new AbortController();
+    controller.current = c;
+    const timer = setTimeout(() => c.abort(new Error("详情加载超时，请重试")), 15000);
+    setBusy(true);
+    setError("");
+    try {
+      const d = await api.explorationNodeDetail(taskId, node.id, body, edge, c.signal);
+      if (c.signal.aborted) return;
+      setDetail((prev) =>
+        !prev
+          ? d
+          : {
+              ...d,
+              payload: body < 0 ? prev.payload : body === 0 ? d.payload : prev.payload + d.payload,
+              payload_next_offset: body < 0 ? prev.payload_next_offset : d.payload_next_offset,
+              edges: edge < 0 ? prev.edges : edge === 0 ? d.edges : [...prev.edges, ...d.edges],
+              edges_next_offset: edge < 0 ? prev.edges_next_offset : d.edges_next_offset,
+              refs: { ...prev.refs, ...d.refs },
+            },
+      );
+    } catch (e) {
+      if (controller.current === c && (!c.signal.aborted || c.signal.reason?.message?.includes("超时")))
+        setError((e as Error).message);
+    } finally {
+      clearTimeout(timer);
+      if (controller.current === c) setBusy(false);
+    }
+  };
+  React.useEffect(() => {
+    if (open) void loadDetail();
+    return () => {
+      controller.current?.abort();
+      controller.current = null;
+    };
+    // Details are fetched on expansion, not on every list poll.
+  }, [open, taskId, node.id]);
+  const edges = detail?.edges ?? [];
+  const refs = detail?.refs ?? {};
   const kind = viewKind(node);
   const meta = KIND_META[kind] ?? KIND_META.fact;
   const Icon = meta.icon;
@@ -328,6 +363,15 @@ function BroadcastRow({
               <span>来源 {node.origin || "system"}</span>
               <span>{Number.isNaN(ts) ? node.ts : new Date(ts).toLocaleString("zh-CN")}</span>
             </div>
+            {busy && <p>加载详情…</p>}
+            {error && (
+              <p role="alert">
+                {error}
+                <Button variant="ghost" onClick={() => void loadDetail(...lastDetailPage.current)}>
+                  重试
+                </Button>
+              </p>
+            )}
             {(upstream.length > 0 || downstream.length > 0) && (
               <div className="flex flex-col gap-3 sm:flex-row">
                 <RelatedList title="上游 · 由此而来" rows={upstream} refs={refs} />
@@ -337,9 +381,19 @@ function BroadcastRow({
             <div>
               <div className="mb-1.5 text-xs font-medium text-muted-foreground">payload</div>
               <pre className="max-h-64 overflow-auto rounded-md border bg-background p-3 font-mono text-xs whitespace-pre-wrap">
-                {prettyPayload(node.payload)}
+                {detail ? prettyPayload(detail.payload) : ""}
               </pre>
             </div>
+            {detail && detail.payload_next_offset >= 0 && (
+              <Button variant="outline" disabled={busy} onClick={() => void loadDetail(detail.payload_next_offset, -1)}>
+                加载后续正文
+              </Button>
+            )}
+            {detail && detail.edges_next_offset >= 0 && (
+              <Button variant="outline" disabled={busy} onClick={() => void loadDetail(-1, detail.edges_next_offset)}>
+                加载更多关联节点
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -357,8 +411,8 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
   const [live, setLive] = React.useState(true);
 
   const [items, setItems] = React.useState<TaskNode[]>([]);
-  const [edges, setEdges] = React.useState<Edge[]>([]);
-  const [refs, setRefs] = React.useState<Record<string, TaskNode>>({});
+  const [loadError, setLoadError] = React.useState("");
+  const polling = React.useRef<ReturnType<typeof startPolling> | null>(null);
   const [total, setTotal] = React.useState(0);
   const [loaded, setLoaded] = React.useState(false);
   const [freshIDs, setFreshIDs] = React.useState<Set<string>>(new Set());
@@ -399,17 +453,16 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
       baselineRef.current = null;
       setPending(0);
     }
-    const load = () =>
+    const load = (signal: AbortSignal) =>
       api
-        .explorationNodes(taskId, { page, size, kinds, q: query, order })
+        .explorationNodes(taskId, { page, size, kinds, q: query, order, countOnly: !atLive && rendered }, signal)
         .then((r) => {
-          if (!alive) return;
+          if (!alive || signal.aborted) return;
+          setLoadError("");
           // 直播位每轮都刷新;其它位置只渲染第一次,之后轮询仅更新未读计数。
           if (atLive || !rendered) {
             rendered = true;
             setItems(r.items);
-            setEdges(r.edges);
-            setRefs(r.refs);
           }
           setTotal(r.total);
           if (atLive) {
@@ -424,19 +477,17 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
           }
           setLoaded(true);
         })
-        .catch(() => {
-          // 轮询是尽力而为:保留上一次成功的播报内容,下一轮自动重试。
+        .catch((e: Error) => {
+          if (alive && (!signal.aborted || signal.reason?.message?.includes("超时"))) {
+            setLoadError(e.message);
+            setLoaded(true);
+          }
         });
-    void load();
-    if (!live) {
-      return () => {
-        alive = false;
-      };
-    }
-    const timer = setInterval(load, POLL_MS);
+    const next = startPolling(load, live ? POLL_MS : null);
+    polling.current = next;
     return () => {
       alive = false;
-      clearInterval(timer);
+      next.stop();
     };
   }, [taskId, page, size, kinds, query, order, live, atLive]);
 
@@ -472,6 +523,14 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
 
   return (
     <Card className="overflow-hidden py-0">
+      {loadError && (
+        <p role="alert">
+          {loadError}
+          <Button variant="ghost" onClick={() => polling.current?.refresh()}>
+            重试
+          </Button>
+        </p>
+      )}
       {/* 工具条 */}
       <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <div className="relative w-full sm:w-64">
@@ -572,14 +631,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
             <div key={group.day}>
               <div className="py-2 pl-[6.25rem] text-xs font-medium text-muted-foreground">{group.day}</div>
               {group.rows.map((node) => (
-                <BroadcastRow
-                  key={node.id}
-                  node={node}
-                  edges={edges}
-                  refs={refs}
-                  now={now}
-                  fresh={freshIDs.has(node.id)}
-                />
+                <BroadcastRow key={node.id} node={node} taskId={taskId} now={now} fresh={freshIDs.has(node.id)} />
               ))}
             </div>
           ))

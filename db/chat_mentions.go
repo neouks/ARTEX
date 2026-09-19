@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ChatMention is a lightweight search result. Details are read again on send.
@@ -66,29 +68,49 @@ func (d *DB) SearchChatMentionsPage(ctx context.Context, kind, query, cursor str
 		}
 	}
 	pattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(query) + "%"
-	rows, err := d.QueryContext(ctx, `
-SELECT kind, id, left(label, 160), left(description, 240) FROM (
- (SELECT 'finding' AS kind, id, COALESCE(NULLIF(name,''), vulnclass) AS label,
-         concat_ws(' · ', severity, status, left(summary, 160)) AS description
-  FROM findings WHERE ($1='' OR $1='finding') AND
-    ($2='' OR id::text=$2 OR concat_ws(' ',name,vulnclass,summary) ILIKE $3)
-    AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND 'finding'>$5))))
-  ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
- UNION ALL
- (SELECT 'company', id, name, nkey FROM companies
-  WHERE ($1='' OR $1='company') AND ($2='' OR id::text=$2 OR name ILIKE $3 OR nkey ILIKE $3)
-    AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND 'company'>$5))))
-  ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
- UNION ALL
- (SELECT type, id,
-    CASE WHEN type='endpoint' THEN concat_ws(' ',NULLIF(method,''),url)
-         ELSE COALESCE(NULLIF(app_name,''),NULLIF(url,''),NULLIF(domain,''),NULLIF(ip,''),NULLIF(bundle_id,''),'资产 #'||id::text) END,
-    concat_ws(' · ',type,NULLIF(page_title,''),NULLIF(service_name,''),NULLIF(bundle_id,''),NULLIF(ip,''),port::text)
-  FROM assets WHERE ($1='' OR $1='asset' OR type=$1) AND
-    ($2='' OR id::text=$2 OR concat_ws(' ',domain,root_domain,ip,url,app_name,bundle_id,page_title,service_name,method) ILIKE $3)
-    AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND type>$5))))
-  ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
-) matches ORDER BY (id::text=$2) DESC, id DESC, kind LIMIT 21`, kind, query, pattern, after.ID, after.Kind, after.Exact)
+	// Exact IDs use the primary key; fuzzy candidates use the trigram index.
+	// Keeping them in separate branches avoids an OR across incompatible indexes.
+	exactID, parseErr := strconv.ParseInt(query, 10, 64)
+	if parseErr != nil || exactID < 0 {
+		exactID = 0
+	}
+	args := []any{pattern, after.ID, after.Kind, exactID}
+	var branches []string
+	add := func(table, k, label, description, search, scope string) {
+		base := "SELECT " + k + " AS kind,id," + label + " AS label," + description + " AS description"
+		if exactID > 0 && (cursor == "" || after.Exact) {
+			where := "id=$4 AND " + scope
+			if cursor != "" {
+				where += " AND " + k + ">$3"
+			}
+			branches = append(branches, "("+base+",true AS exact FROM "+table+" WHERE "+where+")")
+		}
+		where := scope + " AND id<>$4 AND $1::text IS NOT NULL AND $2::bigint>=0 AND $3::text IS NOT NULL"
+		if query != "" {
+			where += " AND " + search + " ILIKE $1"
+		}
+		if cursor != "" && !after.Exact {
+			where += " AND (id<$2 OR (id=$2 AND " + k + ">$3))"
+		}
+		branches = append(branches, "("+base+",false AS exact FROM "+table+" WHERE "+where+" ORDER BY id DESC LIMIT 21)")
+	}
+	if kind == "" || kind == "finding" {
+		add("findings", "'finding'", "COALESCE(NULLIF(name,''),vulnclass)", "concat_ws(' · ',severity,status,left(summary,160))", mentionFindingText, "true")
+	}
+	if kind == "" || kind == "company" {
+		add("companies", "'company'", "name", "nkey", mentionCompanyText, "true")
+	}
+	if kind != "finding" && kind != "company" {
+		scope := "true"
+		if kind != "" && kind != "asset" {
+			args = append(args, kind)
+			scope = "type=$5"
+		}
+		add("assets", "type", `CASE WHEN type='endpoint' THEN concat_ws(' ',NULLIF(method,''),url) ELSE COALESCE(NULLIF(app_name,''),NULLIF(url,''),NULLIF(domain,''),NULLIF(ip,''),NULLIF(bundle_id,''),'资产 #'||id::text) END`, `concat_ws(' · ',type,NULLIF(page_title,''),NULLIF(service_name,''),NULLIF(bundle_id,''),NULLIF(ip,''),port::text)`, mentionAssetText, scope)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rows, err := d.QueryContext(ctx, `SELECT kind,id,left(label,160),left(description,240) FROM (`+strings.Join(branches, " UNION ALL ")+`) matches ORDER BY exact DESC,id DESC,kind LIMIT 21`, args...)
 	if err != nil {
 		return page, err
 	}
@@ -106,7 +128,7 @@ SELECT kind, id, left(label, 160), left(description, 240) FROM (
 	if len(page.Items) > 20 {
 		page.Items = page.Items[:20]
 		last := page.Items[19]
-		blob, _ := json.Marshal(chatMentionCursor{last.ID, last.Kind, fmt.Sprint(last.ID) == query, kind, query})
+		blob, _ := json.Marshal(chatMentionCursor{last.ID, last.Kind, exactID > 0 && last.ID == exactID, kind, query})
 		page.NextCursor = base64.RawURLEncoding.EncodeToString(blob)
 	}
 	return page, nil

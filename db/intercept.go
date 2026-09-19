@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -180,7 +181,12 @@ func scanInterceptPending(s interface{ Scan(...any) error }, p *InterceptPending
 
 // ListPendingIntercepts returns all unresolved approval requests, newest first.
 func (d *DB) ListPendingIntercepts() ([]InterceptPending, error) {
-	rows, err := d.Query(`SELECT ` + interceptPendingCols + ` FROM intercept_pending WHERE status='pending' ORDER BY created_at DESC`)
+	return d.ListPendingInterceptsContext(context.Background(), "")
+}
+func (d *DB) ListPendingInterceptsContext(ctx context.Context, task string) ([]InterceptPending, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, err := d.QueryContext(ctx, `SELECT `+interceptPendingCols+` FROM intercept_pending WHERE status='pending' AND ($1='' OR task_id=$1) ORDER BY created_at DESC`, task)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +299,7 @@ type InterceptApprovalFilter struct {
 
 // ListAllInterceptsPage returns one 1-based page and the total matching count.
 func (d *DB) ListAllInterceptsPage(page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
-	return d.listInterceptsPage("", page, size, filter)
+	return d.ListInterceptsPageContext(context.Background(), "", page, size, filter)
 }
 
 // ListTaskIntercepts returns all intercept_pending rows for a specific task (newest first).
@@ -316,10 +322,12 @@ func (d *DB) ListTaskIntercepts(taskID string) ([]InterceptApprovalRow, error) {
 
 // ListTaskInterceptsPage is the paginated variant of ListTaskIntercepts.
 func (d *DB) ListTaskInterceptsPage(taskID string, page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
-	return d.listInterceptsPage(taskID, page, size, filter)
+	return d.ListInterceptsPageContext(context.Background(), taskID, page, size, filter)
 }
 
-func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
+func (d *DB) ListInterceptsPageContext(ctx context.Context, taskID string, page, size int, filter InterceptApprovalFilter) ([]InterceptApprovalRow, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if page < 1 {
 		page = 1
 	}
@@ -347,7 +355,7 @@ func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptA
 		where = " WHERE " + strings.Join(conditions, " AND ")
 	}
 	var total int
-	if err := d.QueryRow("SELECT COUNT(*) FROM intercept_pending ip"+where, args...).Scan(&total); err != nil {
+	if err := d.QueryRowContext(ctx, "SELECT COUNT(*) FROM intercept_pending ip"+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -357,7 +365,7 @@ func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptA
 		" ORDER BY ip.created_at DESC, ip.id DESC LIMIT $" + fmt.Sprint(limitArg) +
 		" OFFSET $" + fmt.Sprint(offsetArg)
 	args = append(args, size, offset)
-	rows, err := d.Query(dataQ, args...)
+	rows, err := d.QueryContext(ctx, dataQ, args...)
 	if err != nil {
 		return nil, 0, err
 	}

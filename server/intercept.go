@@ -204,7 +204,7 @@ func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	pending, err := pg.ListPendingIntercepts()
+	pending, err := pg.ListPendingInterceptsContext(r.Context(), r.URL.Query().Get("task"))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -266,7 +266,7 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	page, size := interceptPageParams(q)
-	items, total, err := pg.ListTaskInterceptsPage(taskID, page, size, filter)
+	items, total, err := pg.ListInterceptsPageContext(r.Context(), taskID, page, size, filter)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -301,7 +301,7 @@ func (s *Server) interceptHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, size := interceptPageParams(q)
-	items, total, err := pg.ListAllInterceptsPage(page, size, filter)
+	items, total, err := pg.ListInterceptsPageContext(r.Context(), "", page, size, filter)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
