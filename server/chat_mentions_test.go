@@ -122,6 +122,11 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	defer m.Close()
+	// Use this fixture's catalog, not a process-global resolver left by a
+	// previous server whose database has already been closed.
+	oldResolve, oldBinding := agent.ToolResolve, agent.FindingTrafficBindingEnabled
+	wireTools(m.pg, nil)
+	t.Cleanup(func() { agent.ToolResolve, agent.FindingTrafficBindingEnabled = oldResolve, oldBinding })
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{ctx: ctx, m: m, engine: NewEngine(m)}
 	task, err := m.CreateTask("Worker mention test", "Read referenced records", nil, 0, 0)
