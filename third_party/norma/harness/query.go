@@ -780,7 +780,7 @@ func (l *loop) requestMessages() []llm.Message {
 
 func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
 	l.maybeInjectTodoReminder()
-	msgs := l.requestMessages()
+	msgs := dedupeDiscoveryResults(l.requestMessages())
 	if l.in.SystemReminder != "" {
 		msgs = append([]llm.Message{llm.UserText(l.in.SystemReminder)}, msgs...)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"path/filepath"
 	"runtime"
@@ -20,12 +19,14 @@ import (
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
 // an agent's visible skills are loaded from the filesystem and packed into one
-// Skill meta-tool; its visible stdio MCP servers are spawned and expanded to
+// Skill meta-tool; its visible MCP tools use cached metadata and run-local lazy
+// connections, and are expanded to
 // mcp__server__tool. skillDir is the root directory of all skill subdirectories.
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
 func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+	metadataCache := &mcpRuntimeCache{}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
@@ -72,11 +73,11 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			}
 		}
 
-		// --- mcp: connect enabled servers that are directly visible to this agent
+		// --- mcp: assemble enabled servers that are directly visible to this agent
 		// OR skill-gated (named in a visible skill's mcps field). Directly-visible
 		// and NOT gated → global (unlocked from session start). Skill-gated →
 		// deferred until that skill is invoked (regardless of direct visibility).
-		var closers []io.Closer
+		var closers []func()
 		serverTools := map[string][]string{} // server name → its tool names
 		var allNames, globalNames []string
 		globalSet := map[string]bool{}
@@ -93,17 +94,12 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
-				cl, err := connectMCP(ctx, m)
+				ts, closeRun, err := metadataCache.prepare(ctx, m, connectMCP)
 				if err != nil {
-					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+					log.Printf("[mcp] %s 工具装配失败: %v", m.Name, err)
 					continue
 				}
-				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
-				if err != nil {
-					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-					continue
-				}
+				closers = append(closers, closeRun)
 				for _, t := range ts {
 					extra = append(extra, meterMCPTool(t, pg, m.ID, m.Name, a.Key, runInfo))
 					allNames = append(allNames, t.Name())
@@ -176,7 +172,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 
 		cleanup := func() {
 			for _, c := range closers {
-				_ = c.Close()
+				c()
 			}
 		}
 		def := agent.DeferredInfo{
