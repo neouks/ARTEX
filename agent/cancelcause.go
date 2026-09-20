@@ -42,6 +42,8 @@ var (
 		"任务正在删除（DELETE /api/tasks/{id}），删除屏障已取消该任务正在运行的 Planner、Worker 和主 Agent；本次运行结果不会再被使用")
 	AbortPausedOnReload = cause("paused_on_reload", "后端恢复了任务的暂停状态",
 		"后端启动时根据数据库中持久化的状态恢复了任务暂停。本次运行被取消；正常情况下恢复阶段没有正在运行的 Agent")
+	AbortTaskFinishedByUser = cause("task_finished_by_user", "用户结束了任务",
+		"用户主动结束任务，取消正在运行的 Planner 和 Worker；保留会话、意图及已有产出，不改变目标达成状态")
 	AbortGoalMet = cause("goal_met", "规划者判定任务目标已达成",
 		"规划者判定任务目标已达成并将任务置为 done，随后取消仍在运行的 Worker；这些意图会标记为 stopped，而不是失败")
 	AbortSettleDrainTimeout = cause("settle_drain_timeout", "任务超时收尾的等待时间已用尽",

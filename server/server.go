@@ -842,6 +842,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)    // 约束管理:修改约束
 	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint) // 约束管理:删除约束
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
+	mux.HandleFunc("PATCH /api/tasks/{id}/execution-mode", s.setExecutionMode)
+	mux.HandleFunc("POST /api/tasks/{id}/intents/dispatch", s.dispatchIntents)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
@@ -1227,8 +1229,8 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if req.Action != "pause" && req.Action != "resume" {
-		writeErr(w, 400, "action must be pause|resume")
+	if req.Action != "pause" && req.Action != "resume" && req.Action != "finish" {
+		writeErr(w, 400, "action must be pause|resume|finish")
 		return
 	}
 	result, err := s.applyTaskControl(t, req.Action)
@@ -1351,6 +1353,8 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.engine.decInflight(t.ID)
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
 	intents, err := t.Store.ListByKind(db.KindIntent, 1000000)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -1358,12 +1362,12 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 	}
 	before := make([]*db.Node, 0)
 	for _, intent := range intents {
-		if intent.State == "blocked" {
+		if intent.State == "blocked" && !intent.UserCancelled() {
 			copy := *intent
 			before = append(before, &copy)
 		}
 	}
-	n, err := t.Store.ReopenBlockedIntents()
+	n, err := t.Store.ReopenBlockedIntentsByUser()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -3802,13 +3806,18 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 				s.engine.emitActivity(t, rec)
 			}
 			maTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
-			resume := func() { s.reviveTask(t) } // set_goals 新增目标 → 把任务拉回 running
+			resume := func() {
+				if ctx.Err() == nil {
+					s.reviveTask(t)
+				}
+			} // set_goals 新增目标 → 把任务拉回 running
 			// 把上传附件的【绝对路径】清单拼进发给 agent 的消息,它据此用 Read/Bash 打开文件。
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Guard, t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
+			dispatchCtx := s.intentDispatchContext(ctx, t)
+			_, err := ma.Chat(dispatchCtx, maTaskID, mainSeg, s.m.Assets(), t.Guard, t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})

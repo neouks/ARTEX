@@ -434,6 +434,13 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	executionMode, modeErr := ts.ExecutionMode()
+	if modeErr != nil {
+		return false, "", modeErr
+	}
+	if executionMode == db.ExecutionManual {
+		sysBody += "\n当前任务为手工模式：只规划并登记意图，等待用户下发；不得通过其他工具自行启动 Worker。目标达成仅提供完成建议，由用户结束任务。"
+	}
 	feedback, feedbackErr := tsx.findingDeletionFeedbackPage(0, 20)
 	if feedbackErr != nil {
 		return false, "", feedbackErr

@@ -106,6 +106,7 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 
 func mainAgentSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	body += "\n主 Agent 的 add_intent 新增即下发，dispatch_intents 用于执行已有待选意图。仅提供规划建议时不要创建意图。实际执行受审批和并发准入约束，以工具返回的 dispatch 状态为准。手工模式下目标达成或意图执行完毕均不会自动结束任务，由用户结束；托管模式沿用原自动完成规则。"
 	return body + artifactSpec(workDir)
 }
 
@@ -115,6 +116,11 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 // worker/planner sessions — not just the final answer.
 func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal, notifyHint func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
+	mode, modeErr := ts.ExecutionMode()
+	if modeErr != nil {
+		return "", modeErr
+	}
+	message = "【当前执行模式：" + mode + "】\n" + message
 	tsx.SetFindingRecorder(m.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())

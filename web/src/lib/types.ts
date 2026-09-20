@@ -6,6 +6,7 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  execution_mode?: "managed" | "manual";
   asset_approval_template?: AssetApprovalTemplate;
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述

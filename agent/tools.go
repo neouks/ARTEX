@@ -118,6 +118,7 @@ func restrictNodeOrigins(origins map[int64]int64, visible map[int64]struct{}) ma
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
+	directDispatch  bool // trusted host-serialized Main Agent submission only
 	findingRecorder FindingRecorder
 	overviewReads   *overviewReadScope // only set on a copy for one overview call
 	as              *db.AssetStore     // asset store (optional; nil = asset tools not available)
@@ -1663,6 +1664,9 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
+	if t.directDispatch {
+		payload["dispatch_requested"] = true
+	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1690,7 +1694,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
-	return writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
+	return submissionTool{writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"已知未授权候选本轮跳过；未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "maxItems": 4, "description": "【优先用这个】要新增的探索方向数组，最多 4 条，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
@@ -1699,7 +1703,16 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			t := t
+			if locked, _ := ctx.Value(intentSubmissionLockedKey{}).(bool); locked && RunInfoFrom(ctx).AgentKey == "mainagent" {
+				copied := *t
+				copied.directDispatch = true
+				t = &copied
+			}
+			if err := ctx.Err(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			var a struct {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
@@ -1725,6 +1738,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			accessErrors := map[string]targetAccessView{}
 			duplicates := map[string]int64{}
 			createdAny := false
+			var newlyCreated []int64
 			for i, it := range items {
 				id, created, err := t.addOneIntentResult(it)
 				if err != nil {
@@ -1738,6 +1752,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				ids[i] = id
 				if created {
 					createdAny = true
+					newlyCreated = append(newlyCreated, id)
 				} else {
 					duplicates[strconv.Itoa(i)] = id
 				}
@@ -1747,7 +1762,25 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			// 拉回 running，worker 才能领这条意图执行。resumeTask 仅由主 agent 的 Chat 接入
 			// (SetResumeTask)；planner 的 ToolSet 为 nil，故 planner 自己调 add_intent 时此段
 			// no-op，不影响其正常产意图。意图节点已在上面建好(open)，复活时不会被误判抽干。
-			if createdAny && t.resumeTask != nil {
+			var dispatchResults []IntentDispatchResult
+			if RunInfoFrom(ctx).AgentKey == "mainagent" {
+				var dispatchIDs []int64
+				for _, id := range ids {
+					if id > 0 {
+						dispatchIDs = append(dispatchIDs, id)
+					}
+				}
+				if len(dispatchIDs) > 0 {
+					var dispatchErr error
+					dispatchResults, dispatchErr = t.dispatch(context.WithValue(ctx, createdIntentKey{}, newlyCreated), dispatchIDs)
+					if dispatchErr != nil {
+						for _, id := range dispatchIDs {
+							dispatchResults = append(dispatchResults, IntentDispatchResult{ID: id, Status: "rejected", Error: dispatchErr.Error()})
+						}
+					}
+				}
+			}
+			if createdAny && t.resumeTask != nil && RunInfoFrom(ctx).AgentKey != "mainagent" {
 				t.resumeTask()
 			}
 
@@ -1759,11 +1792,20 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 					return actool.Errorf(e), nil
 				}
 				if existingID, duplicate := duplicates["0"]; duplicate {
+					if len(dispatchResults) > 0 {
+						return actool.Text(fmt.Sprintf("intent already active: %d; dispatch: %s %s", existingID, dispatchResults[0].Status, dispatchResults[0].Error)), nil
+					}
 					return actool.Text(fmt.Sprintf("intent already active: %d", existingID)), nil
+				}
+				if len(dispatchResults) > 0 {
+					return actool.Text(fmt.Sprintf("intent created: %d; dispatch: %s %s", ids[0], dispatchResults[0].Status, dispatchResults[0].Error)), nil
 				}
 				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
 			}
 			out := map[string]any{"ids": ids}
+			if len(dispatchResults) > 0 {
+				out["dispatch_results"] = dispatchResults
+			}
 			if len(accessErrors) > 0 {
 				out["access_errors"] = accessErrors
 			}
@@ -1774,7 +1816,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				out["duplicates"] = duplicates
 			}
 			return jsonResult(out)
-		})
+		})}
 }
 
 func (t *ToolSet) listGoals() actool.CoreTool {

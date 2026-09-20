@@ -59,7 +59,7 @@ func (s *Server) workerQueue(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		t.Notify()
 	}
-	writeJSON(w, 200, map[string]any{"items": taskNodeDTOs(q.Items), "manual": q.Manual, "version": q.Version})
+	writeJSON(w, 200, map[string]any{"items": taskNodeDTOs(q.Items), "manual": q.Manual, "version": q.Version, "execution_mode": q.ExecutionMode})
 }
 func (s *Server) deleteWorker(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))

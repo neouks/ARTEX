@@ -1489,7 +1489,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.queueExec(`UPDATE exploration_nodes SET state='running', owner=$1
+	res, err := s.queueExec(`UPDATE exploration_nodes SET state='running', owner=$1, payload=payload || jsonb_build_object('dispatch_requested',true)
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 	  AND NOT EXISTS (
 	    SELECT 1
@@ -1498,7 +1498,7 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND payload
 	                         AND task_ctx.deleted_at IS NULL
 	    WHERE ea.node_id=exploration_nodes.id
 	      AND NOT task_asset_effectively_approved(task_ctx.id, ea.asset_id)
-	  )`, owner, id, s.expID)
+	  )`+intentDispatchPredicate, owner, id, s.expID)
 	if err != nil {
 		return false, err
 	}

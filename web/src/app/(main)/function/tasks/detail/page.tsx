@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { ExecutionControl } from "./execution-control";
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -447,6 +448,7 @@ function TaskDetailInner() {
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
+          <ExecutionControl key={task.id} task={task} onUpdated={load} />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {canArchive ? (

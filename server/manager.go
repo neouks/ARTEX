@@ -27,6 +27,7 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
+	ExecutionMode   string     `json:"execution_mode"`
 	workerControlMu sync.Mutex // Serializes user controls with worker admission.
 
 	ID           string `json:"id"`
@@ -83,6 +84,7 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
+	ExecutionMode         string
 	AssetApprovalTemplate string
 	Name                  string
 	PinnedAt              int64
@@ -121,6 +123,7 @@ func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 		CompletedAt:           t.CompletedAt,
 		FirstRunAt:            t.FirstRunAt,
 		AssetApprovalTemplate: t.AssetApprovalTemplate,
+		ExecutionMode:         t.ExecutionMode,
 		DeadlineAt:            t.DeadlineAt,
 		SourceTaskIDs:         append([]int64(nil), t.SourceTaskIDs...),
 		CompanyIDs:            append([]int64(nil), t.CompanyIDs...),
@@ -146,6 +149,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.CompletedAt = state.CompletedAt
 	t.FirstRunAt = state.FirstRunAt
 	t.AssetApprovalTemplate = state.AssetApprovalTemplate
+	t.ExecutionMode = state.ExecutionMode
 	t.DeadlineAt = state.DeadlineAt
 	t.SourceTaskIDs = append(t.SourceTaskIDs[:0], state.SourceTaskIDs...)
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
@@ -915,6 +919,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled:       pt.CoverageEnabled,
 		AssetApprovalTemplate: pt.AssetApprovalTemplate,
+		ExecutionMode:         pt.ExecutionMode,
 		FirstRunAt:            unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}

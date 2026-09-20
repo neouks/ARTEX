@@ -30,6 +30,7 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
+	ExecutionMode         string        `json:"execution_mode"`
 	ID                    string        `json:"id"`
 	ExplorationID         int64         `json:"exploration_id"`
 	Name                  string        `json:"name"` // 可选任务名称;空=未命名
@@ -127,6 +128,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CompanyIDs:            lifecycle.CompanyIDs,
 		CoverageEnabled:       t.CoverageEnabled,
 		AssetApprovalTemplate: lifecycle.AssetApprovalTemplate,
+		ExecutionMode:         lifecycle.ExecutionMode,
 	}
 }
 

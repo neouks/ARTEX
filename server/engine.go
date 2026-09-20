@@ -901,7 +901,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
-				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
+				if won, err := e.completeAutomatically(t); err != nil {
 					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
 				} else if won {
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
@@ -959,8 +959,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
+			won, finishErr := e.completeAutomatically(t)
+			if finishErr != nil {
+				log.Printf("[planner] task %s 标记完成失败: %v", t.ID, finishErr)
+			}
+			if !won {
+				return
 			}
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
@@ -1299,6 +1303,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
 	t.workerControlMu.Lock()
 	defer t.workerControlMu.Unlock()
+	lifecycle := t.lifecycleSnapshot()
+	if e.IsPaused(t.ID) || lifecycle.Paused || lifecycle.Queued || isTerminalStatus(lifecycle.Status) || e.isSettling(t.ID) {
+		return fmt.Errorf("%w: 当前任务状态不允许恢复 Worker", db.ErrIntentStateConflict)
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1319,7 +1327,20 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	if node == nil || node.Kind != db.KindIntent {
 		return fmt.Errorf("intent not found")
 	}
-	changed, err := t.Store.CompareAndSetIntentState(intentID, "paused", "running")
+	if e.m.assets != nil {
+		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+		ids, accessErr := agent.IntentAssetIDs(t.Store, node)
+		if accessErr == nil {
+			accessErr = e.m.assets.ValidateTaskAssetsApproved(taskID, ids)
+		}
+		if accessErr == nil {
+			accessErr = e.m.assets.ValidateTaskHostsApproved(taskID, guard.CollectTargetHosts(node.Payload))
+		}
+		if accessErr != nil {
+			return accessErr
+		}
+	}
+	changed, err := t.Store.ClaimPausedIntentByUser(intentID)
 	if err != nil {
 		return err
 	}
@@ -1367,11 +1388,14 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	t.workerControlMu.Lock()
 	defer t.workerControlMu.Unlock()
+	if e.IsPaused(t.ID) || isTerminalStatus(t.lifecycleSnapshot().Status) {
+		return nil
+	}
 	node, err := t.Store.ClaimNextWorker(name, func(in *db.Node) bool {
 		if e.m.assets != nil {
 			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			ids, err := agent.IntentAssetIDs(t.Store, in)
-			return err == nil && e.m.assets.ValidateTaskAssetsApproved(taskID, ids) == nil
+			return err == nil && e.m.assets.ValidateTaskAssetsApproved(taskID, ids) == nil && e.m.assets.ValidateTaskHostsApproved(taskID, guard.CollectTargetHosts(in.Payload)) == nil
 		}
 		return true
 	})
@@ -1379,4 +1403,18 @@ func (e *Engine) claimNext(t *Task, name string) *db.Node {
 		log.Printf("[worker queue] task %s claim: %v", t.ID, err)
 	}
 	return node
+}
+
+// Mode transitions and automatic completion use the same admission mutex.
+func (e *Engine) completeAutomatically(t *Task) (bool, error) {
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
+	mode, err := t.Store.ExecutionMode()
+	if err != nil {
+		return false, err
+	}
+	if mode == db.ExecutionManual {
+		return false, nil
+	}
+	return e.m.SetTaskStatusGuarded(t.ID, "done")
 }

@@ -189,6 +189,13 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		t.Fatalf("prepare archived tombstone detached=%v err=%v", detached, err)
 	}
 	store := d.Exploration(task.ExplorationID)
+	if _, err := store.SetExecutionMode(ExecutionManual); err != nil {
+		t.Fatal(err)
+	}
+	selectedID, err := store.AddIntent(map[string]any{"summary": "archive selected", "dispatch_requested": true}, 1, nil, "mainagent")
+	if err != nil {
+		t.Fatal(err)
+	}
 	nodeID, err := store.AddNode(KindFact, map[string]any{"summary": "archived fact", "asset_ids": []int64{assetID}}, 1, "confirmed", "worker", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -309,6 +316,13 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}
 	if err != nil || live == nil {
 		t.Fatalf("restored task = %+v, %v", live, err)
+	}
+	selected, selectedErr := d.Exploration(task.ExplorationID).GetNode(selectedID)
+	if selectedErr != nil || selected == nil || !selected.DispatchRequested() {
+		t.Fatalf("dispatch selection lost: %+v %v", selected, selectedErr)
+	}
+	if live.ExecutionMode != ExecutionManual {
+		t.Fatalf("mode lost: %s", live.ExecutionMode)
 	}
 	if live.Name != "cold task" || !live.Paused {
 		t.Fatalf("restored task metadata mismatch: %+v", live)

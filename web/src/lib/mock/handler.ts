@@ -1314,7 +1314,12 @@ function mockWorkerQueue(taskId: string) {
       : b.priority - a.priority || Number(a.id.replace(/\D/g, "")) - Number(b.id.replace(/\D/g, "")),
   );
   if (!state.manual) state.order = items.map((item) => item.id);
-  return { items, manual: state.manual, version: state.version };
+  return {
+    items,
+    manual: state.manual,
+    version: state.version,
+    execution_mode: mockTasks.find((t) => t.id === taskId)?.execution_mode ?? "managed",
+  };
 }
 function syncMockQueues() {
   for (const key of mockQueueStates.keys()) mockWorkerQueue(key);
@@ -2102,6 +2107,44 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const action = b.action === "resume" ? "resume" : "pause";
     return { items: bodyIDs(b.task_ids).map((id) => controlMockTask(id, action)) };
   }
+  if (seg[0] === "tasks" && seg[2] === "execution-mode" && m === "PATCH") {
+    const task = mockTasks.find((t) => t.id === seg[1]);
+    if (!task) throw new Error("任务不存在");
+    if (b.execution_mode !== "managed" && b.execution_mode !== "manual") throw new Error("无效执行模式");
+    if ((task.execution_mode ?? "managed") !== b.execution_mode && b.execution_mode === "manual") {
+      for (const node of mockWorkerQueue(task.id).items) {
+        const payload = JSON.parse(node.payload ?? "{}");
+        delete payload.dispatch_requested;
+        node.payload = JSON.stringify(payload);
+      }
+    }
+    task.execution_mode = b.execution_mode;
+    return { ...task };
+  }
+  if (seg[0] === "tasks" && seg[2] === "intents" && seg[3] === "dispatch" && m === "POST") {
+    const task = mockTasks.find((t) => t.id === seg[1]);
+    if (!task) throw new Error("任务不存在");
+    if (!Array.isArray(b.intent_ids) || !b.intent_ids.length || b.intent_ids.length > 50)
+      throw new Error("一次下发 1..50 个意图");
+    const ids = Array.from(new Set(b.intent_ids.map(String)));
+    const results = ids.map((id) => {
+      const node = mockIntents.find((n) => n.id === id && !n.inherited);
+      if (!node) return { id, status: "rejected", error: "意图不存在或不属于当前任务" };
+      const payload = JSON.parse(node.payload ?? "{}");
+      if (node.state === "running") return { id, status: "running" };
+      if (node.state !== "open" || payload.cancelled_by_user)
+        return { id, status: "rejected", error: "仅待执行意图可下发" };
+      const status = payload.dispatch_requested ? "already_dispatched" : "dispatched";
+      node.payload = JSON.stringify({ ...payload, dispatch_requested: true });
+      return { id, status };
+    });
+    if (results.some((item) => ["dispatched", "already_dispatched"].includes(item.status))) {
+      task.paused = false;
+      task.status = "running";
+      task.queued = false;
+    }
+    return { results };
+  }
   if (seg[0] === "tasks" && seg[2] === "worker-queue") {
     const result = mockWorkerQueue(seg[1]);
     if (m === "GET" && seg.length === 3) return result;
@@ -2198,6 +2241,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     };
   }
   if (seg[0] === "tasks" && seg.length === 3 && seg[2] === "control" && m === "POST") {
+    if (b.action === "finish") {
+      const task = mockTasks.find((t) => t.id === seg[1]);
+      if (!task) throw new Error("任务不存在");
+      task.status = "done";
+      task.paused = false;
+      task.queued = false;
+      for (const node of mockIntents) if (!node.inherited && node.state === "running") node.state = "stopped";
+      return { id: task.id, status: "done", paused: false, queued: false };
+    }
     const action = b.action === "resume" ? "resume" : "pause";
     const result = controlMockTask(seg[1], action);
     if (!result.ok) throw new Error(result.error ?? "任务状态已变化");

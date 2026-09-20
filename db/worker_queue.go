@@ -34,14 +34,18 @@ func (s *ExplorationStore) queueExec(query string, args ...any) (sql.Result, err
 }
 
 type WorkerQueue struct {
-	Version int64   `json:"version"`
-	Manual  bool    `json:"manual"`
-	Items   []*Node `json:"items"`
+	ExecutionMode string  `json:"execution_mode"`
+	Version       int64   `json:"version"`
+	Manual        bool    `json:"manual"`
+	Items         []*Node `json:"items"`
 }
 
 func (s *ExplorationStore) queueSnapshot(tx *sql.Tx) (WorkerQueue, error) {
 	q := WorkerQueue{Items: []*Node{}}
 	if err := tx.QueryRow(`SELECT worker_queue_manual,worker_queue_version FROM explorations WHERE id=$1`, s.expID).Scan(&q.Manual, &q.Version); err != nil {
+		return q, err
+	}
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT execution_mode FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL),'managed')`, s.expID).Scan(&q.ExecutionMode); err != nil {
 		return q, err
 	}
 	rows, err := tx.Query(`SELECT `+nodeCols+` FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state='open'
@@ -135,11 +139,14 @@ func (s *ExplorationStore) ClaimNextWorker(owner string, eligible func(*Node) bo
 		return nil, err
 	}
 	for _, n := range q.Items {
+		if q.ExecutionMode == ExecutionManual && !n.DispatchRequested() {
+			continue
+		}
 		if eligible != nil && !eligible(n) {
 			continue
 		}
-		res, err := tx.Exec(`UPDATE exploration_nodes SET state='running',owner=$1 WHERE id=$2 AND exploration_id=$3 AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
- AND NOT EXISTS (SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id))`, owner, n.ID, s.expID)
+		res, err := tx.Exec(`UPDATE exploration_nodes SET state='running',owner=$1,payload=payload || jsonb_build_object('dispatch_requested',true) WHERE id=$2 AND exploration_id=$3 AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
+ AND NOT EXISTS (SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id))`+intentDispatchPredicate, owner, n.ID, s.expID)
 		if err != nil {
 			return nil, err
 		}

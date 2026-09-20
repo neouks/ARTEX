@@ -1606,3 +1606,6 @@ CREATE TABLE IF NOT EXISTS finding_deletion_feedback (
  deleted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_finding_deletion_feedback_task ON finding_deletion_feedback(task_id,id DESC);
+
+-- Execution selection is independent of queue ordering and task lifecycle.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'managed' CHECK (execution_mode IN ('managed','manual'));

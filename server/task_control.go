@@ -95,6 +95,9 @@ func (s *Server) resumeAdmissionMode(t *Task) string {
 // deliberately limited to paused tasks; reruns and finding follow-ups use
 // admitTask directly when they need to revive a terminal task.
 func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, error) {
+	if action == "finish" {
+		return s.finishTask(t)
+	}
 	return s.applyTaskControlWithCause(t, action, agent.AbortPausedByUser)
 }
 
@@ -150,6 +153,7 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 	default:
 		return out, fmt.Errorf("action must be pause|resume")
 	}
+	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "用户" + map[string]string{"pause": "暂停任务", "resume": "恢复任务"}[action]})
 	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "已暂停", "resume": "已继续"}[action])
 	return out, nil
 }
@@ -182,7 +186,14 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		out.State = "paused"
 	case "resume":
 		if node.State == "open" && !node.UserCancelled() {
-			out.State = "open"
+			results, err := s.dispatchTaskIntentsLocked(ctx, t, []int64{iid})
+			if err != nil {
+				return out, err
+			}
+			if len(results) != 1 || results[0].Status == "rejected" {
+				return out, fmt.Errorf("意图下发失败: %v", results)
+			}
+			out.State, out.Queued = "open", t.lifecycleSnapshot().Queued
 			return out, nil
 		}
 		if node.State != "paused" && !(node.State == "stopped" && node.UserCancelled()) {

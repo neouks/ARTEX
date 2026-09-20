@@ -295,7 +295,7 @@ export const api = {
       active_llm_profile_id: activeLLMProfileId ?? null,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
-  controlTask: (id: string, action: "pause" | "resume") =>
+  controlTask: (id: string, action: "pause" | "resume" | "finish") =>
     post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
     post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
@@ -322,14 +322,25 @@ export const api = {
     post<{ items: ArchiveBatchItem[] }>("/task-archives/delete/batch", { archive_ids: archiveIds }),
   deleteWorker: (taskId: string, intentId: string) =>
     del<{ id: string; deleted: boolean }>(`/tasks/${taskId}/intents/${intentId}`),
-  workerQueue: (taskId: string) =>
-    get<{ items: TaskNode[]; version: number; manual: boolean }>(`/tasks/${taskId}/worker-queue`),
-  moveWorker: (taskId: string, id: string, beforeId: string | null, version: number) =>
-    post<{ items: TaskNode[]; version: number; manual: boolean }>(`/tasks/${taskId}/worker-queue/move`, {
-      id,
-      before_id: beforeId,
-      version,
+  setExecutionMode: (id: string, execution_mode: "managed" | "manual") =>
+    patch<Task>(`/tasks/${id}/execution-mode`, { execution_mode }),
+  dispatchIntents: (id: string, intent_ids: string[]) =>
+    post<{ results: { id: number | string; status: string; error?: string }[] }>(`/tasks/${id}/intents/dispatch`, {
+      intent_ids,
     }),
+  workerQueue: (taskId: string) =>
+    get<{ items: TaskNode[]; version: number; manual: boolean; execution_mode?: "managed" | "manual" }>(
+      `/tasks/${taskId}/worker-queue`,
+    ),
+  moveWorker: (taskId: string, id: string, beforeId: string | null, version: number) =>
+    post<{ items: TaskNode[]; version: number; manual: boolean; execution_mode?: "managed" | "manual" }>(
+      `/tasks/${taskId}/worker-queue/move`,
+      {
+        id,
+        before_id: beforeId,
+        version,
+      },
+    ),
   controlIntent: (taskId: string, intentId: string, action: "pause" | "resume" | "cancel", reason?: string) =>
     post<{
       id: number;
