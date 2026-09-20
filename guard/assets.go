@@ -16,6 +16,7 @@ import (
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/noa"
 )
 
 // TaskAssetPolicy preflights explicit asset IDs, structured targets and URLs.
@@ -162,6 +163,12 @@ func (p TaskAssetPolicy) denial(err error, hosts []string, ids []int64) (string,
 
 func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	if p.Store == nil || p.TaskID <= 0 {
+		return "", false
+	}
+	// Compress summarizes existing context; its text is not an execution target.
+	// Skip only this built-in's exact name, before inspecting IDs or URLs. The
+	// enclosing hook still invokes the remaining hook chain.
+	if tool == noa.CompressToolName {
 		return "", false
 	}
 	// Discovery registers candidates; authorization belongs to the transaction
