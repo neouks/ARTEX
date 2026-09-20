@@ -148,7 +148,7 @@ func flattenText(blocks []ContentBlock) string {
 func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
 	body := oaReq{
 		Model:       p.cfg.Model,
-		Messages:    toOpenAIMessages(joinSystem(req.System), req.Messages),
+		Messages:    pairOpenAIMessages(toOpenAIMessages(joinSystem(req.System), req.Messages)),
 		Temperature: req.Temperature,
 		Stop:        req.Stop,
 		Stream:      stream,
