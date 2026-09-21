@@ -3,7 +3,6 @@
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { SourceTranscript } from "@/components/source-transcript";
 
 import {
@@ -584,18 +583,10 @@ export function SessionsTab({
   const [currentSeg, setCurrentSeg] = React.useState(0);
   const [creatingMain, setCreatingMain] = React.useState(false);
   const [confirmNewMain, setConfirmNewMain] = React.useState(false);
-  // Narrow screens use a drawer; desktop sidebar visibility is independent.
+  // 手机端（<lg）会话列表默认折叠：屏幕高度本就紧张，列表若固定占掉 10~15rem，
+  // 下方的会话记录会被挤到只剩标题与输入框。折叠后记录区拿到几乎全部高度，
+  // 点标题栏可展开选会话，选完自动收起。桌面端不受影响（lg 起始终展开）。
   const [listOpen, setListOpen] = React.useState(false);
-  const [desktopCollapsed, setDesktopCollapsed] = React.useState(false);
-  const [compactLayout, setCompactLayout] = React.useState(false);
-  const [showLatest, setShowLatest] = React.useState(false);
-  React.useEffect(() => {
-    const media = window.matchMedia("(max-width: 1023px)");
-    const update = () => setCompactLayout(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
   // Per-session lazily-loaded caches, keyed by session_key (main | plan | intent:<id>).
   const [store, setStore] = React.useState<SessionStore>({});
   // Worker sessions derived from exploration intents (paged past the old 300 cap).
@@ -1713,7 +1704,6 @@ export function SessionsTab({
     const onScroll = () => {
       if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
-      setShowLatest(!atBottomRef.current);
       if (vp.scrollTop <= 80) loadEarlier(activeKeyRef.current, viewport); // near top → older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
@@ -1726,7 +1716,6 @@ export function SessionsTab({
     if (vp && !approvalFocus.state) {
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
-      setShowLatest(false);
     }
   }, [activeId, viewport, focused, approvalFocus.state]);
   // new activity → stick to bottom only if the user is already pinned there
@@ -1833,305 +1822,293 @@ export function SessionsTab({
   const activeAssets =
     active.role === "worker" && active.intent_id ? intentAssetsByID.get(active.intent_id) : undefined;
 
-  const sessionList = (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-muted/30">
-      <div className="border-b px-3 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => (compactLayout ? setListOpen(false) : setDesktopCollapsed(true))}
-            aria-expanded={listOpen}
-            aria-controls="session-list-panel"
-            className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground"
-          >
-            <ChevronDownIcon
-              className={cn("size-3.5 shrink-0 transition-transform lg:hidden", !listOpen && "-rotate-90")}
-            />
-            <span className="shrink-0">会话列表</span>
-            {!listOpen && (
-              <>
-                <span className="min-w-0 truncate text-foreground lg:hidden" title={activeDisplayTitle}>
-                  · {activeDisplayTitle}
-                </span>
-                {hiddenUnread > 0 && (
-                  <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-md bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
-                    {hiddenUnread > 99 ? "99+" : hiddenUnread}
-                  </span>
-                )}
-              </>
-            )}
-          </button>
-          {!MOCK && (
-            <span
-              className={cn(
-                "inline-flex items-center gap-1 text-[10px]",
-                sseLive ? "text-emerald-500" : "text-amber-500",
-              )}
-              title={sseLive ? "实时连接正常" : "实时连接中断，正在自动重连（历史仍可见）"}
-            >
-              {sseLive ? (
-                <>
-                  <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
-                  实时
-                </>
-              ) : (
-                <>
-                  <WifiOffIcon className="size-3" />
-                  重连中
-                </>
-              )}
-            </span>
-          )}
-        </div>
-        {taskTokens && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                <span>任务总计</span>
-                <span>·</span>
-                <TokenMetrics
-                  input={taskTokens.input_tokens}
-                  cache={taskTokens.cache_read_tokens}
-                  output={taskTokens.output_tokens}
-                />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent>
-              输入 {taskTokens.input_tokens.toLocaleString()} · 输出 {taskTokens.output_tokens.toLocaleString()} ·
-              缓存读取 {taskTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
-              {taskTokens.cache_write_tokens.toLocaleString()}
-            </TooltipContent>
-          </Tooltip>
-        )}
-      </div>
-      <ScrollArea
-        id="session-list-panel"
-        type="auto"
-        className={cn("min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!")}
-      >
-        <div className="flex w-full flex-col gap-3 p-2">
-          {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
-            const items = grouped[role];
-            if (!items.length) return null;
-            const Meta = roleMeta[role];
-            return (
-              <div key={role} className="flex flex-col gap-0.5">
-                <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
-                  <Meta.icon className="size-3.5" />
-                  {Meta.label}
-                  {role === "mainagent" && (
-                    <button
-                      type="button"
-                      onClick={() => setConfirmNewMain(true)}
-                      disabled={creatingMain}
-                      title="新建主 Agent 会话（清空上下文，任务状态保留）"
-                      aria-label="新建主 Agent 会话"
-                      className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
-                    >
-                      {creatingMain ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <PlusIcon className="size-3.5" />
-                      )}
-                      新建
-                    </button>
-                  )}
-                  {role === "worker" && (
-                    <div className="ml-auto flex shrink-0 items-center gap-1">
-                      <WorkerQueue key={taskId} taskId={taskId} disabled={controllingIntent !== null} />
-                      {selectableWorkers.length > 0 && !workerSelectionMode && (
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          title="多选 Worker"
-                          aria-label="多选 Worker"
-                          disabled={controllingIntent !== null}
-                          onClick={() => setWorkerSelectionMode(true)}
-                        >
-                          <ListChecksIcon />
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-                {role === "worker" && workerSelectionMode && (
-                  <div className="flex flex-wrap items-center gap-2 border-b px-2 py-2">
-                    <label htmlFor="worker-select-all" className="flex items-center gap-1 text-xs">
-                      <Checkbox
-                        id="worker-select-all"
-                        aria-label="全选当前已加载的可操作 Worker"
-                        checked={allWorkersSelected ? true : selectedVisibleWorkers.length ? "indeterminate" : false}
-                        disabled={controllingIntent !== null}
-                        onCheckedChange={(checked) =>
-                          setSelectedWorkers(
-                            checked === true
-                              ? new Set(selectableWorkers.map((worker) => worker.intent_id!))
-                              : new Set(),
-                          )
-                        }
-                      />
-                      全选已加载
-                    </label>
-                    <span className="text-xs text-muted-foreground">已选 {selectedVisibleWorkers.length}</span>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={controllingIntent !== null || !batchDeletable.length}
-                      onClick={() =>
-                        setDeleteWorkers(
-                          batchDeletable.map((worker) => ({
-                            ...worker,
-                            title: sessionMeta.get(worker.id)?.title ?? worker.title,
-                          })),
-                        )
-                      }
-                    >
-                      <Trash2Icon data-icon="inline-start" />
-                      删除 ({batchDeletable.length})
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={controllingIntent !== null}
-                      onClick={() => {
-                        setWorkerSelectionMode(false);
-                        setSelectedWorkers(new Set());
-                      }}
-                    >
-                      完成
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={controllingIntent !== null || !batchCancellable.length}
-                      onClick={() => {
-                        setCancelReason("");
-                        setBatchCancelIds(batchCancellable.map((worker) => worker.intent_id!));
-                      }}
-                    >
-                      <CircleSlashIcon data-icon="inline-start" />
-                      取消执行 ({batchCancellable.length})
-                    </Button>
-                    <Button
-                      size="icon-sm"
-                      variant="outline"
-                      title={`批量开启执行（${batchResumable.length} 个 Worker）`}
-                      aria-label={`批量开启执行（${batchResumable.length} 个 Worker）`}
-                      disabled={controllingIntent !== null || !batchResumable.length}
-                      onClick={() =>
-                        void controlWorkerBatch(
-                          batchResumable.map((worker) => worker.intent_id!),
-                          "resume",
-                        )
-                      }
-                    >
-                      <PlayIcon />
-                    </Button>
-                  </div>
-                )}
-                {items.map((s) => {
-                  const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
-                  return (
-                    <SessionItem
-                      key={s.id}
-                      s={s}
-                      active={s.id === active.id}
-                      displayTitle={meta?.title ?? s.title}
-                      hasPending={hasPendingForSession(s)}
-                      unread={store[keyForSession(s)]?.unread}
-                      onClick={() => {
-                        if (focused || invalidFocus) clearFocus();
-                        approvalFocus.close();
-                        setActiveId(s.id);
-                        setListOpen(false); // 手机端选完即收起，把高度还给会话记录
-                        setWorkerMessage("");
-                        setWorkerMessageRequestId("");
-                      }}
-                      controlling={controllingIntent !== null}
-                      selected={selectedWorkers.has(s.intent_id ?? "")}
-                      onSelect={
-                        workerSelectionMode &&
-                        s.role === "worker" &&
-                        !s.inherited &&
-                        s.intent_id &&
-                        (["pending", "running", "paused"].includes(s.status) || meta?.executionCancelled)
-                          ? (checked) => toggleWorkerSelection(s.intent_id!, checked)
-                          : undefined
-                      }
-                      executionCancelled={meta?.executionCancelled}
-                      onDelete={
-                        !s.inherited && s.intent_id && (s.status === "pending" || meta?.executionCancelled)
-                          ? () => setDeleteWorkers([{ ...s, title: meta?.title ?? s.title }])
-                          : undefined
-                      }
-                      onResume={() => void controlWorker(s, "resume")}
-                      onCancel={() => {
-                        setCancelIntent(s);
-                      }}
-                    />
-                  );
-                })}
-                {role === "worker" && intentsHasMore && (
-                  <button
-                    type="button"
-                    onClick={loadOlderIntents}
-                    disabled={loadingOlderIntents}
-                    className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
-                  >
-                    {loadingOlderIntents ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <RotateCwIcon className="size-3.5" />
-                    )}
-                    加载更早的 Worker
-                  </button>
-                )}
-              </div>
-            );
-          })}
-          {mainLoaded && !workerSessions.length && (
-            <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
-          )}
-        </div>
-      </ScrollArea>
-    </div>
-  );
   return (
     <TooltipProvider delayDuration={300}>
-      {/* Reserve room for the task header and tabs, including narrow-screen wrapping. */}
+      {/* 高度预留：页面头部（标题行 + 目标 + Tabs ≈ 7.5rem）+ 内容内边距。手机端 p-4、
+        桌面端 lg:p-6，且桌面还要留出滚动余量，所以两档分别预留 10rem / 13rem —— 手机端
+        沿用 13rem 会白白吃掉 3rem 的记录高度。 */}
       <div
         className={cn(
-          "grid h-[calc(100svh-13rem)] min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] gap-3",
-          !compactLayout && !desktopCollapsed && "lg:grid-cols-[16rem_minmax(0,1fr)]",
+          "grid h-[calc(100svh-10rem)] min-h-0 grid-cols-1 gap-4",
+          listOpen ? "grid-rows-[minmax(0,40svh)_minmax(0,1fr)]" : "grid-rows-[auto_minmax(0,1fr)]",
+          "lg:h-[calc(100svh-13rem)] lg:grid-cols-[18rem_1fr] lg:grid-rows-[minmax(0,1fr)]",
         )}
       >
-        {compactLayout ? (
-          <Sheet open={listOpen} onOpenChange={setListOpen}>
-            <SheetContent side="left" className="w-[min(88vw,320px)] p-3">
-              <SheetTitle className="sr-only">任务会话</SheetTitle>
-              <SheetDescription className="sr-only">选择主 Agent、Planner 或 Worker 会话</SheetDescription>
-              {sessionList}
-            </SheetContent>
-          </Sheet>
-        ) : !desktopCollapsed ? (
-          sessionList
-        ) : null}
+        {/* Left: session list */}
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
+          <div className="border-b px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setListOpen((open) => !open)}
+                aria-expanded={listOpen}
+                aria-controls="session-list-panel"
+                className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground lg:pointer-events-none"
+              >
+                <ChevronDownIcon
+                  className={cn("size-3.5 shrink-0 transition-transform lg:hidden", !listOpen && "-rotate-90")}
+                />
+                <span className="shrink-0">会话列表</span>
+                {!listOpen && (
+                  <>
+                    <span className="min-w-0 truncate text-foreground lg:hidden" title={activeDisplayTitle}>
+                      · {activeDisplayTitle}
+                    </span>
+                    {hiddenUnread > 0 && (
+                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-md bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
+                        {hiddenUnread > 99 ? "99+" : hiddenUnread}
+                      </span>
+                    )}
+                  </>
+                )}
+              </button>
+              {!MOCK && (
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1 text-[10px]",
+                    sseLive ? "text-emerald-500" : "text-amber-500",
+                  )}
+                  title={sseLive ? "实时连接正常" : "实时连接中断，正在自动重连（历史仍可见）"}
+                >
+                  {sseLive ? (
+                    <>
+                      <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
+                      实时
+                    </>
+                  ) : (
+                    <>
+                      <WifiOffIcon className="size-3" />
+                      重连中
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+            {taskTokens && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                    <span>任务总计</span>
+                    <span>·</span>
+                    <TokenMetrics
+                      input={taskTokens.input_tokens}
+                      cache={taskTokens.cache_read_tokens}
+                      output={taskTokens.output_tokens}
+                    />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  输入 {taskTokens.input_tokens.toLocaleString()} · 输出 {taskTokens.output_tokens.toLocaleString()} ·
+                  缓存读取 {taskTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
+                  {taskTokens.cache_write_tokens.toLocaleString()}
+                </TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+          <ScrollArea
+            id="session-list-panel"
+            type="auto"
+            className={cn(
+              "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!",
+              !listOpen && "max-lg:hidden",
+            )}
+          >
+            <div className="flex w-full flex-col gap-3 p-2">
+              {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
+                const items = grouped[role];
+                if (!items.length) return null;
+                const Meta = roleMeta[role];
+                return (
+                  <div key={role} className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
+                      <Meta.icon className="size-3.5" />
+                      {Meta.label}
+                      {role === "mainagent" && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmNewMain(true)}
+                          disabled={creatingMain}
+                          title="新建主 Agent 会话（清空上下文，任务状态保留）"
+                          aria-label="新建主 Agent 会话"
+                          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
+                        >
+                          {creatingMain ? (
+                            <Loader2Icon className="size-3.5 animate-spin" />
+                          ) : (
+                            <PlusIcon className="size-3.5" />
+                          )}
+                          新建
+                        </button>
+                      )}
+                      {role === "worker" && (
+                        <div className="ml-auto flex shrink-0 items-center gap-1">
+                          <WorkerQueue key={taskId} taskId={taskId} disabled={controllingIntent !== null} />
+                          {selectableWorkers.length > 0 && !workerSelectionMode && (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              title="多选 Worker"
+                              aria-label="多选 Worker"
+                              disabled={controllingIntent !== null}
+                              onClick={() => setWorkerSelectionMode(true)}
+                            >
+                              <ListChecksIcon />
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {role === "worker" && workerSelectionMode && (
+                      <div className="flex flex-wrap items-center gap-2 border-b px-2 py-2">
+                        <label htmlFor="worker-select-all" className="flex items-center gap-1 text-xs">
+                          <Checkbox
+                            id="worker-select-all"
+                            aria-label="全选当前已加载的可操作 Worker"
+                            checked={
+                              allWorkersSelected ? true : selectedVisibleWorkers.length ? "indeterminate" : false
+                            }
+                            disabled={controllingIntent !== null}
+                            onCheckedChange={(checked) =>
+                              setSelectedWorkers(
+                                checked === true
+                                  ? new Set(selectableWorkers.map((worker) => worker.intent_id!))
+                                  : new Set(),
+                              )
+                            }
+                          />
+                          全选已加载
+                        </label>
+                        <span className="text-xs text-muted-foreground">已选 {selectedVisibleWorkers.length}</span>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={controllingIntent !== null || !batchDeletable.length}
+                          onClick={() =>
+                            setDeleteWorkers(
+                              batchDeletable.map((worker) => ({
+                                ...worker,
+                                title: sessionMeta.get(worker.id)?.title ?? worker.title,
+                              })),
+                            )
+                          }
+                        >
+                          <Trash2Icon data-icon="inline-start" />
+                          删除 ({batchDeletable.length})
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={controllingIntent !== null}
+                          onClick={() => {
+                            setWorkerSelectionMode(false);
+                            setSelectedWorkers(new Set());
+                          }}
+                        >
+                          完成
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={controllingIntent !== null || !batchCancellable.length}
+                          onClick={() => {
+                            setCancelReason("");
+                            setBatchCancelIds(batchCancellable.map((worker) => worker.intent_id!));
+                          }}
+                        >
+                          <CircleSlashIcon data-icon="inline-start" />
+                          取消执行 ({batchCancellable.length})
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          title={`批量开启执行（${batchResumable.length} 个 Worker）`}
+                          aria-label={`批量开启执行（${batchResumable.length} 个 Worker）`}
+                          disabled={controllingIntent !== null || !batchResumable.length}
+                          onClick={() =>
+                            void controlWorkerBatch(
+                              batchResumable.map((worker) => worker.intent_id!),
+                              "resume",
+                            )
+                          }
+                        >
+                          <PlayIcon />
+                        </Button>
+                      </div>
+                    )}
+                    {items.map((s) => {
+                      const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
+                      return (
+                        <SessionItem
+                          key={s.id}
+                          s={s}
+                          active={s.id === active.id}
+                          displayTitle={meta?.title ?? s.title}
+                          hasPending={hasPendingForSession(s)}
+                          unread={store[keyForSession(s)]?.unread}
+                          onClick={() => {
+                            if (focused || invalidFocus) clearFocus();
+                            approvalFocus.close();
+                            setActiveId(s.id);
+                            setListOpen(false); // 手机端选完即收起，把高度还给会话记录
+                            setWorkerMessage("");
+                            setWorkerMessageRequestId("");
+                          }}
+                          controlling={controllingIntent !== null}
+                          selected={selectedWorkers.has(s.intent_id ?? "")}
+                          onSelect={
+                            workerSelectionMode &&
+                            s.role === "worker" &&
+                            !s.inherited &&
+                            s.intent_id &&
+                            (["pending", "running", "paused"].includes(s.status) || meta?.executionCancelled)
+                              ? (checked) => toggleWorkerSelection(s.intent_id!, checked)
+                              : undefined
+                          }
+                          executionCancelled={meta?.executionCancelled}
+                          onDelete={
+                            !s.inherited && s.intent_id && (s.status === "pending" || meta?.executionCancelled)
+                              ? () => setDeleteWorkers([{ ...s, title: meta?.title ?? s.title }])
+                              : undefined
+                          }
+                          onResume={() => void controlWorker(s, "resume")}
+                          onCancel={() => {
+                            setCancelIntent(s);
+                          }}
+                        />
+                      );
+                    })}
+                    {role === "worker" && intentsHasMore && (
+                      <button
+                        type="button"
+                        onClick={loadOlderIntents}
+                        disabled={loadingOlderIntents}
+                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+                      >
+                        {loadingOlderIntents ? (
+                          <Loader2Icon className="size-3.5 animate-spin" />
+                        ) : (
+                          <RotateCwIcon className="size-3.5" />
+                        )}
+                        加载更早的 Worker
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {mainLoaded && !workerSessions.length && (
+                <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
+              )}
+            </div>
+          </ScrollArea>
+        </div>
 
         {/* Right: transcript */}
         <SideQuestionWorkspace
           side={side}
           label={active.role === "worker" ? `Worker #${active.intent_id} · ${activeDisplayTitle}` : activeDisplayTitle}
         >
-          <div className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-card">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 sm:px-4 sm:py-2.5">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => (compactLayout ? setListOpen(true) : setDesktopCollapsed((v) => !v))}
-                aria-label="切换会话列表"
-              >
-                会话
-              </Button>
+          <div className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-2 sm:px-4 sm:py-2.5">
               {(() => {
                 const isWorker = active.role === "worker";
                 const meta = isWorker ? sessionMeta.get(active.id) : undefined;
@@ -2305,7 +2282,7 @@ export function SessionsTab({
                   type="auto"
                   className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
                 >
-                  <div className="min-w-0 max-w-full px-4 py-2 sm:px-8" ref={contentRef}>
+                  <div className="min-w-0 max-w-full p-4" ref={contentRef}>
                     {activeState?.loadingMore && (
                       <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
                         <Loader2Icon className="size-3.5 animate-spin" />
@@ -2332,7 +2309,6 @@ export function SessionsTab({
                       </div>
                     ) : activity.length ? (
                       <Transcript
-                        variant="task"
                         activity={activity}
                         live={active.live}
                         taskId={taskId}
@@ -2348,26 +2324,8 @@ export function SessionsTab({
                 </ScrollArea>
               )}
             </SessionToolCalls>
-            {!focused && showLatest && (
-              <div className="flex shrink-0 justify-center py-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => {
-                    approvalFocus.close();
-                    const vp = viewport();
-                    if (vp) vp.scrollTop = vp.scrollHeight;
-                    atBottomRef.current = true;
-                    setShowLatest(false);
-                  }}
-                >
-                  返回最新
-                </Button>
-              </div>
-            )}
             {isMain ? (
-              <div className="w-full min-w-0 shrink-0 px-4 pb-2 pt-2 sm:px-8">
+              <div className="border-t p-3">
                 {attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
                     {attachments.map((a) => (
@@ -2398,14 +2356,12 @@ export function SessionsTab({
                   className="hidden"
                   onChange={(e) => void pickFiles(e.target.files)}
                 />
-                <InputGroup className="min-h-12 rounded-2xl border-border/70 bg-muted/30 p-1 shadow-sm has-disabled:opacity-100">
+                <InputGroup className="min-h-9 has-disabled:opacity-100">
                   <MentionTextarea
                     inputGroup
                     rows={1}
                     aria-label="给主 Agent 发消息"
-                    placeholder={
-                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
-                    }
+                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"}
                     value={input}
                     disabled={sending}
                     onValueChange={setInput}
@@ -2414,7 +2370,7 @@ export function SessionsTab({
                       e.preventDefault();
                       send();
                     }}
-                    className="max-h-[160px] min-h-8 overflow-y-auto text-[13px] md:text-[13px]"
+                    className="max-h-36 min-h-9 overflow-y-auto"
                   />
                   <InputGroupAddon align="block-end">
                     <InputGroupButton
@@ -2463,8 +2419,8 @@ export function SessionsTab({
             ) : active.role === "worker" &&
               !active.inherited &&
               (active.status === "running" || active.status === "paused") ? (
-              <div className="w-full min-w-0 shrink-0 px-4 pb-2 pt-2 sm:px-8">
-                <InputGroup className="min-h-12 rounded-2xl border-border/70 bg-muted/30 p-1 shadow-sm has-disabled:opacity-100">
+              <div className="border-t p-3">
+                <InputGroup className="min-h-9 has-disabled:opacity-100">
                   <MentionTextarea
                     inputGroup
                     rows={1}
@@ -2482,7 +2438,7 @@ export function SessionsTab({
                     }}
                     disabled={workerMessageSending}
                     aria-invalid={workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS}
-                    className="max-h-[160px] min-h-8 overflow-y-auto text-[13px] md:text-[13px]"
+                    className="max-h-36 min-h-9 overflow-y-auto"
                   />
                   <InputGroupAddon align="block-end">
                     <span
