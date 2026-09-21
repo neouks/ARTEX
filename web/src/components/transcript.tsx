@@ -18,11 +18,19 @@ import {
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { MessageGroup } from "@/components/ui/message";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ApprovalDetail } from "@/components/approval-records";
+import {
+  groupSteps,
+  groupProcesses,
+  processContainsActivity,
+  type Group,
+  type ProcessGroup,
+} from "@/lib/transcript-groups";
 import type { Activity, InterceptPending } from "@/lib/types";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
@@ -71,58 +79,6 @@ function useInView(rootMargin = "400px"): [React.RefObject<HTMLDivElement | null
 // A tool group pairs a tool_use with its matching tool_result (by tool_use_id);
 // a run of consecutive conversational steps (text/thinking/result) from the same
 // agent is one "message".
-type Group =
-  | { type: "user"; key: number; step: Activity; intent?: boolean }
-  | { type: "answer"; key: number; step: Activity }
-  | { type: "round"; key: number; label: string }
-  | { type: "tool"; key: number; worker: string; use?: Activity; result?: Activity }
-  | { type: "msg"; key: number; worker: string; steps: Activity[] }
-  | { type: "intercept"; key: number; step: Activity };
-
-function groupSteps(steps: Activity[], chat: boolean): Group[] {
-  const out: Group[] = [];
-  const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
-  for (const s of steps) {
-    if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
-    if (s.kind === "round") {
-      out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
-      continue;
-    }
-    if (s.kind === "intercept_request") {
-      out.push({ type: "intercept", key: s.seq, step: s });
-      continue;
-    }
-    if (s.kind === "user" || s.kind === "intent") {
-      // human turn OR the LLM-generated intent leading a worker session — both are
-      // right-aligned bubbles; `intent` swaps the avatar to a non-human icon.
-      out.push({ type: "user", key: s.seq, step: s, intent: s.kind === "intent" });
-      continue;
-    }
-    // In a chat (main agent) the assistant's text/result IS the answer — render it
-    // full (markdown), never collapsed. thinking still folds into a compact block.
-    if (s.kind === "result" || (chat && s.kind === "text")) {
-      out.push({ type: "answer", key: s.seq, step: s });
-      continue;
-    }
-    if (s.kind === "tool_use") {
-      const g: Extract<Group, { type: "tool" }> = { type: "tool", key: s.seq, worker: s.worker, use: s };
-      if (s.tool_use_id) byToolId.set(s.tool_use_id, g);
-      out.push(g);
-      continue;
-    }
-    if (s.kind === "tool_result") {
-      // bind to its tool_use by id (NOT adjacency — tools can run in parallel)
-      const g = s.tool_use_id ? byToolId.get(s.tool_use_id) : undefined;
-      if (g && !g.result) g.result = s;
-      else out.push({ type: "tool", key: s.seq, worker: s.worker, result: s }); // orphan result
-      continue;
-    }
-    const last = out[out.length - 1];
-    if (last && last.type === "msg" && last.worker === s.worker) last.steps.push(s);
-    else out.push({ type: "msg", key: s.seq, worker: s.worker, steps: [s] });
-  }
-  return out;
-}
 
 const kindLabel = (k: string) => (k === "thinking" ? "推理" : k === "result" ? "总结" : "说明");
 
@@ -357,12 +313,14 @@ function ToolBlock({
   group,
   getDetail,
   showWorker,
+  taskStyle = false,
   focused,
   onLocated,
 }: {
   group: Extract<Group, { type: "tool" }>;
   getDetail: (seq: number) => Promise<string>;
   showWorker?: boolean;
+  taskStyle?: boolean;
   focused?: boolean;
   onLocated?: (el: HTMLElement) => void;
 }) {
@@ -476,6 +434,7 @@ function ToolBlock({
         {cmd && <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{cmd}</span>}
         <span className={"ml-auto shrink-0 font-medium " + statusTone}>{statusText}</span>
       </button>
+      {taskStyle && result?.is_error && <p className="pl-7 text-xs text-destructive">{result.summary}</p>}
       {open && (
         <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
           {loadError ? (
@@ -594,10 +553,12 @@ function parseUserBody(body: string): { text: string; attachments: MsgAttachment
 function UserRow({
   step,
   intent,
+  taskStyle = false,
   getDetail,
 }: {
   step: Activity;
   intent?: boolean;
+  taskStyle?: boolean;
   getDetail: (seq: number) => Promise<string>;
 }) {
   const Icon = intent ? CrosshairIcon : UserIcon;
@@ -622,8 +583,14 @@ function UserRow({
   }, [inView, step.seq, getDetail, step.summary, inline]);
   const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
-    <div ref={ref} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
-      <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1.5">
+    <div
+      ref={ref}
+      className={cn("mt-3 mb-2 flex min-w-0 gap-2", taskStyle && intent ? "justify-start" : "justify-end")}
+    >
+      <div
+        className={cn("flex min-w-0 max-w-[85%] flex-col gap-1.5", taskStyle && intent ? "items-start" : "items-end")}
+      >
+        {taskStyle && intent && <span className="text-xs font-medium text-muted-foreground">执行目标</span>}
         {attachments.length > 0 && (
           <div className="flex min-w-0 max-w-full flex-wrap justify-end gap-1.5">
             {attachments.map((a) => (
@@ -640,13 +607,25 @@ function UserRow({
           </div>
         )}
         {text && (
-          <div className="min-w-0 max-w-full whitespace-pre-wrap rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground [overflow-wrap:anywhere]">
+          <div
+            className={cn(
+              "min-w-0 max-w-full whitespace-pre-wrap [overflow-wrap:anywhere]",
+              taskStyle
+                ? "rounded-2xl border border-border/50 bg-muted px-4 py-2 text-[13px] leading-[1.6] text-foreground"
+                : "rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground",
+            )}
+          >
             {text}
           </div>
         )}
         <ActivityTime ts={step.ts} />
       </div>
-      <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
+      <div
+        className={cn(
+          "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10",
+          taskStyle && "hidden",
+        )}
+      >
         <Icon className="size-3.5 text-primary" />
       </div>
     </div>
@@ -656,7 +635,15 @@ function UserRow({
 // AnswerBlock renders the agent's FINAL answer (kind="result") in full — never
 // collapsed. The summary is a truncated first line, so the full text is pulled
 // from the detail and shown inline.
-function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
+function AnswerBlock({
+  step,
+  getDetail,
+  taskStyle = false,
+}: {
+  step: Activity;
+  getDetail: (seq: number) => Promise<string>;
+  taskStyle?: boolean;
+}) {
   const [ref, inView] = useInView();
   const [full, setFull] = React.useState<string | null>(null);
   React.useEffect(() => {
@@ -677,7 +664,9 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
     <div ref={ref} className="mb-2 mt-1 flex min-w-0 flex-col gap-1">
       <div
         className={
-          "min-w-0 flex-1 break-words rounded-lg bg-muted px-3 py-2 " +
+          (taskStyle
+            ? "min-w-0 flex-1 break-words py-2 [&>div]:text-[13px] [&_p]:leading-[1.6] "
+            : "min-w-0 flex-1 break-words rounded-lg bg-muted px-3 py-2 ") +
           (step.is_error ? "text-sm text-red-600 dark:text-red-400" : "")
         }
       >
@@ -692,6 +681,43 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
   );
 }
 
+function ProcessBlock({
+  group,
+  focusActivity,
+  render,
+}: {
+  group: ProcessGroup;
+  focusActivity?: number;
+  render: (g: Group) => React.ReactNode;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const focused = processContainsActivity(group, focusActivity);
+  React.useEffect(() => {
+    if (focused) setOpen(true);
+  }, [focused, focusActivity]);
+  const tools = group.groups.filter((g) => g.type === "tool");
+  const running = tools.find((g) => g.type === "tool" && g.use && !g.result);
+  const current = running?.type === "tool" ? running.use?.tool : undefined;
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 py-2">
+      <CollapsibleTrigger
+        className="flex max-w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted"
+        aria-label="展开执行过程"
+      >
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+        <span>
+          {running ? "正在执行" : tools.length ? "已完成" : "推理过程"}
+          {tools.length ? ` · ${tools.length} 次调用` : ""}
+          {current ? ` · ${current}` : ""}
+        </span>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="min-w-0 border-l border-border/60 pl-3">
+        {open && group.groups.map(render)}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 // ExecView renders an agent execution replay (planner / worker / main agent) in
 // the compact, grouped, expand-to-detail format — thinking, tool calls/results,
 // and (for the main agent) the human turns. Worker lane chips show only when the
@@ -700,6 +726,7 @@ function ExecView({
   activity,
   taskId,
   chat,
+  variant = "default",
   fetchDetail,
   focusActivity,
   onLocated,
@@ -707,6 +734,7 @@ function ExecView({
   activity: Activity[];
   taskId?: string;
   chat?: boolean;
+  variant?: "default" | "task";
   fetchDetail?: (seq: number) => Promise<string>;
   focusActivity?: number;
   onLocated?: (el: HTMLElement) => void;
@@ -718,35 +746,43 @@ function ExecView({
     (seq: number) => (fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? "")),
     [fetchDetail, taskId],
   );
+  const render = (g: Group): React.ReactNode =>
+    g.type === "round" ? (
+      <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
+        <span className="h-px flex-1 bg-border" />
+        {g.label}
+        <span className="h-px flex-1 bg-border" />
+      </div>
+    ) : g.type === "user" ? (
+      <UserRow taskStyle={variant === "task"} key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
+    ) : g.type === "answer" ? (
+      <AnswerBlock taskStyle={variant === "task"} key={"a" + g.key} step={g.step} getDetail={getDetail} />
+    ) : g.type === "tool" ? (
+      <ToolBlock
+        key={"t" + g.key}
+        group={g}
+        taskStyle={variant === "task"}
+        getDetail={getDetail}
+        showWorker={showWorker}
+        focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)}
+        onLocated={onLocated}
+      />
+    ) : g.type === "intercept" ? (
+      <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
+    ) : (
+      <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+    );
+  const groups = groupSteps(activity, !!chat || variant === "task");
   return (
-    <div className="flex flex-col">
-      {groupSteps(activity, !!chat).map((g) =>
-        g.type === "round" ? (
-          <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
-            <span className="h-px flex-1 bg-border" />
-            {g.label}
-            <span className="h-px flex-1 bg-border" />
-          </div>
-        ) : g.type === "user" ? (
-          <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
-        ) : g.type === "answer" ? (
-          <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
-        ) : g.type === "tool" ? (
-          <ToolBlock
-            key={"t" + g.key}
-            group={g}
-            getDetail={getDetail}
-            showWorker={showWorker}
-            focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)}
-            onLocated={onLocated}
-          />
-        ) : g.type === "intercept" ? (
-          <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
+    <MessageGroup className={cn("gap-0", variant === "task" && "gap-2")}>
+      {(variant === "task" ? groupProcesses(groups) : groups).map((g) =>
+        g.type === "process" ? (
+          <ProcessBlock key={"p" + g.key} group={g} focusActivity={focusActivity} render={render} />
         ) : (
-          <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+          render(g)
         ),
       )}
-    </div>
+    </MessageGroup>
   );
 }
 
@@ -758,6 +794,7 @@ export function Transcript({
   live,
   taskId,
   chat,
+  variant = "default",
   fetchDetail,
   focusActivity,
   focusedSeq,
@@ -767,6 +804,7 @@ export function Transcript({
   live?: boolean;
   taskId?: string;
   chat?: boolean;
+  variant?: "default" | "task";
   fetchDetail?: (seq: number) => Promise<string>;
   focusActivity?: number;
   focusedSeq?: number;
@@ -790,13 +828,18 @@ export function Transcript({
   return (
     <div
       ref={transcriptRef}
-      className="flex flex-col gap-1"
+      className={cn(
+        "flex min-w-0 flex-col gap-1",
+        variant === "task" &&
+          "w-full max-w-full [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre_code]:break-normal",
+      )}
       style={focusPadding ? { paddingBlock: focusPadding } : undefined}
     >
       <ExecView
         activity={activity}
         taskId={taskId}
         chat={chat}
+        variant={variant}
         fetchDetail={fetchDetail}
         focusActivity={focusActivity ?? focusedSeq}
         onLocated={onLocated}

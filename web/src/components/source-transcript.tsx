@@ -181,7 +181,7 @@ export function SourceTranscript({
         </Button>
       </div>
       <ScrollArea className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
-        <div ref={root} className="min-w-0 max-w-full p-4">
+        <div ref={root} className="min-w-0 max-w-full px-4 py-2 sm:px-8">
           {error && (
             <Alert variant="destructive">
               <AlertDescription>{error}</AlertDescription>
@@ -200,6 +200,7 @@ export function SourceTranscript({
           )}
           {page && (
             <Transcript
+              variant="task"
               activity={intro && !page.hasMore ? [{ ...intro, detail: intro.summary }, ...page.items] : page.items}
               taskId={taskId}
               chat={session.startsWith("main:")}

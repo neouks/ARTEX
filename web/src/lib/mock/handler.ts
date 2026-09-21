@@ -222,6 +222,86 @@ for (const [index, domain] of ["new-api.acme.com", "new-admin.acme.com"].entries
     available: true,
   });
 }
+// Task conversation presentation fixtures: parallel tools, a visible failure,
+// and a long HTTP exchange. Independent platform conversations are unchanged.
+{
+  const start = Math.max(...mockActivity.map((a) => a.seq)) + 1;
+  const base = { worker: "mainagent", main_seg: 0, ts: "2026-07-26T09:00:00Z" };
+  const http =
+    "GET /api/orders/123 HTTP/1.1\nHost: api.acme.com\nAccept: application/json\nX-Trace-Id: " +
+    "demo".repeat(45) +
+    '\n\nHTTP/1.1 403 Forbidden\nContent-Type: application/json\n\n{"error":"access denied"}';
+  mockActivity.push(
+    { ...base, seq: start, kind: "user", summary: "核对订单接口的权限边界，并说明结论。" },
+    { ...base, seq: start + 1, kind: "thinking", summary: "先对照已有请求与响应，避免重复探测。" },
+    {
+      ...base,
+      seq: start + 2,
+      kind: "tool_use",
+      tool: "get_finding_traffic",
+      tool_use_id: "ui-evidence",
+      summary: "读取已登记的 HTTP 证据",
+      detail: '{"finding_id":1}',
+    },
+    {
+      ...base,
+      seq: start + 3,
+      kind: "tool_use",
+      tool: "node_detail",
+      tool_use_id: "ui-node",
+      summary: "读取相关事实",
+      detail: '{"id":1}',
+    },
+    {
+      ...base,
+      seq: start + 4,
+      kind: "tool_result",
+      tool: "node_detail",
+      tool_use_id: "ui-node",
+      summary: "已读取事实",
+      detail: "接口对非所属订单返回 403。",
+    },
+    {
+      ...base,
+      seq: start + 5,
+      kind: "tool_result",
+      tool: "get_finding_traffic",
+      tool_use_id: "ui-evidence",
+      summary: "已读取请求和响应",
+      detail: http,
+    },
+    {
+      ...base,
+      seq: start + 6,
+      kind: "text",
+      summary: "现有证据显示，该请求被权限检查拒绝。",
+      detail:
+        "## 核对结果\n\n现有证据显示，该请求被权限检查拒绝，不能据此确认越权漏洞。\n\n### 请求与响应\n\n```http\n" +
+        http +
+        "\n```\n\n后续应核对不同账号、订单归属和接口差异，结论以实际证据为准。",
+    },
+    {
+      ...base,
+      seq: start + 7,
+      kind: "tool_use",
+      tool: "node_detail",
+      tool_use_id: "ui-failed",
+      summary: "读取历史证据",
+      detail: '{"id":999}',
+    },
+    {
+      ...base,
+      seq: start + 8,
+      kind: "tool_result",
+      tool: "node_detail",
+      tool_use_id: "ui-failed",
+      summary: "历史证据已删除，请选择其他记录。",
+      is_error: true,
+      detail: "记录不存在或已删除。",
+    },
+  );
+}
+
 type MockTaskAssetBlock = {
   block_kind?: "manual" | "deleted";
   blocked_at: string;
