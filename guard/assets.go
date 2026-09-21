@@ -176,7 +176,11 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	// Approval metadata reads enforce their own task/role boundary. add_intent
 	// checks IDs, lineage and URL hosts per item before creating any node, so a
 	// denied item does not block the other items in the same batch.
-	if tool == "insert_assets" || tool == "register_user_target" || tool == "list_task_assets" || tool == "check_target_access" || tool == "add_intent" {
+	if tool == "insert_assets" || tool == "register_user_target" || tool == "list_task_assets" || tool == "check_target_access" || tool == "add_intent" ||
+		tool == "mark_host_proxy" || tool == "check_host_proxy" {
+		// mark/check_host_proxy only record which EXIT a host should use; they
+		// never make the host a target, and their free-text reason may contain
+		// fragments (e.g. "..") that would otherwise be parsed as a hostname.
 		return "", false
 	}
 	var value any

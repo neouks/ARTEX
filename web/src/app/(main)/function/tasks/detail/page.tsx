@@ -54,6 +54,7 @@ const CoverageGraphTab = dynamic(() => import("./_tabs/coverage-graph-tab").then
 const FindingsTab = dynamic(() => import("./_tabs/findings-tab").then((m) => m.FindingsTab));
 const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTab));
 const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
+const SmartProxyTab = dynamic(() => import("./_tabs/smart-proxy-tab").then((m) => m.SmartProxyTab));
 const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
 
 const TABS = [
@@ -66,6 +67,7 @@ const TABS = [
   { value: "asset-approvals", label: "资产审批" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
+  { value: "smart-proxy", label: "智能代理" },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -526,6 +528,9 @@ function TaskDetailInner() {
           </TabsContent>
           <TabsContent value="intercept" className="mt-0">
             <InterceptTab taskId={id} />
+          </TabsContent>
+          <TabsContent value="smart-proxy" className="mt-0">
+            <SmartProxyTab taskId={id} />
           </TabsContent>
         </div>
       </NotificationReadContext.Provider>

@@ -994,6 +994,12 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  // 智能代理：按请求决定是否走代理池（默认关）。仅对被标记的主机生效。
+  smart_proxy?: boolean;
+  // 智能代理使用的代理池地址；空=已标记主机仍直连。
+  smart_proxy_pool?: string;
+  // 已被标记为经代理池访问的主机（任务级）。
+  smart_proxy_hosts?: SmartProxyHost[];
   shell_mode?: "auto" | "powershell" | "pwsh" | "gitbash" | "wsl" | "bash" | "cmd";
   shell_detected?: {
     ok: boolean;
@@ -1021,6 +1027,15 @@ export interface Settings {
   // worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction;每 run 读一次,对
   // 之后启动的 run 生效。
   noa_compaction?: boolean;
+}
+
+export interface SmartProxyHost {
+  host: string;
+  reason: string;
+  source: "ai" | "manual" | string;
+  task_id: number;
+  agent_key: string;
+  added_at: string;
 }
 
 export interface GlobalProxyProbeResult {

@@ -60,3 +60,18 @@ Thumbs.db
 /Dockerfile.bench.v2
 # Worker queue API documentation
 !docs/worker-queue.md
+
+# 本地嵌入式 PostgreSQL 数据与日志（体积巨大，绝不提交）
+/.runtime/
+# 本地启动/停止脚本（本机专用，各环境路径不同）
+/start-dev.bat
+/stop-dev.bat
+# Windows 编译产物的备份/临时文件
+/artex.exe
+/artex.exe.bak-*
+/artex.exe~
+/artex-test.exe
+# 误落在仓库根的 Next.js 构建缓存
+/.next/
+# 本地工具工作目录（笔记、探针、备份）
+/.workbuddy/

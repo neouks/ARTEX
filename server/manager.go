@@ -257,6 +257,10 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// smartProxyPool is the egress proxy used for hosts the agent marked as
+	// WAF-blocked; smart is the per-request resolver behind mark_host_proxy.
+	smartProxyPool string
+	smart          *traffic.SmartProxy
 }
 
 // Settings keys the UI toggles at runtime.
@@ -477,6 +481,45 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
+	}
+	// Smart proxy: per-request selection of the proxy pool for hosts the agent
+	// marked as WAF-blocked. Built after the global proxy so the two coexist
+	// (the smart list takes precedence for marked hosts).
+	m.smart = traffic.NewSmartProxy()
+	if v, ok, _ := pg.GetSetting(settingSmartProxyPool); ok {
+		m.smartProxyPool = strings.TrimSpace(v)
+		if err := m.smart.SetPool(m.smartProxyPool); err != nil {
+			log.Printf("[smart-proxy] 代理池 %q 无效，已忽略: %v", m.smartProxyPool, err)
+		}
+	}
+	if raw, ok, _ := pg.GetSetting(settingSmartProxyHosts); ok && strings.TrimSpace(raw) != "" {
+		var hosts []traffic.SmartProxyHost
+		if err := json.Unmarshal([]byte(raw), &hosts); err != nil {
+			log.Printf("[smart-proxy] 名单 JSON 无效，已忽略: %v", err)
+		} else {
+			for _, h := range hosts {
+				m.smart.Mark(h.TaskID, h.Host, h.Reason, h.Source, h.AgentKey)
+			}
+		}
+	}
+	if pg.GetBool(settingSmartProxy, false) {
+		m.smart.SetEnabled(true)
+	}
+	// Persist on every mutation. Without this hook, a mark made by an agent lived
+	// only in memory: after a restart the list was empty, marked hosts silently
+	// reverted to direct dialing, and the failure looked like a broken proxy.
+	m.smart.SetOnChange(func(hosts []traffic.SmartProxyHost) {
+		raw, err := json.Marshal(hosts)
+		if err != nil {
+			log.Printf("[smart-proxy] 序列化名单失败: %v", err)
+			return
+		}
+		if err := m.pg.SetSetting(settingSmartProxyHosts, string(raw)); err != nil {
+			log.Printf("[smart-proxy] 保存名单失败: %v", err)
+		}
+	})
+	if m.traffic != nil {
+		m.traffic.SetSmartProxy(m.smart)
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
 	// Reconcile the seeded Playwright MCP with the persisted capture state, so a
@@ -1581,6 +1624,9 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 		}
 	}
 	m.forgetTask(id, n)
+	// Task-scoped smart-proxy marks must not outlive a genuinely deleted task, or
+	// they linger in the settings list with no task to remove them by.
+	m.clearSmartProxyMarks(n)
 	if err := errors.Join(finalizeErrs...); err != nil {
 		return result, &taskDeleteCommittedError{err: err}
 	}
@@ -1615,6 +1661,10 @@ func rollbackTaskDelete(cause error, trafficStage *traffic.HostDeleteStage, file
 }
 
 func (m *Manager) forgetTask(id string, numericID int64) {
+	// NOTE: smart-proxy marks are deliberately NOT cleared here. forgetTask also
+	// runs when a task is ARCHIVED, and an archived task can be restored — so
+	// clearing here would silently drop marks that should come back. Clearing
+	// happens in DeleteTask instead, which is the genuinely destructive path.
 	m.mu.Lock()
 	delete(m.tasks, id)
 	for _, task := range m.tasks {

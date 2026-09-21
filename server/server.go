@@ -439,6 +439,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetShellProfile(shellProfile)
 	wk.SetMemory(memory.NewStore(filepath.Join(s.m.dir, "memory")))
 	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetSmartProxy(s.m.smart)                      // 智能代理：worker 可标记被拦截主机
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开;每轮读)
 	wk.SetNonStreaming(nonStreamingResolver(wCfg))   // 该 profile 选非流式时走 Provider.Complete
 	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
@@ -449,6 +450,7 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	pl.SetKillWork(s.engine.KillWork)                       // planner kill_work → terminate a running work
 	pl.SetSteerWork(s.engine.SteerWork)                     // planner steer_work → inject mid-run course-correction
 	pl.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
+	pl.SetSmartProxy(s.m.smart)                             // 智能代理：planner 可标记被拦截主机
 	pl.SetShellProfile(shellProfile)
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)
@@ -481,6 +483,13 @@ func maxTokensResolver(cfg agent.Config) func() int {
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	// Smart-proxy selector is process-wide: any agent surface that exposes
+	// mark_host_proxy must resolve it. applyLLM is the common path for every
+	// agent build, so wiring it once here covers all of them (per-surface wiring
+	// repeatedly missed a construction site).
+	if s.m.smart != nil {
+		agent.SetGlobalSmartProxy(s.m.smart)
+	}
 	var prov llm.Provider
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
@@ -525,6 +534,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.mainAgent = agent.NewMainAgent(mProv, mCfg.Model, s.m.dir, tx, mCfg.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	s.mainAgent.SetFindingRecorder(s.evidenceStore())
 	s.mainAgent.SetProxy(s.m.TaskProxyAddr(), s.m.TaskProxyCACert()) // WebFetch through the task policy proxy
+	s.mainAgent.SetSmartProxy(s.m.smart)                             // 智能代理：主 agent 可标记被拦截主机
 	s.mainAgent.SetShellProfile(shellProfile)
 	s.mainAgent.SetWebSearch(s.webSearchFor("mainagent"))
 	s.mainAgent.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
@@ -816,6 +826,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
 	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
+	mux.HandleFunc("GET /api/tasks/{id}/smart-proxy/hosts", s.getTaskSmartProxyHosts)
+	mux.HandleFunc("DELETE /api/tasks/{id}/smart-proxy/hosts", s.deleteTaskSmartProxyHost)
 	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-approvals", s.listTaskAssetApprovals)
 	mux.HandleFunc("POST /api/tasks/{id}/asset-approvals/block", func(w http.ResponseWriter, r *http.Request) { s.mutateTaskAssetApprovals(w, r, "block") })
@@ -924,6 +936,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	mux.HandleFunc("POST /api/settings/global-proxy/test", s.testGlobalProxy)
+	mux.HandleFunc("DELETE /api/settings/smart-proxy/hosts", s.deleteSmartProxyHost)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
@@ -3393,8 +3406,11 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,             // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":             s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"web_search_proxy":         proxy,                                      // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":             s.m.GlobalProxy(),                          // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"smart_proxy":              s.m.SmartProxyEnabled(),                    // 智能代理：按请求决定是否走代理池(默认关)
+		"smart_proxy_pool":         s.m.SmartProxyPool(),                       // 智能代理使用的代理池地址(空=已标记主机仍直连)
+		"smart_proxy_hosts":        smartProxyHostViews(s.m.SmartProxyHosts()), // 已被标记走代理的主机名单
 		"shell_mode":               s.m.ShellMode(),
 		"shell_detected":           shellProfilePayload(s.m.ShellProfile()),
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
@@ -3458,6 +3474,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		TavilyKey        *string `json:"tavily_search_api_key"`
 		WebSearchProxy   *string `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		GlobalProxy      *string `json:"global_proxy"`     // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		SmartProxy       *bool   `json:"smart_proxy"`      // 智能代理开关；null=不改。逐请求决策，即时生效
+		SmartProxyPool   *string `json:"smart_proxy_pool"` // 智能代理的代理池地址；null=不改，""=清空
 		ShellMode        *string `json:"shell_mode"`
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
@@ -3494,6 +3512,19 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// 每 run 读的解析器,切换即时对之后启动的 run 生效,无需 applyLLM 重建。
 		if err := s.m.SetNoaCompaction(*req.NoaCompaction); err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.SmartProxy != nil {
+		// 逐请求决策，切换即时生效，无需重建 agent。
+		if err := s.m.SetSmartProxy(*req.SmartProxy); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.SmartProxyPool != nil {
+		if err := s.m.SetSmartProxyPool(*req.SmartProxyPool); err != nil {
+			writeErr(w, 400, err.Error())
 			return
 		}
 	}

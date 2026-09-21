@@ -35,6 +35,8 @@ type MainAgent struct {
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	shellProfile    actool.ShellProfile
+	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
+	smart SmartProxyView
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -75,6 +77,10 @@ func (m *MainAgent) compactionWindow() int {
 // SetProxy points the main agent's WebFetch at the recording proxy plus the CA
 // cert it trusts to verify HTTPS through it (empty addr = direct).
 func (m *MainAgent) SetProxy(addr, caCert string) { m.proxyAddr, m.proxyCACert = addr, caCert }
+
+// SetSmartProxy installs the per-request proxy selector so mark_host_proxy /
+// check_host_proxy work in the human-interface agent.
+func (m *MainAgent) SetSmartProxy(s SmartProxyView) { m.smart = s }
 
 func (m *MainAgent) SetShellProfile(profile actool.ShellProfile) { m.shellProfile = profile }
 
@@ -126,6 +132,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		tsx.SetAssetStore(as, as.Companies())
 	}
 	tsx.SetTaskID(taskID)
+	tsx.SetSmartProxy(m.smart)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running

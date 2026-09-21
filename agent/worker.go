@@ -80,6 +80,8 @@ type Worker struct {
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	extraTools []actool.CoreTool
+	// smart backs mark_host_proxy / check_host_proxy. Nil = feature off.
+	smart SmartProxyView
 	// injectConstraints resolves whether this task's operation constraints get
 	// injected into the worker system prompt. Read per run so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
@@ -193,6 +195,10 @@ func (w *Worker) SetShellProfile(profile actool.ShellProfile) { w.shellProfile =
 
 // SetWebSearch selects the web_search backend for this worker (off by default).
 func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
+
+// SetSmartProxy installs the per-request proxy selector so the worker's
+// mark_host_proxy / check_host_proxy tools can operate.
+func (w *Worker) SetSmartProxy(s SmartProxyView) { w.smart = s }
 
 // proxyEnv builds the Bash-subprocess env that routes child-command HTTP through
 // the egress proxy (the recording MITM when capture is on, or the global proxy
@@ -428,6 +434,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
+	tsx.SetSmartProxy(w.smart) // 智能代理：允许 worker 标记被拦截的主机
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {
@@ -479,6 +486,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	sysBody := workerSystem(runProxyAddr, promptCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
+	}
+	if w.smart != nil {
+		sysBody += smartProxyRule // 智能代理:何时把被拦截的主机切到代理池
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)

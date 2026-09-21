@@ -126,6 +126,9 @@ type ToolSet struct {
 	ts              *db.ExplorationStore
 	worker          string
 	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// smart backs the mark_host_proxy / check_host_proxy tools. Nil means the
+	// smart-proxy feature is off, and both tools refuse to work.
+	smart SmartProxyView
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -2828,6 +2831,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.listFindingDeletionFeedback(), t.listTaskAssets(), t.checkTargetAccess(),
+		t.markHostProxy(), t.checkHostProxy(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(), t.expandIndex(),

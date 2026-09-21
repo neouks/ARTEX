@@ -81,6 +81,7 @@ import type {
   Settings,
   Severity,
   SkillCall,
+  SmartProxyHost,
   SkillItem,
   SSProject,
   SSTask,
@@ -853,6 +854,20 @@ export const api = {
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  // 任务级：列出该任务标记的主机。
+  taskSmartProxyHosts: (taskId: string) =>
+    get<{ hosts: SmartProxyHost[] }>(`/tasks/${taskId}/smart-proxy/hosts`).then((r) => arr(r.hosts)),
+  // 任务级：移除该任务下的一条标记。
+  deleteTaskSmartProxyHost: (taskId: string, host: string) =>
+    http<{ ok: boolean }>(`/tasks/${taskId}/smart-proxy/hosts?host=${encodeURIComponent(host)}`, {
+      method: "DELETE",
+    }),
+  // 删除一条智能代理标记（按任务 + 主机定位）。
+  deleteSmartProxyHost: (taskId: number, host: string) =>
+    http<{ ok: boolean }>(
+      `/settings/smart-proxy/hosts?task_id=${taskId}&host=${encodeURIComponent(host)}`,
+      { method: "DELETE" },
+    ),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;

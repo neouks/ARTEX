@@ -45,6 +45,11 @@ export default function SystemSettingsPage() {
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testingGlobalProxy, setTestingGlobalProxy] = React.useState(false);
   const [globalProxyProbe, setGlobalProxyProbe] = React.useState<GlobalProxyProbeResult | null>(null);
+  // 智能代理：按请求决定是否走代理池（默认关，任务级名单）。
+  const [smartProxy, setSmartProxy] = React.useState(false);
+  const [smartProxyPool, setSmartProxyPool] = React.useState("");
+  const [smartProxyHosts, setSmartProxyHosts] = React.useState<Settings["smart_proxy_hosts"]>([]);
+  const [savingSmartProxy, setSavingSmartProxy] = React.useState(false);
   const [shellMode, setShellMode] = React.useState<NonNullable<Settings["shell_mode"]>>("auto");
   const [shellDetected, setShellDetected] = React.useState<Settings["shell_detected"]>(undefined);
   const [testing, setTesting] = React.useState(false);
@@ -71,6 +76,9 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
+    setSmartProxy(!!s.smart_proxy);
+    setSmartProxyPool(s.smart_proxy_pool ?? "");
+    setSmartProxyHosts(s.smart_proxy_hosts ?? []);
     setShellMode(s.shell_mode ?? "auto");
     setShellDetected(s.shell_detected);
     setPyInterp(s.python_interpreter ?? "");
@@ -265,6 +273,28 @@ export default function SystemSettingsPage() {
         toast.error(`Shell 配置保存失败：${(e as Error).message}`);
       })
       .finally(() => setSaving(false));
+  };
+
+  const saveSmartProxy = (patch: Partial<Settings>) => {
+    setSavingSmartProxy(true);
+    api
+      .setSettings(patch)
+      .then((s) => {
+        apply(s);
+        toast.success("已保存智能代理设置");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingSmartProxy(false));
+  };
+
+  const removeSmartProxyHost = (taskId: number, host: string) => {
+    api
+      .deleteSmartProxyHost(taskId, host)
+      .then(() => {
+        setSmartProxyHosts((prev) => (prev ?? []).filter((h) => !(h.task_id === taskId && h.host === host)));
+        toast.success("已移除标记");
+      })
+      .catch((e) => toast.error("移除失败：" + (e as Error).message));
   };
 
   const testGlobalProxy = () => {
@@ -507,6 +537,100 @@ export default function SystemSettingsPage() {
                 )}
               </div>
             )}
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <RadioTowerIcon className="size-4" />
+              智能代理
+            </CardTitle>
+            <CardDescription>
+              开启后，默认<b>直连</b>，只有当 Agent 判断某主机被 WAF / 风控拦截时，才把该主机标记为经
+              <b>代理池</b>访问。与全局代理的区别：全局代理是<b>所有目标流量一律走代理</b>，智能代理是
+              <b>按需切换</b>，更贴近真实渗透场景。
+              <br />
+              标记由 Agent 自主判断（WAF 特征 / 429 / 连接重置 / JS 挑战页），不使用关键词匹配；标记仅对
+              <b>当前任务</b>生效，新建任务不会继承。
+              <br />
+              流量全程经过本地记录代理，因此捕获、审计与漏洞证据链不受影响。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="smart-proxy-enabled"
+                checked={smartProxy}
+                disabled={!loaded || savingSmartProxy}
+                onCheckedChange={(v) => {
+                  setSmartProxy(v);
+                  saveSmartProxy({ smart_proxy: v });
+                }}
+              />
+              <Label htmlFor="smart-proxy-enabled" className="text-sm font-normal">
+                启用智能代理（默认关）
+              </Label>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="smart-proxy-pool" className="text-sm font-normal text-muted-foreground">
+                代理池地址
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="smart-proxy-pool"
+                  autoComplete="off"
+                  className="flex-1"
+                  placeholder="http://user:pass@pool-host:port（被标记主机的出口）"
+                  value={smartProxyPool}
+                  disabled={!loaded || savingSmartProxy}
+                  onChange={(e) => setSmartProxyPool(e.target.value)}
+                />
+                <Button
+                  type="button"
+                  disabled={!loaded || savingSmartProxy}
+                  onClick={() => saveSmartProxy({ smart_proxy_pool: smartProxyPool.trim() })}
+                >
+                  保存
+                </Button>
+              </div>
+              <p className="text-muted-foreground text-xs">
+                {smartProxyPool.trim()
+                  ? "已配置 · 被标记的主机经此代理出网"
+                  : "未配置 · 被标记的主机仍直连（开关不会生效）"}
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label className="text-sm font-normal text-muted-foreground">
+                被标记的主机（{(smartProxyHosts ?? []).length}）
+              </Label>
+              {(smartProxyHosts ?? []).length === 0 ? (
+                <p className="text-muted-foreground text-xs">
+                  暂无标记。Agent 遇到 WAF 拦截时会自行判断并标记。
+                </p>
+              ) : (
+                <div className="flex flex-col divide-y rounded-md border">
+                  {(smartProxyHosts ?? []).map((h) => (
+                    <div key={`${h.task_id}-${h.host}`} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                      <code className="min-w-0 flex-1 truncate font-mono text-xs">{h.host}</code>
+                      <span className="text-muted-foreground text-xs">任务 {h.task_id}</span>
+                      {h.agent_key && <span className="text-muted-foreground text-xs">{h.agent_key}</span>}
+                      <span className="text-muted-foreground min-w-0 flex-[2] truncate text-xs" title={h.reason}>
+                        {h.reason}
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => removeSmartProxyHost(h.task_id, h.host)}
+                      >
+                        移除
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
 
