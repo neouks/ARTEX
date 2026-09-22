@@ -1609,3 +1609,5 @@ CREATE INDEX IF NOT EXISTS idx_finding_deletion_feedback_task ON finding_deletio
 
 -- Execution selection is independent of queue ordering and task lifecycle.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'managed' CHECK (execution_mode IN ('managed','manual'));
+
+ALTER TABLE tools ADD COLUMN IF NOT EXISTS executable TEXT NOT NULL DEFAULT '';

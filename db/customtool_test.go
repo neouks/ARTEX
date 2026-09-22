@@ -100,6 +100,7 @@ func TestCustomToolShellMetadata(t *testing.T) {
 		Enabled:     true,
 		Kind:        "shell",
 		Exec:        json.RawMessage(`{}`),
+		Executable:  "  nmap  ",
 		Directory:   "  /opt/nmap/bin  ",
 		UsageHelp:   "  nmap [options] target  ",
 		WhenToUse:   "  discover ports and services  ",
@@ -111,7 +112,7 @@ func TestCustomToolShellMetadata(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get shell tool: %v (nil=%v)", err, got == nil)
 	}
-	if got.Directory != "/opt/nmap/bin" || got.UsageHelp != "nmap [options] target" || got.WhenToUse != "discover ports and services" {
+	if got.Executable != "nmap" || got.Directory != "/opt/nmap/bin" || got.UsageHelp != "nmap [options] target" || got.WhenToUse != "discover ports and services" {
 		t.Fatalf("shell metadata did not round-trip trimmed: %+v", got)
 	}
 
@@ -126,7 +127,7 @@ func TestCustomToolShellMetadata(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get command tool: %v (nil=%v)", err, got == nil)
 	}
-	if got.Directory != "" || got.UsageHelp != "" || got.WhenToUse != "" {
+	if got.Executable != "" || got.Directory != "" || got.UsageHelp != "" || got.WhenToUse != "" {
 		t.Fatalf("non-shell tool retained shell metadata: %+v", got)
 	}
 }

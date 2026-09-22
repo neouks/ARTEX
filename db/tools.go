@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,13 +21,14 @@ type Tool struct {
 	Kind        string          `json:"kind"`     // builtin | shell | command | script | http
 	Exec        json.RawMessage `json:"exec"`     // 自定义工具执行规格；builtin/shell 为空
 	Deferred    bool            `json:"deferred"` // schema 延迟(走 SearchExtraTools/ExecuteExtraTool)
+	Executable  string          `json:"executable"`
 	Directory   string          `json:"directory"`
 	UsageHelp   string          `json:"usage_help"`
 	WhenToUse   string          `json:"when_to_use"`
 	Calls       int             `json:"calls"` // runtime ledger aggregate; not stored in tools
 }
 
-const toolCols = `key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use`
+const toolCols = `key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use, executable`
 
 // SeedTool inserts a built-in tool's code-defined defaults ONCE. ON CONFLICT DO
 // NOTHING: an existing row (possibly edited in the UI) is never overwritten on
@@ -112,7 +115,7 @@ func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var agents []byte
 	if err := rows.Scan(
 		&t.Key, &t.System, &t.Description, &t.Schema, &agents, &t.Enabled,
-		&t.Kind, &t.Exec, &t.Deferred, &t.Directory, &t.UsageHelp, &t.WhenToUse,
+		&t.Kind, &t.Exec, &t.Deferred, &t.Directory, &t.UsageHelp, &t.WhenToUse, &t.Executable,
 	); err != nil {
 		return nil, err
 	}
@@ -156,6 +159,9 @@ func (d *DB) GetTool(key string) (*Tool, error) {
 // CreateCustomTool inserts a user-defined tool (system=false) with an execution
 // spec. Fails if the key already exists.
 func (d *DB) CreateCustomTool(t *Tool) error {
+	if err := t.ValidateShellCommand(); err != nil {
+		return err
+	}
 	schema := t.Schema
 	if len(schema) == 0 {
 		schema = json.RawMessage("{}")
@@ -170,16 +176,19 @@ func (d *DB) CreateCustomTool(t *Tool) error {
 	}
 	directory, usageHelp, whenToUse := shellMetadata(t)
 	_, err := d.Exec(`
-INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use)
-VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+INSERT INTO tools(key, system, description, schema, agents, enabled, kind, exec, deferred, directory, usage_help, when_to_use, executable)
+VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred,
-		directory, usageHelp, whenToUse)
+		directory, usageHelp, whenToUse, shellExecutable(t))
 	return err
 }
 
 // UpdateCustomTool updates a custom tool's editable fields (kind/exec/deferred +
 // desc/schema/agents/enabled). Only touches system=false rows.
 func (d *DB) UpdateCustomTool(t *Tool) error {
+	if err := t.ValidateShellCommand(); err != nil {
+		return err
+	}
 	schema := t.Schema
 	if len(schema) == 0 {
 		schema = json.RawMessage("{}")
@@ -195,10 +204,10 @@ func (d *DB) UpdateCustomTool(t *Tool) error {
 	directory, usageHelp, whenToUse := shellMetadata(t)
 	_, err := d.Exec(`
 UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5, kind=$6, exec=$7, deferred=$8,
-                 directory=$9, usage_help=$10, when_to_use=$11
+                 directory=$9, usage_help=$10, when_to_use=$11, executable=$12
 WHERE key=$1 AND system=false`,
 		t.Key, t.Description, schema, agents, t.Enabled, t.Kind, exec, t.Deferred,
-		directory, usageHelp, whenToUse)
+		directory, usageHelp, whenToUse, shellExecutable(t))
 	return err
 }
 
@@ -249,4 +258,29 @@ func (d *DB) UpdateTool(key, desc string, schema, agents json.RawMessage, enable
 UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5 WHERE key=$1`,
 		key, desc, schema, agents, enabled)
 	return err
+}
+
+func shellExecutable(t *Tool) string {
+	if t.Kind != "shell" {
+		return ""
+	}
+	return strings.TrimSpace(t.Executable)
+}
+
+func (t *Tool) ShellCommand() string {
+	if v := strings.TrimSpace(t.Executable); v != "" {
+		return v
+	}
+	return t.Key
+}
+
+func (t *Tool) ValidateShellCommand() error {
+	if t.Kind != "shell" {
+		return nil
+	}
+	name := t.ShellCommand()
+	if name == "" || strings.ContainsAny(name, "\x00\r\n") || (!filepath.IsAbs(name) && strings.ContainsAny(name, " /\\\t")) {
+		return fmt.Errorf("可执行命令需为命令名或绝对路径，不含参数")
+	}
+	return nil
 }

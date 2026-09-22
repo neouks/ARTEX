@@ -1093,6 +1093,7 @@ export const api = {
       | "kind"
       | "exec"
       | "deferred"
+      | "executable"
       | "directory"
       | "usage_help"
       | "when_to_use"
@@ -1109,14 +1110,15 @@ export const api = {
       | "kind"
       | "exec"
       | "deferred"
+      | "executable"
       | "directory"
       | "usage_help"
       | "when_to_use"
     >,
   ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
   deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
-  testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>
-    post<{ output: string; is_error: boolean }>("/tools/custom/test", body),
+  testCustomTool: (body: { kind: string; exec: Record<string, unknown>; params: Record<string, unknown>; key?: string; executable?: string; directory?: string; action?: "check" | "run"; command?: string }, signal?: AbortSignal) =>
+    http<{ output: string; is_error: boolean; duration_ms?: number }>("/tools/custom/test", { method: "POST", body: JSON.stringify(body), signal }),
   detectPython: () => post<{ python_interpreter: string }>("/settings/python/detect", {}),
 
   // ---- mcp ----

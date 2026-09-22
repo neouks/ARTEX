@@ -42,6 +42,7 @@ type customToolReq struct {
 	Kind        string          `json:"kind"` // shell | command | script | http
 	Exec        json.RawMessage `json:"exec"`
 	Deferred    bool            `json:"deferred"`
+	Executable  string          `json:"executable"`
 	Directory   string          `json:"directory"`
 	UsageHelp   string          `json:"usage_help"`
 	WhenToUse   string          `json:"when_to_use"`
@@ -68,6 +69,10 @@ func (s *Server) pgCreateCustomTool(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "kind 需为 command / script / http / shell")
 		return
 	}
+	if err := (&db.Tool{Key: req.Key, Kind: req.Kind, Executable: req.Executable}).ValidateShellCommand(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if req.Kind == "http" && !hasSchemaProps(req.Schema) {
 		writeErr(w, 400, "http 工具必须提供参数 JSON Schema(不能留空)")
 		return
@@ -79,7 +84,7 @@ func (s *Server) pgCreateCustomTool(w http.ResponseWriter, r *http.Request) {
 	if err := pg.CreateCustomTool(&db.Tool{
 		Key: req.Key, Description: req.Description, Schema: req.Schema, Agents: req.Agents,
 		Enabled: req.Enabled, Kind: req.Kind, Exec: req.Exec, Deferred: req.Deferred,
-		Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
+		Executable: req.Executable, Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
 	}); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -111,6 +116,10 @@ func (s *Server) pgUpdateCustomTool(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "kind 需为 command / script / http / shell")
 		return
 	}
+	if err := (&db.Tool{Key: key, Kind: req.Kind, Executable: req.Executable}).ValidateShellCommand(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if req.Kind == "http" && !hasSchemaProps(req.Schema) {
 		writeErr(w, 400, "http 工具必须提供参数 JSON Schema(不能留空)")
 		return
@@ -118,7 +127,7 @@ func (s *Server) pgUpdateCustomTool(w http.ResponseWriter, r *http.Request) {
 	if err := pg.UpdateCustomTool(&db.Tool{
 		Key: key, Description: req.Description, Schema: req.Schema, Agents: req.Agents,
 		Enabled: req.Enabled, Kind: req.Kind, Exec: req.Exec, Deferred: req.Deferred,
-		Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
+		Executable: req.Executable, Directory: req.Directory, UsageHelp: req.UsageHelp, WhenToUse: req.WhenToUse,
 	}); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -144,9 +153,14 @@ func (s *Server) pgDeleteCustomTool(w http.ResponseWriter, r *http.Request) {
 // real tool call — it runs arbitrary command/script/http on the server, which the
 // custom-tool feature already allows, so no new capability is granted.
 type testToolReq struct {
-	Kind   string          `json:"kind"` // command | script | http
-	Exec   json.RawMessage `json:"exec"`
-	Params map[string]any  `json:"params"`
+	Key        string          `json:"key"`
+	Executable string          `json:"executable"`
+	Directory  string          `json:"directory"`
+	Action     string          `json:"action"`
+	Command    string          `json:"command"`
+	Kind       string          `json:"kind"` // command | script | http
+	Exec       json.RawMessage `json:"exec"`
+	Params     map[string]any  `json:"params"`
 }
 
 // pgTestCustomTool executes an exec spec once and returns its raw output + error
@@ -160,6 +174,10 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 	var req testToolReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "无效的请求体")
+		return
+	}
+	if req.Kind == "shell" {
+		s.testShellTool(w, r, req)
 		return
 	}
 	params := req.Params

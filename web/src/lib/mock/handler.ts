@@ -3433,6 +3433,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       kind,
       exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
       deferred: !isShell && b.deferred === true,
+      executable: isShell ? String(b.executable ?? "").trim() : "",
       directory: isShell ? String(b.directory ?? "").trim() : "",
       usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
       when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
@@ -3460,6 +3461,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       kind,
       exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
       deferred: !isShell && (typeof b.deferred === "boolean" ? b.deferred : current.deferred),
+      executable: isShell ? String(b.executable ?? "").trim() : "",
       directory: isShell ? String(b.directory ?? "").trim() : "",
       usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
       when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
@@ -3471,7 +3473,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (index >= 0) mockTools.splice(index, 1);
     return { deleted: seg[2] };
   }
-  if (path === "/tools/custom/test") return { output: "（demo）工具执行输出示例。", is_error: false };
+  if (path === "/tools/custom/test") {
+    const missing = String(b.executable ?? b.key ?? "").includes("missing");
+    const failed = missing || String(b.command ?? "").includes("exit 1");
+    return { output: failed ? "（demo）命令不存在或执行失败" : b.action === "check" ? `/usr/bin/${b.executable || b.key}` : "（demo）工具执行输出示例。", is_error: failed, duration_ms: 12 };
+  }
 
   // ── mcp ──
   if (path === "/mcp" && m === "GET") return { servers: mockMcpServers };
