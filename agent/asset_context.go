@@ -36,7 +36,7 @@ func (t *ToolSet) authorizedScope(rows []db.TaskScope) []db.TaskScope {
 	}
 	out := make([]db.TaskScope, 0, len(rows))
 	for _, row := range rows {
-		if host := hostOf(row); host != "" && states[host] != db.ApprovalApproved {
+		if host := hostOf(row); host != "" && states[host] != db.ApprovalApproved && !(t.mainExecution && states[host] == db.ApprovalPending) {
 			continue
 		}
 		out = append(out, row)
@@ -172,6 +172,7 @@ func filterStructuredRows(value any, states map[int64]string, collect map[int64]
 
 func (p assetContextProvider) filterPlain(ctx context.Context, req llm.CompletionRequest) (llm.CompletionRequest, error) {
 	ri := RunInfoFrom(ctx)
+	main := ri.AgentKey == "mainagent" && ri.TaskID == p.taskID && p.taskID > 0 && ri.IntentID == 0
 	worker := ri.AgentKey == "worker" && ri.TaskID == p.taskID && ri.IntentID > 0
 	req = deduplicateToolHistory(req)
 	var refreshErr error
@@ -181,7 +182,11 @@ func (p assetContextProvider) filterPlain(ctx context.Context, req llm.Completio
 		return req, refreshErr
 	}
 	if ri.TaskID == p.taskID && (ri.AgentKey == "planner" || ri.AgentKey == "mainagent") {
-		req.System = append(append([]string(nil), req.System...), targetAccessRule)
+		rule := targetAccessRule
+		if main {
+			rule = mainAssetExecutionRule
+		}
+		req.System = append(append([]string(nil), req.System...), rule)
 	}
 	req, refreshErr = p.refreshApprovalManagementHistory(ctx, req)
 	if refreshErr != nil {
@@ -202,8 +207,11 @@ func (p assetContextProvider) filterPlain(ctx context.Context, req llm.Completio
 	case "related_assets":
 		policy = "用户目标同根域的子域名及有本任务DNS解析依据的IP由系统自动批准，可直接测试；其他发现登记后等待用户审批。"
 	}
-	if worker {
+	if worker || main {
 		policy = "你只执行当前已下发意图，不创建新计划。执行中可访问并登记待审批或尚未登记的合法资产、写回事实和漏洞；pending 不限制执行，也不代表自动批准。历史 pending 拦截或等待审批提示已失效。用户封禁、撤回、删除、异常隔离及独立操作约束仍必须遵守。"
+		if main {
+			policy = mainAssetExecutionRule
+		}
 		filtered := skips[:0]
 		for _, skip := range skips {
 			if skip.State != db.ApprovalPending {
@@ -266,7 +274,7 @@ func (p assetContextProvider) filterPlain(ctx context.Context, req llm.Completio
 	if err != nil {
 		return req, err
 	}
-	if worker {
+	if worker || main {
 		states = workerVisibility(states)
 	}
 	list = list[:0]
@@ -274,7 +282,7 @@ func (p assetContextProvider) filterPlain(ctx context.Context, req llm.Completio
 		list = append(list, id)
 	}
 	nodeStore := p.assets.WithReadContext(ctx)
-	if worker {
+	if worker || main {
 		nodeStore = nodeStore.WithWorkerRead()
 	}
 	var nodeStates map[int64]string

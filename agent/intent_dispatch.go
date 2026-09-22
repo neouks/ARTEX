@@ -21,13 +21,13 @@ func WithIntentDispatcher(ctx context.Context, dispatch IntentDispatcher) contex
 func (t *ToolSet) dispatch(ctx context.Context, ids []int64) ([]IntentDispatchResult, error) {
 	run := RunInfoFrom(ctx)
 	fn, _ := ctx.Value(intentDispatcherKey{}).(IntentDispatcher)
-	if run.AgentKey != "mainagent" || t.taskID <= 0 || run.TaskID != t.taskID || fn == nil {
+	if run.AgentKey != "mainagent" || run.IntentID != 0 || t.taskID <= 0 || run.TaskID != t.taskID || fn == nil {
 		return nil, fmt.Errorf("仅任务主 Agent 可下发意图")
 	}
 	return fn(ctx, ids)
 }
 func (t *ToolSet) dispatchIntents() actool.CoreTool {
-	return writeTool("dispatch_intents", "将当前任务已有的待执行意图下发给 Worker。仅在用户要求执行时使用；不绕过资产审批、任务并发或取消状态。", obj(map[string]any{"intent_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": map[string]any{"type": "integer", "minimum": 1}}}, "intent_ids"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+	return writeTool("dispatch_intents", "将当前任务已有的待执行意图下发给 Worker。仅在用户要求执行时使用；可下发待审批资产意图；仍遵守封禁、撤回、任务并发及取消状态。", obj(map[string]any{"intent_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": 50, "items": map[string]any{"type": "integer", "minimum": 1}}}, "intent_ids"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var req struct {
 			IDs []int64 `json:"intent_ids"`
 		}

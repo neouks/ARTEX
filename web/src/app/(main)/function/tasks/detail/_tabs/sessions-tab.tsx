@@ -2252,6 +2252,21 @@ export function SessionsTab({
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
             <SessionToolCalls
+              taskId={taskId}
+              session={activeKey}
+              onLocate={() => {
+                atBottomRef.current = false;
+              }}
+              onLatest={() => {
+                setActiveId(active.id);
+                clearFocus();
+                approvalFocus.close();
+                atBottomRef.current = true;
+                requestAnimationFrame(() => {
+                  const vp = contentRef.current?.closest('[data-slot="scroll-area-viewport"]');
+                  if (vp) vp.scrollTop = vp.scrollHeight;
+                });
+              }}
               key={`${taskId}:${activeKey}:${focused ? focusSeq : (approvalFocus.state?.id ?? "latest")}`}
               base={`/exploration/tool-calls?${new URLSearchParams({ task: taskId, session: activeKey })}`}
               revision={toolCallRevision(activity, active.live)}
@@ -2361,7 +2376,9 @@ export function SessionsTab({
                     inputGroup
                     rows={1}
                     aria-label="给主 Agent 发消息"
-                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"}
+                    placeholder={
+                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                    }
                     value={input}
                     disabled={sending}
                     onValueChange={setInput}

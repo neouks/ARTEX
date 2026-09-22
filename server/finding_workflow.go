@@ -142,7 +142,7 @@ func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write 
 		if as == nil {
 			return errors.New("任务资产授权不可用")
 		}
-		if ri.AgentKey == "worker" && ri.IntentID > 0 {
+		if (ri.AgentKey == "worker" && ri.IntentID > 0) || (ri.AgentKey == "mainagent" && ri.IntentID == 0) {
 			if err := as.ValidateWorkerAssets(ri.TaskID, f.AssetIDs); err != nil {
 				return err
 			}

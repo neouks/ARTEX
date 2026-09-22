@@ -3,6 +3,9 @@ package agent
 import "github.com/Autumn-27/artex/db"
 
 func (t *ToolSet) validateResultAssets(ids []int64) error {
+	if t.mainExecution {
+		return t.as.ValidateWorkerAssets(t.taskID, ids)
+	}
 	if !t.workerExecution {
 		return t.as.ValidateTaskAssetsApproved(t.taskID, ids)
 	}
@@ -13,7 +16,7 @@ func (t *ToolSet) validateResultAssets(ids []int64) error {
 }
 
 func (t *ToolSet) markResultAssetsTested(ids []int64) error {
-	if t.workerExecution {
+	if t.workerExecution || t.mainExecution {
 		return t.as.MarkWorkerAssetsTested(t.taskID, ids, t.worker)
 	}
 	return t.as.MarkTaskAssetsTested(t.taskID, ids, t.worker)

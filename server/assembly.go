@@ -302,6 +302,14 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				out = append(out, resolve(inst, row))
 			}
 		}
+		for i, tool := range out {
+			if tool.Name() == "Bash" {
+				if _, known := byKey["Bash"]; !known {
+					tool = meterTool(tool, pg, "Bash", agentKey, runInfo)
+				}
+				out[i] = &shellMeteredTool{CoreTool: tool, recorder: pg, declarations: rows, agentKey: agentKey, ri: runInfo}
+			}
+		}
 		// shell hints: user-defined kind="shell" tools are not callable — they are
 		// environment declarations that tell the model which command-line tools are
 		// installed. Collect the ones bound to this agent and append to Bash's description.
@@ -347,6 +355,7 @@ func shellToolNote(rows []*db.Tool, agentKey string) string {
 				lines = append(lines, "  "+part)
 			}
 		}
+		lines = appendShellHintField(lines, "可执行命令", row.Executable)
 		lines = appendShellHintField(lines, "所在目录", row.Directory)
 		lines = appendShellHintField(lines, "用法帮助", row.UsageHelp)
 		lines = appendShellHintField(lines, "何时调用", row.WhenToUse)

@@ -50,10 +50,13 @@ func TestWorkerProxyPendingAndManualLimits(t *testing.T) {
 		return allowed
 	}
 	scope := fmt.Sprintf("worker:%d", intent)
+	if !request("mainagent") {
+		t.Fatal("main pending blocked")
+	}
 	if !request(scope) {
 		t.Fatal("worker pending blocked")
 	}
-	for _, scope := range []string{"planner", "mainagent", "", "worker:invalid", fmt.Sprintf("worker:%d", intent+99999)} {
+	for _, scope := range []string{"planner", "", "worker:invalid", fmt.Sprintf("worker:%d", intent+99999)} {
 		if request(scope) {
 			t.Fatalf("untrusted/inactive scope allowed: %s", scope)
 		}
@@ -64,6 +67,9 @@ func TestWorkerProxyPendingAndManualLimits(t *testing.T) {
 	}
 	if err := d.Assets().BlockTaskAssets(task.ID, []int64{id}, "user", ""); err != nil {
 		t.Fatal(err)
+	}
+	if request("mainagent") {
+		t.Fatal("main bypassed block")
 	}
 	if request(scope) {
 		t.Fatal("worker bypassed block")

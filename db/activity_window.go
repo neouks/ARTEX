@@ -25,23 +25,40 @@ func (s *ExplorationStore) ActivityWindow(f ActivitySessionFilter, anchor, after
 	bind := func(v any) string { args = append(args, v); return fmt.Sprintf("$%d", len(args)) }
 	low, high := after, int64(0)
 	if anchor > 0 {
-		var call string
+		var call, kind string
+		originalAnchor := anchor
 		var worker string
 		var node, seg int64
-		err := s.db.QueryRow(`SELECT COALESCE(tool_use_id,''),COALESCE(worker,''),COALESCE(node_id,0),COALESCE(main_seg,0) FROM activity WHERE `+where+` AND kind='tool_use' AND id=`+bind(anchor), args...).Scan(&call, &worker, &node, &seg)
+		err := s.db.QueryRow(`SELECT kind,COALESCE(tool_use_id,''),COALESCE(worker,''),COALESCE(node_id,0),COALESCE(main_seg,0) FROM activity WHERE `+where+` AND id=`+bind(anchor), args...).Scan(&kind, &call, &worker, &node, &seg)
 		if err == sql.ErrNoRows {
 			return out, ErrActivityAnchor
 		}
 		if err != nil {
 			return out, err
 		}
+		if kind == "tool_result" && call != "" {
+			// The closest preceding invocation owns this result; never cross sessions.
+			args = args[:len(args)-1]
+			var use int64
+			err = s.db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM activity WHERE `+where+` AND kind='tool_use' AND id<`+bind(anchor)+` AND tool_use_id=`+bind(call)+` AND COALESCE(worker,'')=`+bind(worker)+` AND COALESCE(node_id,0)=`+bind(node)+` AND COALESCE(main_seg,0)=`+bind(seg), args...).Scan(&use)
+			if err != nil {
+				return out, err
+			}
+			if use > 0 {
+				anchor = use
+				kind = "tool_use"
+			}
+		}
 		pair := anchor
-		err = s.db.QueryRow(`SELECT COALESCE(MIN(r.id),$2) FROM activity r WHERE r.exploration_id=$1 AND r.id>$2 AND r.kind='tool_result' AND r.tool_use_id=$3
+		if kind == "tool_use" && call != "" {
+			err = s.db.QueryRow(`SELECT COALESCE(MIN(r.id),$2) FROM activity r WHERE r.exploration_id=$1 AND r.id>$2 AND r.kind='tool_result' AND r.tool_use_id=$3
 AND COALESCE(r.worker,'')=$4 AND COALESCE(r.node_id,0)=$5 AND COALESCE(r.main_seg,0)=$6
 AND NOT EXISTS(SELECT 1 FROM activity n WHERE n.exploration_id=r.exploration_id AND n.id>$2 AND n.id<r.id AND n.kind='tool_use' AND n.tool_use_id=$3 AND COALESCE(n.worker,'')=$4 AND COALESCE(n.node_id,0)=$5 AND COALESCE(n.main_seg,0)=$6)`, s.expID, anchor, call, worker, node, seg).Scan(&pair)
-		if err != nil {
-			return out, err
+			if err != nil {
+				return out, err
+			}
 		}
+		pair = max(pair, originalAnchor)
 		low = anchor
 		high = pair
 		// Neighborhood bounds are selected without loading any detail bodies.
@@ -95,7 +112,7 @@ AND NOT EXISTS(SELECT 1 FROM activity n WHERE n.exploration_id=r.exploration_id 
 	if anchor > 0 {
 		found := false
 		for _, item := range out.Items {
-			if item.ID == anchor && item.Kind == "tool_use" {
+			if item.ID == anchor {
 				found = true
 				break
 			}

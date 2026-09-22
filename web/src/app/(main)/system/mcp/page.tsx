@@ -16,7 +16,9 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -34,6 +36,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { normalizeMCPImportConfig, type MCPImportItem } from "@/lib/mcp-import";
 import { api } from "@/lib/api";
 import type { Agent, MCPCall, MCPServer, MCPTestResult, MCPTool, MCPUsageStat } from "@/lib/types";
 
@@ -48,90 +51,12 @@ type FormState = {
   insecure: boolean;
 };
 
-export type MCPImportItem = {
-  name: string;
-  transport: Transport;
-  command?: string;
-  args: string[];
-  env: Record<string, string>;
-  url?: string;
-  enabled: boolean;
-  insecure?: boolean;
-};
-
 const emptyForm: FormState = { name: "", transport: "stdio", command: "", args: "", url: "", env: "", insecure: false };
 
-function record(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-/** Normalize common MCP client JSON formats into the API's stable servers[] shape. */
-export function normalizeMCPImportConfig(value: unknown): { servers: MCPImportItem[] } {
-  const root = record(value);
-  if (!root) throw new Error("JSON 根必须是对象");
-  const source = root.mcpServers ?? root.servers;
-  const sourceRecord = record(source);
-  let entries: Array<[string, unknown]> = [];
-  if (Array.isArray(source)) entries = source.map((item) => ["", item]);
-  else if (sourceRecord) entries = Object.entries(sourceRecord);
-  else if (source === undefined) entries = [[String(root.name ?? ""), root]];
-  if (!entries.length) throw new Error("未找到 MCP 服务器配置");
-  const servers = entries.map(([mapName, raw], index) => {
-    const item = record(raw);
-    if (!item) throw new Error(`servers[${index}] 必须是对象`);
-    const name = String(item.name ?? mapName ?? "").trim();
-    if (!name) throw new Error(`servers[${index}] 缺少 name`);
-    const type = String(item.transport ?? item.type ?? "")
-      .trim()
-      .toLowerCase();
-    const transport: Transport =
-      type === "sse" ? "sse" : type === "http" || type === "streamable-http" || (!type && item.url) ? "http" : "stdio";
-    if (item.command !== undefined && item.command !== null && typeof item.command !== "string")
-      throw new Error(`servers[${index}].command 必须是字符串`);
-    const command = item.command === undefined || item.command === null ? "" : item.command.trim();
-    const rawArgs = item.args;
-    let args: string[] = [];
-    if (Array.isArray(rawArgs)) {
-      if (!rawArgs.every((arg) => typeof arg === "string")) throw new Error(`servers[${index}].args 必须是字符串数组`);
-      args = rawArgs.filter((arg) => arg.length > 0);
-    } else if (typeof rawArgs === "string") {
-      args = rawArgs.trim() ? rawArgs.trim().split(/\s+/) : [];
-    } else if (rawArgs !== undefined && rawArgs !== null) {
-      throw new Error(`servers[${index}].args 必须是字符串数组`);
-    }
-    const env: Record<string, string> = {};
-    const rawEnv = item.env;
-    if (rawEnv !== undefined && rawEnv !== null) {
-      const envRecord = record(rawEnv);
-      if (!envRecord || Object.entries(envRecord).some(([, envValue]) => typeof envValue !== "string"))
-        throw new Error(`servers[${index}].env 必须是字符串键值对象`);
-      for (const [key, envValue] of Object.entries(envRecord)) {
-        if (!key.trim()) throw new Error(`servers[${index}].env 不能包含空键`);
-        env[key] = envValue as string;
-      }
-    }
-    if (item.url !== undefined && item.url !== null && typeof item.url !== "string")
-      throw new Error(`servers[${index}].url 必须是字符串`);
-    const url = item.url === undefined || item.url === null ? "" : item.url.trim();
-    if (transport === "stdio" && !command) throw new Error(`servers[${index}] 的 stdio 配置缺少 command`);
-    if (transport !== "stdio" && !url) throw new Error(`servers[${index}] 的 http 配置缺少 url`);
-    return {
-      name,
-      transport,
-      command: transport === "stdio" ? command : "",
-      args: transport === "stdio" ? args : [],
-      env,
-      url: transport !== "stdio" ? url : "",
-      enabled: typeof item.enabled === "boolean" ? item.enabled : true,
-      insecure: transport !== "stdio" && item.insecure === true,
-    };
-  });
-  return { servers };
-}
-
 export default function MCPPage() {
+  const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState("");
+  const [query, setQuery] = React.useState("");
   const [servers, setServers] = React.useState<MCPServer[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [visibility, setVisibility] = React.useState<Record<number, string[]>>({});
@@ -155,6 +80,8 @@ export default function MCPPage() {
   const [usageLoading, setUsageLoading] = React.useState(false);
 
   const load = React.useCallback(() => {
+    setLoading(true);
+    setLoadError("");
     api
       .agents()
       .then(setAgents)
@@ -170,7 +97,8 @@ export default function MCPPage() {
             .catch(() => undefined);
         });
       })
-      .catch(() => undefined);
+      .catch((error) => setLoadError((error as Error).message))
+      .finally(() => setLoading(false));
   }, []);
   React.useEffect(() => load(), [load]);
 
@@ -206,7 +134,7 @@ export default function MCPPage() {
           command: "",
           args: [],
           env: parseEnv(form.env),
-          enabled: editing?.enabled ?? true,
+          enabled: servers.find((server) => server.id === editing?.id)?.enabled ?? editing?.enabled ?? true,
         }
       : {
           name: form.name.trim(),
@@ -216,7 +144,7 @@ export default function MCPPage() {
           args: form.args.trim() ? form.args.trim().split(/\s+/) : [],
           env: parseEnv(form.env),
           url: "",
-          enabled: editing?.enabled ?? true,
+          enabled: servers.find((server) => server.id === editing?.id)?.enabled ?? editing?.enabled ?? true,
         };
   }
   function validateForm() {
@@ -387,29 +315,18 @@ export default function MCPPage() {
       <FieldGroup className="py-4">
         <Field>
           <FieldLabel>传输方式</FieldLabel>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant={form.transport === "stdio" ? "default" : "outline"}
-              onClick={() => setF({ transport: "stdio" })}
-            >
-              stdio（本地）
-            </Button>
-            <Button
-              type="button"
-              variant={form.transport === "http" ? "default" : "outline"}
-              onClick={() => setF({ transport: "http" })}
-            >
-              http（远程）
-            </Button>
-            <Button
-              type="button"
-              variant={form.transport === "sse" ? "default" : "outline"}
-              onClick={() => setF({ transport: "sse" })}
-            >
-              sse（旧版）
-            </Button>
-          </div>
+          <ToggleGroup
+            type="single"
+            value={form.transport}
+            onValueChange={(value) => {
+              if (value) setF({ transport: value as Transport });
+            }}
+            variant="outline"
+          >
+            <ToggleGroupItem value="stdio">stdio（本地）</ToggleGroupItem>
+            <ToggleGroupItem value="http">http（远程）</ToggleGroupItem>
+            <ToggleGroupItem value="sse">sse（旧版）</ToggleGroupItem>
+          </ToggleGroup>
         </Field>
         <Field>
           <FieldLabel htmlFor="m-name">名称</FieldLabel>
@@ -498,15 +415,34 @@ export default function MCPPage() {
             </AlertDescription>
           </Alert>
         )}
-        <div className="flex flex-wrap gap-2 pt-1">
-          <Button type="button" variant="outline" onClick={testForm} disabled={testing}>
-            {testing && <Spinner data-icon="inline-start" />}测试可用性
-          </Button>
-          <Button type="button" onClick={saveForm} disabled={saving}>
-            {saving && <Spinner data-icon="inline-start" />}
-            {editing ? "保存" : "添加"}
-          </Button>
-        </div>
+        {editing && (
+          <>
+            <Separator />
+            <Field orientation="horizontal">
+              <Switch
+                id="mcp-enabled"
+                checked={servers.find((server) => server.id === editing.id)?.enabled ?? editing.enabled}
+                onCheckedChange={() => toggleEnabled(servers.find((server) => server.id === editing.id) ?? editing)}
+              />
+              <FieldLabel htmlFor="mcp-enabled">启用服务器（即时保存）</FieldLabel>
+            </Field>
+            <Field>
+              <FieldLabel>Agent 授权（即时保存）</FieldLabel>
+              <div className="flex flex-wrap gap-3">
+                {agents.map((agent) => (
+                  <label key={agent.key} htmlFor={`mcp-agent-${editing.id}-${agent.id}`} className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id={`mcp-agent-${editing.id}-${agent.id}`}
+                      checked={(visibility[editing.id] ?? []).includes(agent.id)}
+                      onCheckedChange={() => toggleVisibility(editing.id, agent.id, agent.name)}
+                    />
+                    {agent.name}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          </>
+        )}
       </FieldGroup>
     );
   }
@@ -610,77 +546,99 @@ export default function MCPPage() {
           导入 JSON
         </Button>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <button
-          type="button"
-          onClick={openAdd}
-          className="flex min-h-[116px] flex-col items-center justify-center gap-2 rounded-xl border border-foreground/70 border-dashed text-foreground/70 transition hover:bg-muted/60 hover:shadow-sm"
-        >
-          <PlusIcon className="size-6" />
-          <span className="text-sm">添加 MCP</span>
-        </button>
-        {servers.map((s) => (
-          <Card
-            key={s.id}
-            onClick={(event) => {
-              const target = event.target as HTMLElement;
-              if (target.closest("button,[role=checkbox],[role=switch]")) return;
-              openEdit(s);
-            }}
-            className="cursor-pointer gap-3 transition hover:border-primary/60 hover:shadow-sm"
-          >
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <ServerIcon className="size-4 shrink-0 text-muted-foreground" />
-                <CardTitle className="truncate text-base">{s.name}</CardTitle>
-                <Badge variant="outline" className="uppercase">
-                  {s.transport}
-                </Badge>
-                <div className="ml-auto flex items-center gap-2">
-                  <Switch checked={s.enabled} onCheckedChange={() => toggleEnabled(s)} aria-label="启用" />
-                  <Button size="icon" variant="outline" aria-label="删除" onClick={() => removeServer(s)}>
-                    <Trash2Icon className="text-destructive" />
-                  </Button>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="grid gap-3">
-              <p className="text-muted-foreground text-sm">
-                {s.tools && s.tools.length > 0 ? `${s.tools.length} 个工具` : "尚未发现工具"}
-              </p>
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <Badge variant="secondary">累计调用 {s.calls ?? 0} 次</Badge>
-                <Badge variant="outline">覆盖任务 {s.tasks ?? 0}</Badge>
-                {s.last_used && (
-                  <span className="text-muted-foreground">最近：{new Date(s.last_used).toLocaleString()}</span>
-                )}
-              </div>
-              <div className="grid gap-2">
-                <span className="text-muted-foreground text-xs">可见性（按 Agent 授权）</span>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {agents.map((agent) => (
-                    <label
-                      key={agent.key}
-                      htmlFor={`mcp-agent-${s.id}-${agent.id}`}
-                      className="flex items-center gap-2 text-sm"
-                    >
-                      <Checkbox
-                        id={`mcp-agent-${s.id}-${agent.id}`}
-                        checked={(visibility[s.id] ?? []).includes(agent.id)}
-                        onCheckedChange={() => toggleVisibility(s.id, agent.id, agent.name)}
-                      />
-                      {agent.name}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {loadError && (
+        <Alert variant="destructive">
+          <AlertTitle>加载失败</AlertTitle>
+          <AlertDescription>
+            {loadError}
+            <Button variant="outline" size="sm" onClick={load}>
+              重试
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      {loading && (
+        <div role="status" className="flex items-center gap-2 text-muted-foreground">
+          <Spinner />
+          加载 MCP…
+        </div>
+      )}
+      <Input
+        aria-label="搜索 MCP"
+        placeholder="搜索服务器名称、连接类型或工具…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        className="max-w-md"
+      />
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
+          <div className="flex flex-col gap-1">
+            <CardTitle>MCP 服务器</CardTitle>
+            <CardDescription>共 {servers.length} 个，点击卡片编辑配置与 Agent 授权</CardDescription>
+          </div>
+          <Button size="sm" onClick={openAdd}>
+            <PlusIcon data-icon="inline-start" />
+            添加 MCP
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {servers
+              .filter((server) =>
+                `${server.name} ${server.transport} ${(server.tools ?? []).join(" ")}`
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase()),
+              )
+              .map((server) => (
+                <button
+                  key={server.id}
+                  type="button"
+                  onClick={() => openEdit(server)}
+                  className="hover:border-primary/50 hover:bg-muted/40 focus-visible:ring-ring flex min-w-0 flex-col gap-2 rounded-lg border p-4 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <div className="flex w-full flex-wrap items-center gap-2">
+                    <ServerIcon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate font-mono text-sm font-medium">{server.name}</span>
+                    <Badge variant="outline">{server.transport}</Badge>
+                    <Badge variant="secondary" className="ml-auto">
+                      调用 {server.calls ?? 0}
+                    </Badge>
+                  </div>
+                  <p className="text-muted-foreground text-xs">
+                    {server.transport === "stdio" ? "本地进程" : "远程工具服务"} · {server.tools?.length ?? 0} 个工具 ·{" "}
+                    {server.enabled ? "已启用" : "已停用"}
+                  </p>
+                  <p className="text-muted-foreground truncate text-xs">
+                    {agents
+                      .filter((agent) => (visibility[server.id] ?? []).includes(agent.id))
+                      .map((agent) => agent.name)
+                      .join(" · ") || "尚未绑定 Agent"}
+                  </p>
+                </button>
+              ))}
+          </div>
+          {!loading &&
+            !loadError &&
+            !servers.some((server) =>
+              `${server.name} ${server.transport} ${(server.tools ?? []).join(" ")}`
+                .toLowerCase()
+                .includes(query.trim().toLowerCase()),
+            ) && (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>{query ? "没有匹配的服务器" : "尚未配置 MCP"}</EmptyTitle>
+                  <EmptyDescription>{query ? "尝试其他关键词" : "添加服务器或导入 JSON 配置"}</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+        </CardContent>
+      </Card>
       <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
-          <SheetHeader>
+        <SheetContent
+          side="right"
+          className="flex flex-col gap-0 p-0 data-[side=right]:w-full data-[side=right]:max-w-full data-[side=right]:sm:w-[45vw] data-[side=right]:sm:min-w-[480px] data-[side=right]:sm:max-w-[45vw]"
+        >
+          <SheetHeader className="px-4">
             <SheetTitle>{editing ? editing.name : "添加 MCP 服务器"}</SheetTitle>
             <SheetDescription>stdio（本地进程）、http（Streamable HTTP）或 sse（旧版远程）</SheetDescription>
           </SheetHeader>
@@ -709,6 +667,22 @@ export default function MCPPage() {
           ) : (
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4">{renderForm()}</div>
           )}
+          <Separator />
+          <div className="flex flex-wrap items-center gap-2 p-4">
+            <Button size="sm" onClick={saveForm} disabled={saving}>
+              {saving && <Spinner data-icon="inline-start" />}
+              {editing ? "保存" : "添加"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => { setTab("config"); void testForm(); }} disabled={testing}>
+              {testing && <Spinner data-icon="inline-start" />}测试可用性
+            </Button>
+            {editing && (
+              <Button size="sm" variant="outline" onClick={() => removeServer(editing)}>
+                <Trash2Icon data-icon="inline-start" />
+                删除
+              </Button>
+            )}
+          </div>
         </SheetContent>
       </Sheet>
       <Dialog open={importOpen} onOpenChange={setImportOpen}>

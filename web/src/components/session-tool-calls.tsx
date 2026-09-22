@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SessionSearch } from "@/components/session-search";
 import { api } from "@/lib/api";
 import { extraToolName, type ToolCall, type ToolCallPage, type ToolCallText } from "@/lib/tool-calls";
 
@@ -21,10 +22,18 @@ export function SessionToolCalls({
   base,
   revision,
   children,
+  taskId,
+  session,
+  onLocate,
+  onLatest,
 }: {
   base: string;
   revision: string;
   children: ReactNode;
+  taskId?: string;
+  session?: string;
+  onLocate?: () => void;
+  onLatest?: () => void;
 }) {
   const [tab, setTab] = useState("chat");
   return (
@@ -34,7 +43,20 @@ export function SessionToolCalls({
         <TabsTrigger value="tools">工具调用</TabsTrigger>
       </TabsList>
       <TabsContent value="chat" forceMount className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
-        {children}
+        {taskId && session ? (
+          <SessionSearch
+            key={`${taskId}:${session}`}
+            taskId={taskId}
+            session={session}
+            enabled={tab === "chat"}
+            onLocate={onLocate}
+            onLatest={onLatest}
+          >
+            {children}
+          </SessionSearch>
+        ) : (
+          children
+        )}
       </TabsContent>
       <TabsContent value="tools" className="min-h-0 flex-1 overflow-auto px-3 pb-3">
         <ToolCallList key={base} base={base} revision={revision} />

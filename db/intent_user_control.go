@@ -80,7 +80,7 @@ func (s *ExplorationStore) ClaimPausedIntentByUser(id int64) (bool, error) {
  WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='paused'
  AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
  AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.exploration_id=exploration_nodes.exploration_id AND (t.deleted_at IS NOT NULL OR t.status IN ('done','failed','timeout')))
- AND NOT EXISTS (SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id WHERE a.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,a.asset_id))`, id, s.expID)
+ AND NOT EXISTS (SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id WHERE a.node_id=exploration_nodes.id AND NOT `+intentAssetAllowedSQL("t.id", "a.asset_id", "exploration_nodes")+`)`, id, s.expID)
 	if err != nil {
 		return false, err
 	}

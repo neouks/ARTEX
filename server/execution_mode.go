@@ -110,6 +110,10 @@ func (s *Server) dispatchTaskIntentsLocked(ctx context.Context, t *Task, ids []i
 			}
 		}
 	}()
+	ri := agent.RunInfoFrom(ctx)
+	if ri.AgentKey == "mainagent" && ri.IntentID == 0 && ri.TaskID > 0 && strconv.FormatInt(ri.TaskID, 10) == t.ID {
+		return s.dispatchMainIntentsLocked(ctx, t, ids)
+	}
 	if len(ids) == 0 || len(ids) > 50 {
 		return nil, fmt.Errorf("一次下发 1..50 个意图")
 	}
@@ -251,4 +255,96 @@ func (s *Server) intentDispatchContext(ctx context.Context, t *Task) context.Con
 		})
 		return run(locked)
 	})
+}
+
+// Main Agent permission is published only after admission, so failed admission
+// cannot leave a pending-asset exception behind. The caller holds workerControlMu.
+func (s *Server) dispatchMainIntentsLocked(ctx context.Context, t *Task, ids []int64) ([]agent.IntentDispatchResult, error) {
+	if len(ids) == 0 || len(ids) > 50 {
+		return nil, fmt.Errorf("一次下发 1..50 个意图")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	out := []agent.IntentDispatchResult{}
+	seen := map[int64]bool{}
+	created := map[int64]bool{}
+	for _, id := range agent.CreatedDispatchIntents(ctx) {
+		created[id] = true
+	}
+	candidates := []int{}
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("意图 ID 必须为正整数")
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		row := agent.IntentDispatchResult{ID: id, Status: "rejected"}
+		n, err := t.Store.GetNode(id)
+		switch {
+		case err != nil:
+			row.Error = err.Error()
+		case n == nil || n.Kind != db.KindIntent:
+			row.Error = "意图不存在或不属于当前任务"
+		case n.UserCancelled():
+			row.Error = "意图已取消，请使用重跑入口"
+		case n.State == "running":
+			row.Status = "running"
+		case n.State != "open":
+			row.Error = "仅待执行意图可下发；终态意图请重跑"
+		default:
+			assets, e := agent.IntentAssetIDs(t.Store, n)
+			if e == nil && s.m.assets != nil {
+				e = s.m.assets.ValidateWorkerAssets(taskID, assets)
+			}
+			if e == nil && s.m.assets != nil {
+				e = s.m.assets.ValidateWorkerHosts(taskID, guard.CollectTargetHosts(n.Payload))
+			}
+			if e == nil && s.m.assets != nil {
+				access, queryErr := s.m.assets.WithExecutionRead().TaskNodeAccess(taskID, []int64{id})
+				e = queryErr
+				if e == nil && !access[id].CanRead {
+					e = fmt.Errorf("意图血缘含不可用资产")
+				}
+			}
+			if e != nil {
+				row.Error = e.Error()
+			} else {
+				row.Status = "dispatched"
+				if n.DispatchRequested() && n.AllowsPendingAssets() && !created[id] {
+					row.Status = "already_dispatched"
+				}
+				candidates = append(candidates, len(out))
+			}
+		}
+		out = append(out, row)
+	}
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	if _, err := s.admitTask(t, "resume"); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	granted := []int64{}
+	for _, i := range candidates {
+		if err := t.Store.GrantMainIntentDispatch(out[i].ID); err != nil {
+			out[i].Status = "rejected"
+			out[i].Error = err.Error()
+			continue
+		}
+		if out[i].Status == "dispatched" {
+			granted = append(granted, out[i].ID)
+		}
+	}
+	if len(granted) > 0 {
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: fmt.Sprintf("主 Agent 下发意图（允许待审批资产，仍遵守封禁与撤回）：%v", granted)})
+	}
+	t.wakeWorkers()
+	return out, nil
 }

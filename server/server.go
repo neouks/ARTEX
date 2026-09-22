@@ -906,6 +906,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/nodes/{id}", s.explorationNodeDetail)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
 	mux.HandleFunc("GET /api/exploration/activity/history", s.activityHistory)
+	mux.HandleFunc("GET /api/exploration/activity/search", s.activitySearch)
 	mux.HandleFunc("GET /api/exploration/tool-calls", s.taskToolCalls)
 	mux.HandleFunc("GET /api/exploration/tool-calls/{seq}", s.taskToolCalls)
 	mux.HandleFunc("GET /api/exploration/main-sessions", s.mainSessions)
@@ -2878,15 +2879,12 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "conflicting cursors")
 		return
 	}
-	if (anchor > 0 || after > 0) && sourceTaskID > 0 {
-		writeErr(w, 404, "source activity unavailable; open the source task")
-		return
-	}
+	filter.Inherited = sourceTaskID > 0
 	if limit < 1 {
 		writeErr(w, 400, "bad limit")
 		return
 	}
-	if sourceTaskID > 0 {
+	if sourceTaskID > 0 && anchor == 0 && after == 0 {
 		// Source sessions are readable only while the intent remains terminal. The
 		// DB query also removes model reasoning/accounting rows from inherited data.
 		items, hasMore, err = store.ActivityPageForTerminalIntent(*filter.NodeID, before, limit)

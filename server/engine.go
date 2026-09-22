@@ -1081,7 +1081,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if e.m.assets != nil {
 		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 		ids, idsErr := agent.IntentAssetIDs(t.Store, intent)
-		if idsErr != nil || e.m.assets.ValidateTaskAssetsApproved(taskID, ids) != nil {
+		if idsErr != nil || e.m.assets.ValidateIntentAssets(taskID, intent, ids) != nil {
 			if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
 				log.Printf("[worker %s] task %s 意图 #%d 授权等待回退失败: %v", name, t.ID, intent.ID, err)
 			}
@@ -1331,10 +1331,10 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 		ids, accessErr := agent.IntentAssetIDs(t.Store, node)
 		if accessErr == nil {
-			accessErr = e.m.assets.ValidateTaskAssetsApproved(taskID, ids)
+			accessErr = e.m.assets.ValidateIntentAssets(taskID, node, ids)
 		}
 		if accessErr == nil {
-			accessErr = e.m.assets.ValidateTaskHostsApproved(taskID, guard.CollectTargetHosts(node.Payload))
+			accessErr = e.m.assets.ValidateIntentHosts(taskID, node, guard.CollectTargetHosts(node.Payload))
 		}
 		if accessErr != nil {
 			return accessErr
@@ -1395,7 +1395,7 @@ func (e *Engine) claimNext(t *Task, name string) *db.Node {
 		if e.m.assets != nil {
 			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 			ids, err := agent.IntentAssetIDs(t.Store, in)
-			return err == nil && e.m.assets.ValidateTaskAssetsApproved(taskID, ids) == nil && e.m.assets.ValidateTaskHostsApproved(taskID, guard.CollectTargetHosts(in.Payload)) == nil
+			return err == nil && e.m.assets.ValidateIntentAssets(taskID, in, ids) == nil && e.m.assets.ValidateIntentHosts(taskID, in, guard.CollectTargetHosts(in.Payload)) == nil
 		}
 		return true
 	})

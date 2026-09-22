@@ -3124,6 +3124,42 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const items = mockActivity.filter((item) => item.seq > since).slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since };
   }
+  if (path === "/exploration/activity/search") {
+    const session = q.get("session") || "main:0",
+      query = q.get("q") || "";
+    if (!query.trim() || [...query].length > 200) throw new Error("关键词须为 1–200 字符");
+    const limit = Number(q.get("limit") || 20);
+    if (limit < 1 || limit > 50) throw new Error("bad limit");
+    const scope = `${task}:${session}:${query}`;
+    const cursor = q.get("cursor")
+      ? JSON.parse(decodeURIComponent(atob(q.get("cursor")!)))
+      : { after: 0, upper: Math.max(0, ...mockActivity.map((a) => a.seq)), scope };
+    if (cursor.scope !== scope) throw new Error("bad search cursor");
+    const events = (task === D.tasks[0].id ? mockActivity : [])
+      .filter(
+        (a) =>
+          a.kind !== "usage" &&
+          a.seq > cursor.after &&
+          a.seq <= cursor.upper &&
+          (session === "plan"
+            ? a.worker === "planner"
+            : session.startsWith("intent:")
+              ? a.intent_id === session.slice(7)
+              : a.worker === "mainagent" && (a.main_seg ?? 0) === Number(session.split(":")[1] || 0)),
+      )
+      .sort((a, b) => a.seq - b.seq)
+      .filter((a) => (a.detail || a.summary).toLowerCase().includes(query.toLowerCase()));
+    const items = events.slice(0, limit).map((a) => {
+      const body = a.detail || a.summary,
+        pos = body.toLowerCase().indexOf(query.toLowerCase());
+      return { id: a.seq, kind: a.kind, snippet: body.slice(Math.max(0, pos - 60), Math.max(0, pos - 60) + 240) };
+    });
+    return {
+      items,
+      next_cursor:
+        events.length > limit ? btoa(encodeURIComponent(JSON.stringify({ ...cursor, after: items.at(-1)!.id }))) : "",
+    };
+  }
   if (path === "/exploration/activity/history") {
     const session = q.get("session") || "main:0";
     const events = (task === D.tasks[0].id ? mockActivity : [])
@@ -3141,14 +3177,24 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       limit = Number(q.get("limit") || 200);
     let items: Activity[];
     if (around) {
-      const i = events.findIndex((a) => a.seq === around && a.kind === "tool_use");
+      let i = events.findIndex((a) => a.seq === around);
+      if (i >= 0 && events[i].kind === "tool_result") {
+        const use = events.findLastIndex(
+          (a, j) => j < i && a.kind === "tool_use" && a.tool_use_id === events[i].tool_use_id,
+        );
+        if (use >= 0) i = use;
+      }
       if (i < 0) throw new Error("来源调用不存在或不可访问");
       const next = events.findIndex(
         (a, j) => j > i && a.kind === "tool_use" && a.tool_use_id === events[i].tool_use_id,
       );
       const pair = events.findIndex(
         (a, j) =>
-          j > i && (next < 0 || j < next) && a.kind === "tool_result" && a.tool_use_id === events[i].tool_use_id,
+          events[i].kind === "tool_use" &&
+          j > i &&
+          (next < 0 || j < next) &&
+          a.kind === "tool_result" &&
+          a.tool_use_id === events[i].tool_use_id,
       );
       items = events.slice(Math.max(0, i - Math.floor(limit / 2) + 1), Math.max(i, pair) + Math.floor(limit / 2));
     } else if (after) items = events.filter((a) => a.seq > after).slice(0, limit);
@@ -3387,6 +3433,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       kind,
       exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
       deferred: !isShell && b.deferred === true,
+      executable: isShell ? String(b.executable ?? "").trim() : "",
       directory: isShell ? String(b.directory ?? "").trim() : "",
       usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
       when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
@@ -3414,6 +3461,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       kind,
       exec: !isShell && b.exec && typeof b.exec === "object" ? (b.exec as Tool["exec"]) : {},
       deferred: !isShell && (typeof b.deferred === "boolean" ? b.deferred : current.deferred),
+      executable: isShell ? String(b.executable ?? "").trim() : "",
       directory: isShell ? String(b.directory ?? "").trim() : "",
       usage_help: isShell ? String(b.usage_help ?? "").trim() : "",
       when_to_use: isShell ? String(b.when_to_use ?? "").trim() : "",
@@ -3425,7 +3473,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (index >= 0) mockTools.splice(index, 1);
     return { deleted: seg[2] };
   }
-  if (path === "/tools/custom/test") return { output: "（demo）工具执行输出示例。", is_error: false };
+  if (path === "/tools/custom/test") {
+    const missing = String(b.executable ?? b.key ?? "").includes("missing");
+    const failed = missing || String(b.command ?? "").includes("exit 1");
+    return { output: failed ? "（demo）命令不存在或执行失败" : b.action === "check" ? `/usr/bin/${b.executable || b.key}` : "（demo）工具执行输出示例。", is_error: failed, duration_ms: 12 };
+  }
 
   // ── mcp ──
   if (path === "/mcp" && m === "GET") return { servers: mockMcpServers };

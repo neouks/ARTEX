@@ -83,6 +83,7 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
   for (const s of steps) {
+    const callKey = `${s.worker}:${s.intent_id ?? ""}:${s.main_seg ?? 0}:${s.tool_use_id}`;
     if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
@@ -106,13 +107,13 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
     }
     if (s.kind === "tool_use") {
       const g: Extract<Group, { type: "tool" }> = { type: "tool", key: s.seq, worker: s.worker, use: s };
-      if (s.tool_use_id) byToolId.set(s.tool_use_id, g);
+      if (s.tool_use_id) byToolId.set(callKey, g);
       out.push(g);
       continue;
     }
     if (s.kind === "tool_result") {
       // bind to its tool_use by id (NOT adjacency — tools can run in parallel)
-      const g = s.tool_use_id ? byToolId.get(s.tool_use_id) : undefined;
+      const g = s.tool_use_id ? byToolId.get(callKey) : undefined;
       if (g && !g.result) g.result = s;
       else out.push({ type: "tool", key: s.seq, worker: s.worker, result: s }); // orphan result
       continue;
@@ -359,12 +360,14 @@ function ToolBlock({
   showWorker,
   focused,
   onLocated,
+  focusLabel = "来源调用",
 }: {
   group: Extract<Group, { type: "tool" }>;
   getDetail: (seq: number) => Promise<string>;
   showWorker?: boolean;
   focused?: boolean;
   onLocated?: (el: HTMLElement) => void;
+  focusLabel?: string;
 }) {
   const [open, setOpen] = React.useState(!!focused);
   const root = React.useRef<HTMLDivElement>(null);
@@ -378,6 +381,7 @@ function ToolBlock({
   // arrives after we expanded mid-run (command only), this key changes and the
   // effect below re-fetches — so the output shows up instead of being cached out.
   const loadedKey = React.useRef<string | null>(null);
+  const [parts, setParts] = React.useState<{ seq: number; text: string }[]>([]);
   const { use, result } = group;
   const toolName = use?.tool || result?.tool || "工具";
   const ToolIcon = toolName === "Bash" ? Terminal : Wrench;
@@ -408,8 +412,17 @@ function ToolBlock({
         if (!live) return;
         setDetail(
           segs
-            .map((x, i) => `【${x.label}】\n${x.label === "命令" ? toolInputText(toolName, parts[i]) : parts[i]}`)
+            .map(
+              (x, i) =>
+                `【${x.label}】\n${x.label === "命令" && focusLabel !== "搜索结果" ? toolInputText(toolName, parts[i]) : parts[i]}`,
+            )
             .join("\n\n"),
+        );
+        setParts(
+          segs.map((x, i) => ({
+            seq: x.seq,
+            text: `【${x.label}】\n${x.label === "命令" && focusLabel !== "搜索结果" ? toolInputText(toolName, parts[i]) : parts[i]}`,
+          })),
         );
         loadedKey.current = detailKey;
       })
@@ -419,7 +432,7 @@ function ToolBlock({
     return () => {
       live = false;
     };
-  }, [open, detailKey, use, result, getDetail, toolName]);
+  }, [open, detailKey, use, result, getDetail, toolName, focusLabel]);
 
   React.useEffect(() => {
     // A failed detail request is also a settled view: keep its retry control
@@ -463,9 +476,10 @@ function ToolBlock({
     <div
       ref={root}
       data-source-call={focused || undefined}
+      data-activity-id={use?.seq ?? result?.seq}
       className={cn("text-xs", focused && "rounded-md border border-primary bg-accent/30 p-2")}
     >
-      {focused && <Badge variant="outline">来源调用</Badge>}
+      {focused && <Badge variant="outline">{focusLabel}</Badge>}
       <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
@@ -477,13 +491,23 @@ function ToolBlock({
         <span className={"ml-auto shrink-0 font-medium " + statusTone}>{statusText}</span>
       </button>
       {open && (
-        <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
+        <pre
+          data-search-body
+          className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed"
+        >
           {loadError ? (
             <Button size="sm" variant="outline" onClick={() => setRetry((n) => n + 1)}>
               加载失败，重试
             </Button>
+          ) : detail ? (
+            parts.map((part) => (
+              <span key={part.seq} data-search-activity={part.seq}>
+                {part.text}
+                {"\n\n"}
+              </span>
+            ))
           ) : (
-            (detail ?? "加载中…")
+            "加载中…"
           )}
         </pre>
       )}
@@ -622,7 +646,7 @@ function UserRow({
   }, [inView, step.seq, getDetail, step.summary, inline]);
   const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
-    <div ref={ref} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
+    <div ref={ref} data-activity-id={step.seq} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
       <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1.5">
         {attachments.length > 0 && (
           <div className="flex min-w-0 max-w-full flex-wrap justify-end gap-1.5">
@@ -674,7 +698,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
     };
   }, [inView, step.seq, getDetail, step.summary]);
   return (
-    <div ref={ref} className="mb-2 mt-1 flex min-w-0 flex-col gap-1">
+    <div ref={ref} data-activity-id={step.seq} className="mb-2 mt-1 flex min-w-0 flex-col gap-1">
       <div
         className={
           "min-w-0 flex-1 break-words rounded-lg bg-muted px-3 py-2 " +
@@ -692,6 +716,59 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
   );
 }
 
+// Focused ordinary messages load their exact body even when outside the viewport.
+function LocatedActivity({
+  step,
+  getDetail,
+  onLocated,
+}: {
+  step: Activity;
+  getDetail: (seq: number) => Promise<string>;
+  onLocated?: (el: HTMLElement) => void;
+}) {
+  const root = React.useRef<HTMLDivElement>(null);
+  const [body, setBody] = React.useState<string | null>(null);
+  const [error, setError] = React.useState(false);
+  const [retry, setRetry] = React.useState(0);
+  React.useEffect(() => {
+    let current = true;
+    setBody(null);
+    setError(false);
+    getDetail(step.seq)
+      .then((v) => {
+        if (current) setBody(v || step.summary);
+      })
+      .catch(() => {
+        if (current) setError(true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [step.seq, step.summary, getDetail, retry]);
+  React.useEffect(() => {
+    if (body === null && !error) return;
+    const frame = requestAnimationFrame(() => {
+      if (root.current) onLocated?.(root.current);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [body, error, onLocated]);
+  return (
+    <div ref={root} data-activity-id={step.seq} className="min-w-0 rounded-md border border-primary p-2">
+      {error ? (
+        <Button variant="outline" size="sm" onClick={() => setRetry((n) => n + 1)}>
+          详情加载失败，重试
+        </Button>
+      ) : body === null ? (
+        "加载中…"
+      ) : (
+        <div data-search-body>
+          <Markdown text={body} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ExecView renders an agent execution replay (planner / worker / main agent) in
 // the compact, grouped, expand-to-detail format — thinking, tool calls/results,
 // and (for the main agent) the human turns. Worker lane chips show only when the
@@ -703,6 +780,7 @@ function ExecView({
   fetchDetail,
   focusActivity,
   onLocated,
+  focusLabel = "来源调用",
 }: {
   activity: Activity[];
   taskId?: string;
@@ -710,6 +788,7 @@ function ExecView({
   fetchDetail?: (seq: number) => Promise<string>;
   focusActivity?: number;
   onLocated?: (el: HTMLElement) => void;
+  focusLabel?: string;
 }) {
   const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
@@ -721,12 +800,36 @@ function ExecView({
   return (
     <div className="flex flex-col">
       {groupSteps(activity, !!chat).map((g) =>
-        g.type === "round" ? (
+        g.type === "round" && g.key === focusActivity ? (
+          <LocatedActivity
+            key={`located-${g.key}`}
+            step={activity.find((a) => a.seq === g.key)!}
+            getDetail={getDetail}
+            onLocated={onLocated}
+          />
+        ) : g.type === "round" ? (
           <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
             <span className="h-px flex-1 bg-border" />
             {g.label}
             <span className="h-px flex-1 bg-border" />
           </div>
+        ) : (g.type === "user" || g.type === "answer") && g.step.seq === focusActivity ? (
+          <LocatedActivity key={`located-${g.key}`} step={g.step} getDetail={getDetail} onLocated={onLocated} />
+        ) : g.type === "msg" && g.steps.some((s) => s.seq === focusActivity) ? (
+          <React.Fragment key={`located-${g.key}`}>
+            {g.steps.map((step) =>
+              step.seq === focusActivity ? (
+                <LocatedActivity key={step.seq} step={step} getDetail={getDetail} onLocated={onLocated} />
+              ) : (
+                <MessageBlock
+                  key={step.seq}
+                  group={{ ...g, steps: [step] }}
+                  getDetail={getDetail}
+                  showWorker={showWorker}
+                />
+              ),
+            )}
+          </React.Fragment>
         ) : g.type === "user" ? (
           <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
         ) : g.type === "answer" ? (
@@ -739,7 +842,13 @@ function ExecView({
             showWorker={showWorker}
             focused={!!focusActivity && (g.use?.seq === focusActivity || g.result?.seq === focusActivity)}
             onLocated={onLocated}
+            focusLabel={focusLabel}
           />
+        ) : g.type === "intercept" && g.step.seq === focusActivity ? (
+          <React.Fragment key={`located-${g.key}`}>
+            <LocatedActivity step={g.step} getDetail={getDetail} onLocated={onLocated} />
+            <InterceptCard step={g.step} getDetail={getDetail} />
+          </React.Fragment>
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
         ) : (
@@ -762,6 +871,7 @@ export function Transcript({
   focusActivity,
   focusedSeq,
   onLocated,
+  focusLabel = "来源调用",
 }: {
   activity: Activity[];
   live?: boolean;
@@ -771,6 +881,7 @@ export function Transcript({
   focusActivity?: number;
   focusedSeq?: number;
   onLocated?: (el: HTMLElement) => void;
+  focusLabel?: string;
 }) {
   const transcriptRef = React.useRef<HTMLDivElement>(null);
   const [focusPadding, setFocusPadding] = React.useState(0);
@@ -800,6 +911,7 @@ export function Transcript({
         fetchDetail={fetchDetail}
         focusActivity={focusActivity ?? focusedSeq}
         onLocated={onLocated}
+        focusLabel={focusLabel}
       />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">

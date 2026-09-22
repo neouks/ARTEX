@@ -1298,6 +1298,7 @@ export interface Tool {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
+  executable?: string; // shell 命令名或绝对路径，留空使用 key
   directory?: string; // shell 专属：工具所在目录，仅作为 Bash 环境提示
   usage_help?: string; // shell 专属：工具用法帮助
   when_to_use?: string; // shell 专属：何时调用
