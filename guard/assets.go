@@ -37,7 +37,10 @@ func AssetSkipScope(ctx context.Context) string {
 	if ri.AgentKey == "planner" {
 		return "planner"
 	}
-	return "mainagent"
+	if ri.AgentKey == "mainagent" && ri.TaskID > 0 && ri.IntentID == 0 {
+		return "mainagent"
+	}
+	return "unknown"
 }
 
 // Worker scope is emitted only from trusted run context / signed proxy tags.
@@ -88,11 +91,8 @@ type assetPolicyHooks struct {
 func (h assetPolicyHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
 	h.policy.Scope = AssetSkipScope(ctx)
 	ri := llmrec.RunInfoFrom(ctx)
-	if ri.AgentKey != "worker" || ri.TaskID != h.policy.TaskID {
-		h.policy.Scope = "mainagent"
-		if ri.AgentKey == "planner" {
-			h.policy.Scope = "planner"
-		}
+	if ri.TaskID != h.policy.TaskID || (ri.AgentKey != "mainagent" && ri.AgentKey != "planner" && !(ri.AgentKey == "worker" && ri.IntentID > 0)) {
+		h.policy.Scope = "unknown"
 	}
 	if reason, audit := h.policy.check(name, input); reason != "" {
 		if h.audit != nil && audit {
@@ -184,6 +184,9 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 		ids := collectAssetIDs(value)
 		if len(ids) > 0 {
 			validate := p.Store.ValidateTaskAssetsApproved
+			if p.Scope == "mainagent" {
+				validate = p.Store.ValidateWorkerAssets
+			}
 			if intent := WorkerScopeIntent(p.Scope); intent > 0 {
 				if err := p.Store.RememberWorkerAccess(p.TaskID, intent, nil, ids); err != nil {
 					return err.Error(), true
@@ -202,6 +205,9 @@ func (p TaskAssetPolicy) check(tool string, input []byte) (string, bool) {
 	}
 	hosts := collectHosts(string(input))
 	validate := p.Store.ValidateTaskHostsApproved
+	if p.Scope == "mainagent" {
+		validate = p.Store.ValidateWorkerHosts
+	}
 	if intent := WorkerScopeIntent(p.Scope); intent > 0 {
 		if err := p.Store.RememberWorkerAccess(p.TaskID, intent, hosts, nil); err != nil {
 			return err.Error(), true

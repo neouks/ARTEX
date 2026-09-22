@@ -196,6 +196,9 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.GrantMainIntentDispatch(selectedID); err != nil {
+		t.Fatal(err)
+	}
 	nodeID, err := store.AddNode(KindFact, map[string]any{"summary": "archived fact", "asset_ids": []int64{assetID}}, 1, "confirmed", "worker", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +321,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 		t.Fatalf("restored task = %+v, %v", live, err)
 	}
 	selected, selectedErr := d.Exploration(task.ExplorationID).GetNode(selectedID)
-	if selectedErr != nil || selected == nil || !selected.DispatchRequested() {
+	if selectedErr != nil || selected == nil || !selected.DispatchRequested() || !selected.AllowsPendingAssets() {
 		t.Fatalf("dispatch selection lost: %+v %v", selected, selectedErr)
 	}
 	if live.ExecutionMode != ExecutionManual {

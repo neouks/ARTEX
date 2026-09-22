@@ -76,8 +76,8 @@ func TestActivityWindowPairAndIsolation(t *testing.T) {
 	if _, e = s.ActivityWindow(f, 999999999, 0, 6); !errors.Is(e, ErrActivityAnchor) {
 		t.Fatalf("unknown %v", e)
 	}
-	if _, e = s.ActivityWindow(f, result, 0, 6); !errors.Is(e, ErrActivityAnchor) {
-		t.Fatalf("non command anchor %v", e)
+	if _, e = s.ActivityWindow(f, result, 0, 6); e != nil {
+		t.Fatalf("result anchor %v", e)
 	}
 	pending := add("tool_use", "waiting", "planner")
 	p, e = s.ActivityWindow(f, pending, 0, 6)

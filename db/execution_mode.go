@@ -68,7 +68,7 @@ func (s *ExplorationStore) SetIntentDispatch(id int64, requested bool) error {
 	res, err := s.queueExec(`UPDATE exploration_nodes SET payload=payload || jsonb_build_object('dispatch_requested',$3::boolean)
  WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='open'
  AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
- AND (NOT $3 OR NOT EXISTS (SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE a.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,a.asset_id)))`, id, s.expID, requested)
+ AND (NOT $3 OR NOT EXISTS (SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE a.node_id=exploration_nodes.id AND NOT `+intentAssetAllowedSQL("t.id", "a.asset_id", "exploration_nodes")+`))`, id, s.expID, requested)
 	if err != nil {
 		return err
 	}

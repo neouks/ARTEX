@@ -22,7 +22,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 	}
 	system := []string{}
 	for _, part := range req.System {
-		if !strings.HasPrefix(part, "当前候选审批：") && part != targetAccessRule {
+		if !strings.HasPrefix(part, "当前候选审批：") && part != targetAccessRule && part != mainAssetExecutionRule {
 			system = append(system, part)
 		}
 	}
@@ -133,7 +133,11 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 			q.AssetIDs = append(q.AssetIDs, k.id)
 		}
 	}
-	current, err := queryTargetAccess(p.assets.WithReadContext(ctx), p.taskID, q)
+	store := p.assets.WithReadContext(ctx)
+	if ri.AgentKey == "mainagent" && ri.IntentID == 0 {
+		store = store.WithExecutionRead()
+	}
+	current, err := queryTargetAccess(store, p.taskID, q)
 	if err != nil {
 		return req, nil, err
 	}
@@ -148,6 +152,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 	refreshView := func(previous *targetAccessView) {
 		for i := range previous.Assets {
 			previous.Assets[i].State = assets[previous.Assets[i].ID]
+			previous.Assets[i].CanOperate = previous.Assets[i].State == db.ApprovalApproved || (ri.AgentKey == "mainagent" && ri.IntentID == 0 && previous.Assets[i].State == db.ApprovalPending)
 		}
 		for i := range previous.Nodes {
 			previous.Nodes[i].NodeAccess = nodes[previous.Nodes[i].ID]
@@ -209,7 +214,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 			continue
 		}
 		visited[k] = true
-		if k.node && nodes[k.id].CanRead || !k.node && assets[k.id] == db.ApprovalApproved {
+		if k.node && nodes[k.id].CanRead || !k.node && (assets[k.id] == db.ApprovalApproved || (ri.AgentKey == "mainagent" && ri.IntentID == 0 && assets[k.id] == db.ApprovalPending)) {
 			continue
 		}
 		total++
@@ -219,7 +224,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 		if k.node {
 			restricted.Nodes = append(restricted.Nodes, targetNodeAccess{k.id, nodes[k.id]})
 		} else {
-			restricted.Assets = append(restricted.Assets, targetAssetAccess{k.id, assets[k.id]})
+			restricted.Assets = append(restricted.Assets, targetAssetAccess{ID: k.id, State: assets[k.id]})
 		}
 	}
 	if total > 0 {

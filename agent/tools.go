@@ -138,6 +138,7 @@ type ToolSet struct {
 	GoalMet         bool
 	Reason          string
 	writes          WriteCounts
+	mainExecution   bool // set only by the trusted task MainAgent runtime
 	workerExecution bool // set only by Worker.execute, never by tool arguments/catalog
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
@@ -1592,7 +1593,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 			return 0, false, err
 		}
 		hosts := guard.CollectTargetHosts(raw)
-		if err := t.as.ValidateTaskHostsApproved(t.taskID, hosts); err != nil {
+		if err := t.validatePlanningHosts(hosts); err != nil {
 			if !errors.Is(err, db.ErrTaskAssetBlocked) && !errors.Is(err, db.ErrTaskAssetNotApproved) {
 				return 0, false, err
 			}
@@ -1659,13 +1660,13 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 		}
 	}
 	if t.as != nil && t.taskID > 0 {
-		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+		if err := t.validatePlanningAssets(anchors); err != nil {
 			return 0, false, fmt.Errorf("意图资产未获授权：%w", err)
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
 	if t.directDispatch {
-		payload["dispatch_requested"] = true
+		payload["dispatch_requested"] = true // pending-asset permission is published only after host admission succeeds
 	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
@@ -1695,7 +1696,7 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return submissionTool{writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
-		"已知未授权候选本轮跳过；未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
+		"Planner 对未审批候选本轮跳过；主 Agent 可明确下发待审批资产方向，但封禁和撤回仍拒绝。未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "maxItems": 4, "description": "【优先用这个】要新增的探索方向数组，最多 4 条，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
@@ -1705,7 +1706,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 		}),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			t := t
-			if locked, _ := ctx.Value(intentSubmissionLockedKey{}).(bool); locked && RunInfoFrom(ctx).AgentKey == "mainagent" {
+			if locked, _ := ctx.Value(intentSubmissionLockedKey{}).(bool); locked && RunInfoFrom(ctx).AgentKey == "mainagent" && RunInfoFrom(ctx).TaskID == t.taskID && RunInfoFrom(ctx).IntentID == 0 {
 				copied := *t
 				copied.directDispatch = true
 				t = &copied
@@ -1977,7 +1978,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				return actool.Errorf("漏洞已保存，但测试状态更新失败：" + err.Error()), nil
 			}
 		}
-		if t.notifyFinding != nil && (!t.workerExecution || t.as == nil || t.as.ValidateTaskAssetsApproved(t.taskID, input.AssetIDs) == nil) {
+		if t.notifyFinding != nil && (!(t.workerExecution || t.mainExecution) || t.as == nil || t.as.ValidateTaskAssetsApproved(t.taskID, input.AssetIDs) == nil) {
 			iid := input.IntentID
 			if iid <= 0 {
 				iid = t.ownerNode
@@ -2190,7 +2191,7 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 		}
 	}
 	if t.as != nil && t.taskID > 0 {
-		if err := t.as.ValidateTaskAssetsApproved(t.taskID, anchors); err != nil {
+		if err := t.validatePlanningAssets(anchors); err != nil {
 			return 0, fmt.Errorf("提示资产未获授权：%w", err)
 		}
 	}

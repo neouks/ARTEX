@@ -106,8 +106,8 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 
 func mainAgentSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	body += "\n主 Agent 的 add_intent 新增即下发，dispatch_intents 用于执行已有待选意图。仅提供规划建议时不要创建意图。实际执行受审批和并发准入约束，以工具返回的 dispatch 状态为准。手工模式下目标达成或意图执行完毕均不会自动结束任务，由用户结束；托管模式沿用原自动完成规则。"
-	return body + artifactSpec(workDir)
+	body += "\n主 Agent 的 add_intent 新增即下发，dispatch_intents 用于执行已有待选意图。仅提供规划建议时不要创建意图。实际执行仍受封禁、撤回、任务范围、独立动作审批及并发准入约束，以工具返回的 dispatch 状态为准。手工模式下目标达成或意图执行完毕均不会自动结束任务，由用户结束；托管模式沿用原自动完成规则。"
+	return body + "\n" + mainAssetExecutionRule + artifactSpec(workDir)
 }
 
 // Chat handles one human message and returns the assistant reply. emit, if
@@ -136,8 +136,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	runProfile := shellProfileFor(m.shellProfile, mainDir)
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultToolsWithProfile(runProfile)...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "mainagent", Trigger: "human_message"})
+	tsx.enableMainExecution(ctx)
+	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultToolsWithProfile(runProfile)...)
 	ctx = WithTaskToolSet(ctx, tsx)
 	tools, def, cleanup, err := AugmentTools(ctx, "mainagent", base)
 	tools = tsx.StripCoverageParams(tools) // 覆盖度关闭时隐藏 insert_assets 的 related 入参

@@ -246,6 +246,9 @@ func (t *Traffic) authorizeTaskRequest(_ http.ResponseWriter, req *http.Request)
 		host = hostOnly(req.Host)
 	}
 	validate := t.assets.ValidateTaskHostsApproved
+	if scope == "mainagent" {
+		validate = t.assets.ValidateWorkerHosts
+	}
 	if intent := guard.WorkerScopeIntent(scope); intent > 0 {
 		if err := t.assets.RememberWorkerAccess(taskID, intent, []string{host}, nil); err != nil {
 			return false, err

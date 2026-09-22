@@ -1,6 +1,8 @@
 package db
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -61,10 +63,30 @@ func TestInheritedActivityReadsRequireTerminalIntent(t *testing.T) {
 		t.Fatalf("terminal detail boundary: details=%+v err=%v", details, err)
 	}
 
+	f := ActivitySessionFilter{NodeID: &intentID, Inherited: true}
+	search, _, _, searchErr := store.ActivitySearch(context.Background(), f, "private", 0, 0, 20)
+	if searchErr != nil || len(search) != 0 {
+		t.Fatalf("inherited private search: %+v %v", search, searchErr)
+	}
+	window, windowErr := store.ActivityWindow(f, textID, 0, 10)
+	if windowErr != nil || len(window.Items) != 2 {
+		t.Fatalf("inherited window: %+v %v", window, windowErr)
+	}
+	if _, err := store.ActivityWindow(f, thinkingID, 0, 10); !errors.Is(err, ErrActivityAnchor) {
+		t.Fatalf("inherited reasoning anchor: %v", err)
+	}
+
 	// Reopening a source intent must close every inherited activity read even if
 	// callers still hold a stale terminal-state snapshot.
 	if err := store.SetIntentState(intentID, "running"); err != nil {
 		t.Fatal(err)
+	}
+	search, _, _, searchErr = store.ActivitySearch(context.Background(), f, "shared", 0, 0, 20)
+	if searchErr != nil || len(search) != 0 {
+		t.Fatalf("reopened search: %+v %v", search, searchErr)
+	}
+	if _, err := store.ActivityWindow(f, textID, 0, 10); !errors.Is(err, ErrActivityAnchor) {
+		t.Fatalf("reopened anchor: %v", err)
 	}
 	page, _, err = store.ActivityPageForTerminalIntent(intentID, 0, 10)
 	if err != nil || len(page) != 0 {

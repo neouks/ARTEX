@@ -417,7 +417,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		if idsErr != nil {
 			return harness.ReasonAbortedTools, WriteCounts{}, fmt.Errorf("%w: 读取意图资产血缘失败：%v", ErrWorkerAssetAuthorization, idsErr)
 		}
-		if err := as.ValidateTaskAssetsApproved(taskID, ids); err != nil {
+		if err := as.ValidateIntentAssets(taskID, intent, ids); err != nil {
 			wrapped := fmt.Errorf("Worker 启动前资产授权校验失败：%w", err)
 			if emit != nil {
 				emit(db.Activity{Kind: "result", IsError: true, Summary: "Worker 因资产未获授权而停止", Detail: wrapped.Error()})

@@ -1338,7 +1338,7 @@ func (s *ExplorationStore) HasOpenIntent() (bool, error) {
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
 WHERE exploration_id=$1 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
 AND NOT EXISTS(SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=$1
-WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id)))`, s.expID).Scan(&exists)
+WHERE ea.node_id=exploration_nodes.id AND NOT `+intentAssetAllowedSQL("t.id", "ea.asset_id", "exploration_nodes")+`))`, s.expID).Scan(&exists)
 	return exists, err
 }
 
@@ -1358,7 +1358,7 @@ AND NOT EXISTS(SELECT 1 FROM host_states WHERE state='approved')
 AND NOT EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.exploration_id=$1 AND n.kind='intent'
  AND (n.state='running' OR (n.state='open' AND NOT EXISTS(
   SELECT 1 FROM exploration_anchors ea CROSS JOIN current_task t
-  WHERE ea.node_id=n.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id)))))`, s.expID).Scan(&waiting)
+  WHERE ea.node_id=n.id AND NOT `+intentAssetAllowedSQL("t.id", "ea.asset_id", "n")+`))))`, s.expID).Scan(&waiting)
 	return waiting, err
 }
 
@@ -1497,7 +1497,7 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open' AND payload
 	    JOIN tasks task_ctx ON task_ctx.exploration_id=exploration_nodes.exploration_id
 	                         AND task_ctx.deleted_at IS NULL
 	    WHERE ea.node_id=exploration_nodes.id
-	      AND NOT task_asset_effectively_approved(task_ctx.id, ea.asset_id)
+	      AND NOT `+intentAssetAllowedSQL("task_ctx.id", "ea.asset_id", "exploration_nodes")+`
 	  )`+intentDispatchPredicate, owner, id, s.expID)
 	if err != nil {
 		return false, err
@@ -1872,16 +1872,21 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 //
 // A zero value (all empty) matches the whole task (no session filter).
 type ActivitySessionFilter struct {
-	Worker  string
-	NodeID  *int64
-	Main    bool // main-agent session
-	MainSeg *int // segment for the main session (nil == current, resolved by caller; 0 == original)
+	Inherited bool // restrict to readable terminal intent records
+	Worker    string
+	NodeID    *int64
+	Main      bool // main-agent session
+	MainSeg   *int // segment for the main session (nil == current, resolved by caller; 0 == original)
 }
 
 func (f ActivitySessionFilter) cond(argStart int) (string, []any) {
 	switch {
 	case f.NodeID != nil:
-		return fmt.Sprintf(" AND node_id=$%d", argStart), []any{*f.NodeID}
+		cond := fmt.Sprintf(" AND node_id=$%d", argStart)
+		if f.Inherited {
+			cond += " AND kind NOT IN ('thinking','usage') AND EXISTS (SELECT 1 FROM exploration_nodes n WHERE n.id=activity.node_id AND n.exploration_id=activity.exploration_id AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped'))"
+		}
+		return cond, []any{*f.NodeID}
 	case f.Main:
 		seg := 0
 		if f.MainSeg != nil {

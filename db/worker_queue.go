@@ -146,7 +146,7 @@ func (s *ExplorationStore) ClaimNextWorker(owner string, eligible func(*Node) bo
 			continue
 		}
 		res, err := tx.Exec(`UPDATE exploration_nodes SET state='running',owner=$1,payload=payload || jsonb_build_object('dispatch_requested',true) WHERE id=$2 AND exploration_id=$3 AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
- AND NOT EXISTS (SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE ea.node_id=exploration_nodes.id AND NOT task_asset_effectively_approved(t.id,ea.asset_id))`+intentDispatchPredicate, owner, n.ID, s.expID)
+ AND NOT EXISTS (SELECT 1 FROM exploration_anchors ea JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id AND t.deleted_at IS NULL WHERE ea.node_id=exploration_nodes.id AND NOT `+intentAssetAllowedSQL("t.id", "ea.asset_id", "exploration_nodes")+`)`+intentDispatchPredicate, owner, n.ID, s.expID)
 		if err != nil {
 			return nil, err
 		}

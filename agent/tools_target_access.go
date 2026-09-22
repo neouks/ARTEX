@@ -17,8 +17,9 @@ type targetAccessQuery struct {
 	NodeIDs  []int64 `json:"node_ids"`
 }
 type targetAssetAccess struct {
-	ID    int64  `json:"id"`
-	State string `json:"approval_state"`
+	ID         int64  `json:"id"`
+	State      string `json:"approval_state"`
+	CanOperate bool   `json:"can_operate"`
 }
 type targetNodeAccess struct {
 	ID int64 `json:"id"`
@@ -72,7 +73,7 @@ func queryTargetAccess(store *db.AssetStore, taskID int64, q targetAccessQuery) 
 		return out, err
 	}
 	for _, id := range q.AssetIDs {
-		out.Assets = append(out.Assets, targetAssetAccess{id, assets[id]})
+		out.Assets = append(out.Assets, targetAssetAccess{ID: id, State: assets[id], CanOperate: assets[id] == db.ApprovalApproved || (store.ExecutionRead() && assets[id] == db.ApprovalPending)})
 	}
 	for _, id := range q.NodeIDs {
 		out.Nodes = append(out.Nodes, targetNodeAccess{id, nodes[id]})
@@ -92,7 +93,11 @@ func (t *ToolSet) checkTargetAccess() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		out, err := queryTargetAccess(t.as.WithReadContext(ctx), t.taskID, q)
+		store := t.as.WithReadContext(ctx)
+		if ri.AgentKey == "mainagent" && ri.IntentID == 0 {
+			store = store.WithExecutionRead()
+		}
+		out, err := queryTargetAccess(store, t.taskID, q)
 		if err != nil {
 			return actool.Errorf("审批查询失败: " + err.Error()), nil
 		}
@@ -105,7 +110,7 @@ type targetAccessError struct{ Access targetAccessView }
 func (e *targetAccessError) Error() string { return "关联目标当前不可用，跳过本项" }
 func targetDenied(v targetAccessView) bool {
 	for _, a := range v.Assets {
-		if a.State != db.ApprovalApproved {
+		if a.State != db.ApprovalApproved && !a.CanOperate {
 			return true
 		}
 	}

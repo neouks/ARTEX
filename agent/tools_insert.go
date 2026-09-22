@@ -88,7 +88,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 			"• service(other)：service_name(必填)、ip或domain(至少一个)、port(必填)、auth([...])\n"+
 			"• endpoint：url(必填)、method(必填)、params([{location,name,value,type}])、service_ip\n"+
 			"auth/technologies/params 都是【追加合并】(append)，不会覆盖原有值。\n"+
-			"返回当前角色可用资产 results、错误 errors 及待审批/受限数量。Planner 只能对 approved 资产下发意图；Worker 在当前意图执行中可使用 pending 资产，不因未审批反复等待，也不会自动批准。封禁、撤回、删除和非法资产仍禁止访问；端口、服务和接口继承主机限制。",
+			"返回当前角色可用资产 results、错误 errors 及待审批/受限数量。Planner 只能对 approved 资产下发意图；主 Agent 可操作并明确下发 pending 资产；Worker 在当前意图执行中可使用 pending 资产，不因未审批反复等待，也不会自动批准。封禁、撤回、删除和非法资产仍禁止访问；端口、服务和接口继承主机限制。",
 		obj(map[string]any{
 			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
 			"assets": map[string]any{
@@ -320,7 +320,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					} else {
 						restrictedCount++
 					}
-					if !t.workerExecution || approvalState != db.ApprovalPending {
+					if (!t.workerExecution && !t.mainExecution) || approvalState != db.ApprovalPending {
 						continue
 					}
 				}
@@ -517,7 +517,7 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 
 // listAssets lets an agent query the asset table.
 func (t *ToolSet) listAssets() actool.CoreTool {
-	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，Worker 也可读取待审批，主动限制仍有效。调用前必须选择且只选择一种查询方式：id（正整数）、ids（非空 ID 数组）或 dsl（非空查询条件）；禁止只传 limit/offset/type。按目标搜索示例：{\"dsl\":\"url=example.com\",\"limit\":50}；将示例域名替换为实际目标。续页必须保留原查询条件并使用 next_offset。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
+	return readTool("list_assets", "查询当前角色可见的任务资产摘要：Planner 仅已批准，主 Agent 和 Worker 也可读取待审批，主动限制仍有效。调用前必须选择且只选择一种查询方式：id（正整数）、ids（非空 ID 数组）或 dsl（非空查询条件）；禁止只传 limit/offset/type。按目标搜索示例：{\"dsl\":\"url=example.com\",\"limit\":50}；将示例域名替换为实际目标。续页必须保留原查询条件并使用 next_offset。DSL 支持 field=value 模糊、== 精确、!= 排除、数字比较、AND/OR 和括号；常用字段 domain/ip/url/port/status_code/technology。详情需 detail=true 和明确 ID；fields 可选 identity/fingerprint/dns/params/auth/extra，认证仅显式 auth 返回。详情延期字段通过 field、index、text_offset 续读。",
 		obj(map[string]any{
 			"dsl": str("与 id、ids 三选一，必须为非空查询文本或 DSL；如 url=example.com 或 port==443 AND technology=nginx。任务审批筛选用 approval_state==approved（approved/pending/blocked/revoked）；status_code==200 表示 HTTP 状态码，status 的整数值仍是 HTTP 状态码。审批筛选不会扩大当前角色的可见范围，Planner 查非批准资产管理摘要应使用 list_task_assets。URL/域名/IP 条件放在这里，不是顶层参数"), "type": str("可选资产类型，仅用于 DSL"),
 			"id": idp("单个正整数资产 ID；与 ids、dsl 三选一"), "ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "非空正整数 ID 数组，与 id、dsl 三选一；最多50个 ID，详情最多5个"},
@@ -819,6 +819,13 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 
 // MainAgentTools returns the human-interface tool set.
 func (t *ToolSet) MainAgentTools() []actool.CoreTool {
+	tools := t.mainAgentTools()
+	for i, tool := range tools {
+		tools[i] = mainRoleTool{CoreTool: tool, owner: t}
+	}
+	return tools
+}
+func (t *ToolSet) mainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.listTaskAssets(), t.checkTargetAccess(), t.dispatchIntents(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),

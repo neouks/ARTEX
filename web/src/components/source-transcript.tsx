@@ -6,6 +6,7 @@ import { Transcript } from "@/components/transcript";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { highlightActivity } from "@/lib/activity-highlight";
 import { api } from "@/lib/api";
 import type { Activity } from "@/lib/types";
 
@@ -20,24 +21,33 @@ export function SourceTranscript({
   anchor,
   onLatest,
   intro,
+  searchQuery = "",
+  searchMode = false,
 }: {
   taskId: string;
   session: string;
   anchor: number;
   onLatest: () => void;
   intro?: Activity;
+  searchQuery?: string;
+  searchMode?: boolean;
 }) {
   const [page, setPage] = React.useState<Awaited<ReturnType<typeof api.activityHistory>> | null>(null);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [retry, setRetry] = React.useState(0);
   const root = React.useRef<HTMLDivElement>(null);
+  const queryRef = React.useRef(searchQuery);
+  queryRef.current = searchQuery;
+  const generation = React.useRef(0);
+  const highlight = React.useRef<ReturnType<typeof highlightActivity> | null>(null);
   const alive = React.useRef(true);
   const target = React.useRef<HTMLElement | null>(null);
   const userMoved = React.useRef(false);
   const inFlight = React.useRef(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: retry intentionally reloads a failed anchor.
   React.useEffect(() => {
+    ++generation.current;
     alive.current = true;
     let current = true;
     setPage(null);
@@ -57,18 +67,45 @@ export function SourceTranscript({
       alive.current = false;
     };
   }, [taskId, session, anchor, retry]);
-  const locate = React.useCallback((el: HTMLElement) => {
-    target.current = el;
-    if (userMoved.current) return;
-    const vp = root.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
-    if (!vp) return;
-    if (root.current) {
-      root.current.style.paddingTop = `${vp.clientHeight / 2}px`;
-      root.current.style.paddingBottom = `${vp.clientHeight / 2}px`;
+  const locate = React.useCallback(
+    (el: HTMLElement) => {
+      highlight.current?.clear();
+      highlight.current = highlightActivity(
+        el.querySelector<HTMLElement>(`[data-search-activity="${anchor}"]`) ?? el,
+        queryRef.current,
+      );
+      target.current = el;
+      if (userMoved.current) return;
+      const vp = root.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
+      if (!vp) return;
+      if (root.current) {
+        root.current.style.paddingTop = `${vp.clientHeight / 2}px`;
+        root.current.style.paddingBottom = `${vp.clientHeight / 2}px`;
+      }
+      const range = highlight.current.ranges[0];
+      if (range) {
+        const pre = range.startContainer.parentElement?.closest("pre");
+        if (pre) {
+          pre.scrollTop += range.getBoundingClientRect().top - pre.getBoundingClientRect().top - pre.clientHeight / 2;
+          pre.scrollLeft += range.getBoundingClientRect().left - pre.getBoundingClientRect().left - pre.clientWidth / 2;
+        }
+      }
+      const rect = range?.getBoundingClientRect() ?? el.getBoundingClientRect();
+      vp.scrollTop +=
+        rect.top - vp.getBoundingClientRect().top - (vp.clientHeight - Math.min(rect.height, vp.clientHeight)) / 2;
+    },
+    [anchor],
+  );
+  React.useEffect(() => {
+    // Closing search clears highlights without moving the current viewport.
+    highlight.current?.clear();
+    if (target.current && searchQuery) {
+      // A new keyword may match a different paragraph in the same message.
+      userMoved.current = false;
+      locate(target.current);
     }
-    vp.scrollTop +=
-      el.getBoundingClientRect().top - vp.getBoundingClientRect().top - (vp.clientHeight - el.clientHeight) / 2;
-  }, []);
+    return () => highlight.current?.clear();
+  }, [searchQuery, locate]);
   React.useEffect(() => {
     const el = root.current;
     const vp = el?.closest('[data-slot="scroll-area-viewport"]');
@@ -94,6 +131,7 @@ export function SourceTranscript({
   }, [locate]);
   async function more(direction: "before" | "after") {
     if (!page || inFlight.current) return;
+    const request = generation.current;
     userMoved.current = true;
     inFlight.current = true;
     setBusy(true);
@@ -109,7 +147,7 @@ export function SourceTranscript({
         200,
         direction === "after" ? { after: page.latestCursor } : undefined,
       );
-      if (!alive.current) return;
+      if (!alive.current || request !== generation.current) return;
       setPage(
         (old) =>
           old && {
@@ -138,7 +176,11 @@ export function SourceTranscript({
       if (inFlight.current) return;
       const use = page.items.find((a) => a.seq === anchor);
       const waiting =
-        use && !page.items.some((a) => a.kind === "tool_result" && a.tool_use_id === use.tool_use_id && a.seq > anchor);
+        use?.kind === "tool_use" &&
+        !page.items.some(
+          (a) =>
+            a.kind === "tool_result" && a.worker === use.worker && a.tool_use_id === use.tool_use_id && a.seq > anchor,
+        );
       if (page.hasNewer && !waiting) return;
       inFlight.current = true;
       try {
@@ -174,8 +216,9 @@ export function SourceTranscript({
   }, [page, taskId, session, anchor]);
   return (
     <>
+      <style>{"::highlight(activity-search) { background-color: #facc15; color: #171717; }"}</style>
       <div className="flex items-center justify-between gap-2 border-b px-4 py-2 text-xs">
-        <span>正在查看来源调用及原始会话</span>
+        <span>{searchMode ? "正在查看匹配消息及原始会话" : "正在查看来源调用及原始会话"}</span>
         <Button variant="outline" size="sm" onClick={onLatest}>
           返回最新
         </Button>
@@ -204,6 +247,7 @@ export function SourceTranscript({
               taskId={taskId}
               chat={session.startsWith("main:")}
               focusActivity={anchor}
+              focusLabel={searchMode ? "搜索结果" : "来源调用"}
               onLocated={locate}
             />
           )}

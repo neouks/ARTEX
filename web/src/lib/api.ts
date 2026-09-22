@@ -785,6 +785,10 @@ export const api = {
   // snapshotCursor is the TASK-level max id at query time — open the task SSE at
   // since=snapshotCursor so history (id≤cursor) and the live tail (id>cursor) meet
   // gap-free. hasMore = still-older steps exist (drives scroll-up loading).
+  activitySearch: (task: string, session: string, q: string, cursor = "") =>
+    get<{ items: { id: number; kind: string; snippet: string }[]; next_cursor: string; source_task_id?: number }>(
+      `/exploration/activity/search?${new URLSearchParams({ task, session, q, ...(cursor ? { cursor } : {}) })}`,
+    ),
   activityHistory: (
     task: string,
     session: string,
