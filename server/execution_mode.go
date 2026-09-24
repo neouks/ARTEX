@@ -332,7 +332,19 @@ func (s *Server) dispatchMainIntentsLocked(ctx context.Context, t *Task, ids []i
 		}
 		out = append(out, row)
 	}
+	seg, feedback := agent.MainDispatchSession(ctx)
+	registerRunning := func() {
+		for i := range out {
+			if feedback && out[i].Status == "running" {
+				if err := t.Store.MainDispatchFeedback(ctx, out[i].ID, seg, false); err != nil {
+					out[i].Status = "rejected"
+					out[i].Error = err.Error()
+				}
+			}
+		}
+	}
 	if len(candidates) == 0 {
+		registerRunning()
 		return out, nil
 	}
 	if _, err := s.admitTask(t, "resume"); err != nil {
@@ -341,11 +353,23 @@ func (s *Server) dispatchMainIntentsLocked(ctx context.Context, t *Task, ids []i
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	registerRunning()
 	granted := []int64{}
 	for _, i := range candidates {
-		if err := t.Store.GrantMainIntentDispatch(out[i].ID); err != nil {
+		var grantErr error
+		if feedback {
+			grantErr = t.Store.MainDispatchFeedback(ctx, out[i].ID, seg, true)
+		} else {
+			grantErr = t.Store.GrantMainIntentDispatch(out[i].ID)
+		}
+		if err := grantErr; err != nil {
 			out[i].Status = "rejected"
 			out[i].Error = err.Error()
+			if created[out[i].ID] {
+				if rollbackErr := t.Store.SetIntentDispatch(out[i].ID, false); rollbackErr != nil {
+					return nil, fmt.Errorf("登记回传失败: %v；撤回下发失败: %w", err, rollbackErr)
+				}
+			}
 			continue
 		}
 		if out[i].Status == "dispatched" {

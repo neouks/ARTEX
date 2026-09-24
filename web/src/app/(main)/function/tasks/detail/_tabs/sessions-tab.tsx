@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { lastMainActivity } from "@/lib/worker-feedback";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SourceTranscript } from "@/components/source-transcript";
@@ -1007,7 +1008,7 @@ export function SessionsTab({
         const next = { ...prev };
         for (const [key, batch] of batches) {
           const cur = prev[key] ?? emptyState();
-          const lastTs = batch[batch.length - 1].ts;
+          const lastTs = lastMainActivity(batch)?.ts ?? cur.lastTs;
           if (!cur.loaded && !cur.loading && key !== activeK) {
             const accounting = batch.filter((item) => item.kind === "usage" || item.kind === "result");
             next[key] = {
@@ -1058,7 +1059,7 @@ export function SessionsTab({
             st.loaded = true;
             st.hasMore = false;
             st.earliestSeq = st.items.length ? st.items[0].seq : 0;
-            st.lastTs = st.items.length ? st.items[st.items.length - 1].ts : "";
+            st.lastTs = lastMainActivity(st.items)?.ts ?? "";
           }
           buckets[mainSessionKey(0)] ??= { ...emptyState(), loaded: true };
           buckets.system ??= { ...emptyState(), loaded: true };
@@ -1392,7 +1393,7 @@ export function SessionsTab({
       }
     }
     const items = store[mainSessionKey(seg)]?.items ?? [];
-    const last = items[items.length - 1];
+    const last = lastMainActivity(items);
     if (last && (last.kind === "result" || (last.kind === "text" && last.is_error))) return null;
     return seg;
   }, [sending, mainChatRunning, mainSegs, store, currentSeg]);
@@ -1535,7 +1536,7 @@ export function SessionsTab({
   // active session's terminal record (kind='result', or an error) lands, so the input
   // re-enables immediately instead of waiting for the next chat-status poll.
   const activeItems = activeState?.items ?? [];
-  const activeLast = activeItems[activeItems.length - 1];
+  const activeLast = lastMainActivity(activeItems);
   const activeSettled =
     !!activeLast && (activeLast.kind === "result" || (activeLast.kind === "text" && activeLast.is_error));
   const mainBusy = isMain && (sending || (!activeSettled && (mainChatRunning ?? recentLive(activeKey))));

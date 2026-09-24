@@ -254,6 +254,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
 	s.restoreTaskRuntimes()
+	go s.workerFeedbackLoop()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
@@ -3107,9 +3108,17 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	// exactly where it dropped. A fresh/manual connect has no header and passes
 	// since=<snapshot_cursor> from the history page instead.
 	since := int64(atoiDefault(r.URL.Query().Get("since"), 0))
+	feedbackSince := since // fresh history snapshot; older segments load their own pages
 	if le := r.Header.Get("Last-Event-ID"); le != "" {
-		if n, err := strconv.ParseInt(le, 10, 64); err == nil {
+		parts := strings.SplitN(le, ":", 2)
+		if n, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
 			since = n
+			feedbackSince = 0 // legacy numeric cursor: recover delayed feedback once
+			if len(parts) == 2 {
+				if f, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+					feedbackSince = f
+				}
+			}
 		}
 	}
 
@@ -3133,11 +3142,35 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	// auto-reconnect (see cursor precedence above).
 	sendSSE := func(a db.Activity) error {
 		b, _ := json.Marshal(activityDTO(a))
-		if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b); err != nil {
+		if isWorkerFeedback(a) {
+			feedbackSince = max(feedbackSince, a.ID)
+		}
+		if _, err := fmt.Fprintf(w, "id: %d:%d\ndata: %s\n\n", max(a.ID, since), feedbackSince, b); err != nil {
 			return err
 		}
 		flusher.Flush()
 		return nil
+	}
+
+	// The second SSE cursor recovers feedback that was committed before newer
+	// ordinary records but published later. No full transcript/body is fetched.
+	if intentPtr == nil {
+		for {
+			replayCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			feedback, err := t.Store.WorkerFeedbackReplay(replayCtx, feedbackSince, since)
+			cancel()
+			if err != nil {
+				return
+			}
+			for _, a := range feedback {
+				if err := sendSSE(a); err != nil {
+					return
+				}
+			}
+			if len(feedback) < 100 {
+				break
+			}
+		}
 	}
 
 	// Compensate the DB backlog after `since` in batches until caught up. This is the
@@ -3181,13 +3214,13 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if a.ID <= since {
-				continue // already replayed
+			if (isWorkerFeedback(a) && a.ID <= feedbackSince) || (!isWorkerFeedback(a) && a.ID <= since) {
+				continue // already replayed; outbox feedback can arrive after newer live records
 			}
 			if intentPtr != nil && (a.NodeID == nil || *a.NodeID != *intentPtr) {
 				continue // scoped session: only this intent's steps
 			}
-			since = a.ID
+			since = max(since, a.ID)
 			if err := sendSSE(a); err != nil {
 				return
 			}

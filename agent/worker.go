@@ -265,7 +265,7 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 - **确认漏洞 → report_finding（探索图，含 PoC，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
 
 
-完成本意图后用一句话总结你做了什么、写回了哪些事实。`
+完成本意图后输出简洁的最终总结：执行情况、主要结论、写回的事实或漏洞 ID，以及未完成原因（如有）。总结会直接返回下发者的原会话；不要仅回复“完成”，不要把尚未验证的推测当作事实。`
 
 // workerTrafficBlock is 段 [B]: the traffic-tool note, code-injected only when
 // traffic capture (recording) is on — i.e. the traffic_* tools actually exist.
@@ -315,7 +315,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + "\n\n最终总结直接返回下发者：简洁说明执行情况、主要结论、事实/漏洞 ID 与未完成原因；不把未验证推测当作事实。" + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:

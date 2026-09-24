@@ -1704,7 +1704,7 @@ func (t *ToolSet) addOneIntentResultWithMode(ctx context.Context, it intentItem,
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return submissionTool{writeTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
-		"Planner 对未审批候选本轮跳过；主 Agent 可明确下发待审批资产方向，但封禁和撤回仍拒绝。未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
+		"主 Agent 成功下发后结束本轮，Worker 自动回传总结，不轮询等待。Planner 对未审批候选本轮跳过；主 Agent 可明确下发待审批资产方向，但封禁和撤回仍拒绝。未知候选先批量 check_target_access。★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（最多 4 条，比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors；已存在的活跃同方向见 duplicates）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "maxItems": 4, "description": "【优先用这个】要新增的探索方向数组，最多 4 条，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
@@ -1797,6 +1797,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				t.resumeTask()
 			}
 
+			recordMainDispatchErrors(ctx, errs)
 			if !batch { // 单条：保持原返回
 				if e, bad := errs["0"]; bad {
 					if access, ok := accessErrors["0"]; ok {

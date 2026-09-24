@@ -1312,7 +1312,10 @@ export const explorationGraph: { nodes: TaskNode[]; edges: Edge[] } = {
   ],
 };
 
-export const intents: TaskNode[] = explorationGraph.nodes.filter((n) => n.type === "intent");
+export const intents: TaskNode[] = [
+  { id: "101", type: "intent", payload: P({ summary: "接口权限核验（Worker 回传演示）" }), priority: 5, state: "done", origin: "mainagent", ts: T("2026-07-26T09:55:00Z") },
+  ...explorationGraph.nodes.filter((n) => n.type === "intent"),
+];
 export const frontier: TaskNode[] = explorationGraph.nodes.filter(
   (n) => n.type === "intent" && (n.state === "open" || n.state === "running"),
 );
@@ -2776,6 +2779,30 @@ export const activity: Activity[] = [
     summary:
       "确认拿下。攻击路径：shop Fastjson RCE → DMZ 提权 → 内网 Jenkins 导出域凭据 → svc_deploy 属 Domain Admins → psexec DC01 SYSTEM → secretsdump 全域哈希。四个目标全部达成或推进中。",
   },
+  {
+    seq: 408, worker: "work#1", intent_id: "101", ts: T("2026-07-26T09:59:00Z"), kind: "result",
+    summary: "完成接口权限核验，已记录核验事实。仅展示测试结果，不发起额外执行。",
+  },
+  {
+    seq: 410,
+    worker: "mainagent",
+    main_seg: 0,
+    ts: T("2026-07-26T10:00:00Z"),
+    kind: "text",
+    summary: "### Worker 结果 · 意图 #101\n\n状态：已完成\n\n已完成接口核验，记录了已验证事实。详细过程见 Worker 原始会话。\n\n[查看 Worker 原始会话](/function/tasks/detail?id=t-acme-web&session=intent:101&activity=408)",
+    metadata: { worker_feedback: { id: 1, intent_id: 101, state: "done", source_activity_id: 408 } },
+  },
+  {
+    seq: 411,
+    worker: "mainagent",
+    main_seg: 0,
+    ts: T("2026-07-26T10:01:00Z"),
+    kind: "text",
+    is_error: true,
+    summary: "### Worker 结果 · 意图 #102\n\n状态：已终止\n\n本次未产生最终总结，请查看 Worker 会话中的已有记录。",
+    metadata: { worker_feedback: { id: 2, intent_id: 102, state: "stopped" } },
+  },
+
 ];
 
 export function activityForTask(): Activity[] {

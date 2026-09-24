@@ -37,9 +37,7 @@ func intentAssetAllowedSQL(task, asset, node string) string {
 // GrantMainIntentDispatch runs only after host task admission succeeds. The
 // same queue lock used by claims makes selection and permission atomic.
 func (s *ExplorationStore) GrantMainIntentDispatch(id int64) error {
-	result, err := s.queueExec(`UPDATE exploration_nodes SET payload=payload || jsonb_build_object('dispatch_requested',true,'pending_asset_execution',COALESCE(payload->'pending_asset_execution',jsonb_build_object('issuer','mainagent','granted_at',now())))
- WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
- AND NOT EXISTS(SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id WHERE a.node_id=exploration_nodes.id AND NOT task_asset_worker_executable(t.id,a.asset_id))`, id, s.expID)
+	result, err := s.queueExec(mainIntentDispatchSQL, id, s.expID)
 	if err != nil {
 		return err
 	}
@@ -54,3 +52,7 @@ func (s *ExplorationStore) GrantMainIntentDispatch(id int64) error {
 // stays untouched and is still returned by approval metadata tools.
 func (s *AssetStore) WithExecutionRead() *AssetStore { return s.WithWorkerRead() }
 func (s *AssetStore) ExecutionRead() bool            { return s.workerRead }
+
+const mainIntentDispatchSQL = `UPDATE exploration_nodes SET payload=payload || jsonb_build_object('dispatch_requested',true,'pending_asset_execution',COALESCE(payload->'pending_asset_execution',jsonb_build_object('issuer','mainagent','granted_at',now())))
+ WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='open' AND payload->>'cancelled_by_user' IS DISTINCT FROM 'true'
+ AND NOT EXISTS(SELECT 1 FROM exploration_anchors a JOIN tasks t ON t.exploration_id=exploration_nodes.exploration_id WHERE a.node_id=exploration_nodes.id AND NOT task_asset_worker_executable(t.id,a.asset_id))`

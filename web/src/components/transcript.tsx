@@ -705,7 +705,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
           (step.is_error ? "text-sm text-red-600 dark:text-red-400" : "")
         }
       >
-        {step.is_error ? (
+        {step.is_error && !step.metadata?.worker_feedback ? (
           <span className="whitespace-pre-wrap">{full ?? step.summary}</span>
         ) : (
           <Markdown text={full ?? step.summary} />
