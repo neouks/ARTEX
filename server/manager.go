@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,10 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ExecutionMode   string     `json:"execution_mode"`
-	workerControlMu sync.Mutex // Serializes user controls with worker admission.
+	ExecutionMode     string             `json:"execution_mode"`
+	workerControlMu   sync.Mutex         // Serializes user controls with worker admission.
+	plannerCancel     context.CancelFunc // Protected by workerControlMu; never cancels Workers.
+	plannerGeneration uint64
 
 	ID           string `json:"id"`
 	ExpID        int64  `json:"exploration_id"`
@@ -156,6 +159,32 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.CategoryID = cloneInt64Ptr(state.CategoryID)
 	t.CategoryName = state.CategoryName
 	t.lifecycleMu.Unlock()
+}
+
+// beginPlannerRound registers a cancellation handle independently of the task's
+// execution context. Mode changes can stop only Planner while Workers continue.
+// The admission check and registration share workerControlMu with mode switches.
+func (t *Task) beginPlannerRound(parent context.Context) (context.Context, func(), bool) {
+	t.workerControlMu.Lock()
+	defer t.workerControlMu.Unlock()
+	if parent.Err() != nil || t.lifecycleSnapshot().ExecutionMode == pgdb.ExecutionManual {
+		return parent, nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if t.plannerCancel != nil {
+		t.plannerCancel()
+	}
+	t.plannerGeneration++
+	generation := t.plannerGeneration
+	t.plannerCancel = cancel
+	return ctx, func() {
+		t.workerControlMu.Lock()
+		if t.plannerGeneration == generation {
+			t.plannerCancel = nil
+		}
+		t.workerControlMu.Unlock()
+		cancel()
+	}, true
 }
 
 type taskLLMState struct {

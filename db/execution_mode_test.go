@@ -1,10 +1,111 @@
 package db
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestPlannerIntentRejectedAfterManualSwitch(t *testing.T) {
+	_, store, _ := executionFixture(t)
+	addPlanner := func(summary string) (int64, error) {
+		id, _, err := store.AddPlannerIntentDeduplicated(t.Context(), map[string]any{"summary": summary}, 5, nil, "planner")
+		return id, err
+	}
+	before, err := addPlanner("before switch")
+	if err != nil || before <= 0 {
+		t.Fatal(before, err)
+	}
+	oldPlanner, cancelOldPlanner := context.WithCancel(t.Context())
+	if _, err := store.SetExecutionMode(ExecutionManual); err != nil {
+		t.Fatal(err)
+	}
+	cancelOldPlanner()
+	if _, err := addPlanner("after switch"); !errors.Is(err, ErrPlannerManualMode) {
+		t.Fatalf("planner write after switch: %v", err)
+	}
+	if _, err := addPlanner("before switch"); !errors.Is(err, ErrPlannerManualMode) {
+		t.Fatalf("planner duplicate after switch: %v", err)
+	}
+	if id, err := store.AddIntent(map[string]any{"summary": "main agent action", "dispatch_requested": true}, 5, nil, "mainagent"); err != nil || id <= 0 {
+		t.Fatal("main agent was blocked", id, err)
+	}
+	if _, err := store.SetExecutionMode(ExecutionManaged); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := addPlanner("after managed resume"); err != nil || id <= 0 {
+		t.Fatal(id, err)
+	}
+	if _, _, err := store.AddPlannerIntentDeduplicated(oldPlanner, map[string]any{"summary": "stale after quick toggle"}, 5, nil, "planner"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled old Planner wrote after managed resume: %v", err)
+	}
+}
+
+func TestPlannerIntentModeSwitchRace(t *testing.T) {
+	_, store, _ := executionFixture(t)
+	for i := range 20 {
+		if _, err := store.SetExecutionMode(ExecutionManaged); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var id int64
+		var addErr, modeErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			id, _, addErr = store.AddPlannerIntentDeduplicated(t.Context(), map[string]any{"summary": fmt.Sprintf("race-%d", i)}, 5, nil, "planner")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, modeErr = store.SetExecutionMode(ExecutionManual)
+		}()
+		close(start)
+		wg.Wait()
+		if modeErr != nil || (addErr != nil && !errors.Is(addErr, ErrPlannerManualMode)) {
+			t.Fatal(modeErr, addErr)
+		}
+		if addErr == nil {
+			node, err := store.GetNode(id)
+			if err != nil || node == nil || node.State != "open" || node.DispatchRequested() {
+				t.Fatal("pre-switch intent was not held", node, err)
+			}
+		} else if id != 0 {
+			t.Fatal("rejected planner intent was persisted", id)
+		}
+	}
+}
+
+func TestPlannerIntentCancelWhileWaitingForQueueLock(t *testing.T) {
+	_, store, _ := executionFixture(t)
+	tx, err := store.beginQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := store.AddPlannerIntentDeduplicated(ctx, map[string]any{"summary": "waiting planner"}, 5, nil, "planner")
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled queue wait returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled Planner remained stuck on the queue lock")
+	}
+}
 
 func executionFixture(t *testing.T) (*DB, *ExplorationStore, int64) {
 	t.Helper()

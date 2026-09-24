@@ -1577,6 +1577,10 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 // means the same normalized direction is already active and no graph mutation was
 // made; callers can surface that fact without treating idempotency as an error.
 func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err error) {
+	return t.addOneIntentResultWithMode(context.Background(), it, false)
+}
+
+func (t *ToolSet) addOneIntentResultWithMode(ctx context.Context, it intentItem, requireManaged bool) (id int64, created bool, err error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, false, fmt.Errorf("summary 不能为空")
 	}
@@ -1671,7 +1675,11 @@ func (t *ToolSet) addOneIntentResult(it intentItem) (id int64, created bool, err
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, created, err = t.ts.AddIntentDeduplicated(payload, priority, anchors, "planner")
+	if requireManaged {
+		id, created, err = t.ts.AddPlannerIntentDeduplicated(ctx, payload, priority, anchors, "planner")
+	} else {
+		id, created, err = t.ts.AddIntentDeduplicated(payload, priority, anchors, "planner")
+	}
 	if err != nil {
 		return 0, false, err
 	}
@@ -1741,7 +1749,11 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			createdAny := false
 			var newlyCreated []int64
 			for i, it := range items {
-				id, created, err := t.addOneIntentResult(it)
+				if err := ctx.Err(); err != nil {
+					errs[strconv.Itoa(i)] = err.Error()
+					continue
+				}
+				id, created, err := t.addOneIntentResultWithMode(ctx, it, RunInfoFrom(ctx).AgentKey == "planner")
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					var denied *targetAccessError

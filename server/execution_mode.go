@@ -40,8 +40,18 @@ func (s *Server) setExecutionMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.updateLifecycle(func(st *taskLifecycleState) { st.ExecutionMode = req.Mode })
+	if req.Mode == db.ExecutionManual && t.plannerCancel != nil {
+		t.plannerCancel()
+	}
+	if req.Mode == db.ExecutionManual {
+		t.drainTriggers() // Stale per-round hints are reconstructed from persistent state on resume.
+		state := t.lifecycleSnapshot()
+		if changed && s.engine.Started(t.ID) && !state.Paused && !state.Queued && !s.engine.IsPaused(t.ID) && !isTerminalStatus(state.Status) {
+			s.engine.stampFirstRun(t) // Manual waiting still observes the task timeout.
+		}
+	}
 	if changed {
-		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "用户切换执行模式：" + map[string]string{"managed": "托管", "manual": "手工；未领取意图等待选择下发"}[req.Mode]})
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "用户切换执行模式：" + map[string]string{"managed": "托管", "manual": "手工；Planner 自动规划已停止，未领取意图等待选择下发"}[req.Mode]})
 		t.Notify()
 		t.wakeWorkers()
 	}

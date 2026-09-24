@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Autumn-27/artex/agent"
-	actool "github.com/Autumn-27/norma/tool"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 func modeServer(t *testing.T) (*Server, *Task) {
@@ -26,6 +27,147 @@ func modeServer(t *testing.T) (*Server, *Task) {
 	}
 	t.Cleanup(func() { m.DeleteTask(task.ID, DeleteTaskOptions{}); m.Close() })
 	return newAdmissionTestServer(m, nil), task
+}
+
+func TestManualModeCancelsOnlyPlannerAndSuppressesWakeups(t *testing.T) {
+	s, task := modeServer(t)
+	workerCtx := s.engine.execContextFor(t.Context(), task.ID)
+	plannerCtx, release, allowed := task.beginPlannerRound(workerCtx)
+	if !allowed {
+		t.Fatal("managed Planner was not admitted")
+	}
+	defer release()
+	r := httptest.NewRequest("PATCH", "/", strings.NewReader(`{"execution_mode":"manual"}`))
+	r.SetPathValue("id", task.ID)
+	w := httptest.NewRecorder()
+	s.setExecutionMode(w, r)
+	if w.Code != 200 || plannerCtx.Err() == nil || workerCtx.Err() != nil {
+		t.Fatalf("mode switch: code=%d planner=%v worker=%v", w.Code, plannerCtx.Err(), workerCtx.Err())
+	}
+	if _, _, allowed := task.beginPlannerRound(workerCtx); allowed {
+		t.Fatal("manual mode admitted another Planner round")
+	}
+	taskID, _ := strconv.ParseInt(task.ID, 10, 64)
+	persisted, err := s.m.pg.GetTask(taskID)
+	if err != nil || persisted == nil {
+		t.Fatal(persisted, err)
+	}
+	restored := taskFromPG(persisted, task.Store, nil)
+	if _, _, allowed := restored.beginPlannerRound(t.Context()); allowed {
+		t.Fatal("restored manual task admitted Planner")
+	}
+	loopCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { s.engine.plannerLoop(loopCtx, task); close(done) }()
+	for range 50 {
+		task.NotifyDone(1)
+	}
+	deadline := time.After(time.Second)
+	for task.hasPendingTriggers() {
+		select {
+		case <-deadline:
+			t.Fatal("manual Planner retained wakeup events")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if _, active := s.engine.plannerActive.Load(task.ID); active {
+		t.Fatal("manual Planner invoked the model")
+	}
+	if _, round := s.engine.plannerRound.Load(task.ID); round {
+		t.Fatal("manual Planner created a round marker")
+	}
+	cancel()
+	<-done
+	r = httptest.NewRequest("PATCH", "/", strings.NewReader(`{"execution_mode":"managed"}`))
+	r.SetPathValue("id", task.ID)
+	w = httptest.NewRecorder()
+	s.setExecutionMode(w, r)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if resumed, done, allowed := task.beginPlannerRound(workerCtx); !allowed {
+		t.Fatal("managed mode did not restore Planner admission")
+	} else {
+		done()
+		if resumed.Err() == nil {
+			t.Fatal("released Planner context stayed live")
+		}
+	}
+}
+
+func TestManualModeSkipsTerminalPlannerOnTimeout(t *testing.T) {
+	s, task := modeServer(t)
+	if _, err := task.Store.SetExecutionMode(db.ExecutionManual); err != nil {
+		t.Fatal(err)
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) { state.ExecutionMode = db.ExecutionManual })
+	if met := s.engine.runFinalPlannerRound(t.Context(), task); met {
+		t.Fatal("manual timeout called terminal Planner")
+	}
+	s.engine.settleTask(t.Context(), task)
+	if status := s.m.TaskStatus(task.ID); status != "timeout" {
+		t.Fatalf("manual timeout ended as %q", status)
+	}
+}
+
+func TestManualModeStartsTimeoutWithoutPlanner(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := m.CreateTask("manual timeout", "goal", nil, 60, 0)
+	if err != nil {
+		m.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.DeleteTask(task.ID, DeleteTaskOptions{}); m.Close() })
+	if _, err := task.Store.SetExecutionMode(db.ExecutionManual); err != nil {
+		t.Fatal(err)
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) { state.ExecutionMode = db.ExecutionManual })
+	e := NewEngine(m)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	e.Run(ctx, task)
+	state := task.lifecycleSnapshot()
+	if state.FirstRunAt == 0 || state.DeadlineAt <= state.FirstRunAt {
+		t.Fatalf("manual task timeout was not started: first=%d deadline=%d", state.FirstRunAt, state.DeadlineAt)
+	}
+	if _, started := e.plannerRound.Load(task.ID); started {
+		t.Fatal("starting a manual task created a Planner round")
+	}
+}
+
+func TestManualModeResumeStartsTimeout(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := m.CreateTask("paused manual timeout", "goal", nil, 60, 0)
+	if err != nil {
+		m.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.DeleteTask(task.ID, DeleteTaskOptions{}); m.Close() })
+	if _, err := task.Store.SetExecutionMode(db.ExecutionManual); err != nil {
+		t.Fatal(err)
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) {
+		state.ExecutionMode = db.ExecutionManual
+		state.Paused = true
+	})
+	e := NewEngine(m)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	e.Run(ctx, task)
+	if task.lifecycleSnapshot().FirstRunAt != 0 {
+		t.Fatal("paused manual task started timeout")
+	}
+	task.updateLifecycle(func(state *taskLifecycleState) { state.Paused = false })
+	e.Run(ctx, task)
+	if task.lifecycleSnapshot().DeadlineAt == 0 {
+		t.Fatal("resumed manual task did not start timeout")
+	}
 }
 func TestManualDispatchAndFinish(t *testing.T) {
 	s, task := modeServer(t)
