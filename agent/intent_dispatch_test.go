@@ -75,3 +75,30 @@ func TestIntentDispatchCannotBeUsedByPlannerOrTaskless(t *testing.T) {
 		}
 	}
 }
+
+func TestPlannerToolCannotCreateIntentInManualMode(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("manual planner fence", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	store := d.Exploration(task.ExplorationID)
+	if _, err := store.SetExecutionMode("manual"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithRunInfo(t.Context(), RunInfo{TaskID: task.ID, AgentKey: "planner"})
+	if met, _, err := new(Planner).Plan(ctx, task.ID, nil, nil, store, "goal", nil, nil); err != nil || met {
+		t.Fatal("manual Planner started", met, err)
+	}
+	tools := NewToolSet(store, "planner")
+	tools.SetTaskID(task.ID)
+	result, err := tools.addIntent().Call(ctx, json.RawMessage(`{"summary":"late planner direction"}`), nil)
+	if err != nil || !result.IsError || !strings.Contains(result.Flatten(), "手工模式") {
+		t.Fatal(result, err)
+	}
+	if nodes, err := store.Frontier(10); err != nil || len(nodes) != 0 {
+		t.Fatal("planner created a manual intent", nodes, err)
+	}
+}

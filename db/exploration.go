@@ -258,22 +258,50 @@ func IntentFingerprint(summary string, anchors []int64) string {
 // frontier states are deduplicated; a terminal direction may be retried when new
 // evidence justifies it.
 func (s *ExplorationStore) AddIntentDeduplicated(payload map[string]any, priority int, anchors []int64, origin string) (id int64, created bool, err error) {
+	return s.addIntentDeduplicated(context.Background(), payload, priority, anchors, origin, false)
+}
+
+// AddPlannerIntentDeduplicated checks execution mode while holding the same
+// exploration queue lock as SetExecutionMode. A Planner write committed before
+// the switch remains queued; one reaching the lock afterwards is rejected.
+func (s *ExplorationStore) AddPlannerIntentDeduplicated(ctx context.Context, payload map[string]any, priority int, anchors []int64, origin string) (id int64, created bool, err error) {
+	return s.addIntentDeduplicated(ctx, payload, priority, anchors, origin, true)
+}
+
+func (s *ExplorationStore) addIntentDeduplicated(ctx context.Context, payload map[string]any, priority int, anchors []int64, origin string, requireManaged bool) (id int64, created bool, err error) {
 	if origin == "" {
 		origin = "planner"
 	}
 	summary, _ := payload["summary"].(string)
 	fingerprint := IntentFingerprint(summary, anchors)
-	if fingerprint == "" {
+	if fingerprint == "" && !requireManaged {
 		id, err := s.AddNode("intent", payload, priority, "open", origin, anchors)
 		return id, err == nil, err
 	}
 
-	tx, err := s.beginQueue()
+	var tx *sql.Tx
+	if requireManaged {
+		tx, err = s.beginQueueContext(ctx)
+	} else {
+		tx, err = s.beginQueue()
+	}
 	if err != nil {
 		return 0, false, err
 	}
 	defer tx.Rollback()
 	// beginQueue also serializes deduplication against queue changes.
+	if requireManaged {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		var mode string
+		if err := tx.QueryRow(`SELECT COALESCE((SELECT execution_mode FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL), 'managed')`, s.expID).Scan(&mode); err != nil {
+			return 0, false, err
+		}
+		if mode == ExecutionManual {
+			return 0, false, ErrPlannerManualMode
+		}
+	}
 	rows, err := tx.Query(`
 SELECT n.id, n.payload,
        COALESCE((SELECT json_agg(a.asset_id ORDER BY a.asset_id) FROM exploration_anchors a WHERE a.node_id=n.id), '[]'::json)::text

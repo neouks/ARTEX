@@ -3,11 +3,14 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
 const ExecutionManaged = "managed"
 const ExecutionManual = "manual"
+
+var ErrPlannerManualMode = errors.New("手工模式下 Planner 已停止规划")
 
 func (s *ExplorationStore) ExecutionMode() (string, error) {
 	var mode string

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,11 +11,15 @@ import (
 // All graph mutations acquire the exploration advisory lock before row locks.
 // This is also the existing intent-deduplication lock; it works across processes.
 func (s *ExplorationStore) beginQueue() (*sql.Tx, error) {
-	tx, err := s.db.Begin()
+	return s.beginQueueContext(context.Background())
+}
+
+func (s *ExplorationStore) beginQueueContext(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, -s.expID); err != nil {
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, -s.expID); err != nil {
 		tx.Rollback()
 		return nil, err
 	}

@@ -365,6 +365,16 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *guard.Guard, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, "", err
+	}
+	executionMode, modeErr := ts.ExecutionMode()
+	if modeErr != nil {
+		return false, "", modeErr
+	}
+	if executionMode == db.ExecutionManual {
+		return false, "手工模式不进行自动规划", nil
+	}
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
@@ -441,13 +451,6 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
-	executionMode, modeErr := ts.ExecutionMode()
-	if modeErr != nil {
-		return false, "", modeErr
-	}
-	if executionMode == db.ExecutionManual {
-		sysBody += "\n当前任务为手工模式：只规划并登记意图，等待用户下发；不得通过其他工具自行启动 Worker。目标达成仅提供完成建议，由用户结束任务。"
-	}
 	feedback, feedbackErr := tsx.findingDeletionFeedbackPage(0, 20)
 	if feedbackErr != nil {
 		return false, "", feedbackErr
@@ -539,6 +542,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, g *
 		renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
+	if err := ctx.Err(); err != nil {
+		return false, "", err
+	}
 	_, _, err = captureRun(ctx, opts, input,
 		func(r db.Activity) {
 			if emit != nil {

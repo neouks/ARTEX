@@ -718,6 +718,7 @@ export interface Activity {
   detail?: string;
   metadata?: {
     llm_transition?: LLMTransition;
+    worker_feedback?: { id: number; intent_id: number; state: string; source_activity_id?: number };
   };
   source_task_id?: string;
   inherited?: boolean;

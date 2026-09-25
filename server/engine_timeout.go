@@ -211,11 +211,16 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 
 	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
+	t.workerControlMu.Lock()
+	if t.lifecycleSnapshot().ExecutionMode == db.ExecutionManual {
+		met = false
+	}
 	status := "timeout"
 	if met {
 		status = "done"
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
+	t.workerControlMu.Unlock()
 	switch {
 	case err != nil:
 		log.Printf("[deadline] task %s 落终态失败: %v", t.ID, err)
@@ -230,11 +235,14 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 // task-timeout planner words (final goal judgment; no new intents). Waits for the
 // LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
-	if e.IsDeleting(t.ID) {
+	if e.IsDeleting(t.ID) || t.lifecycleSnapshot().ExecutionMode == db.ExecutionManual {
 		return false
 	}
 	planner, _ := e.snapshotFor(t)
 	for planner == nil {
+		if t.lifecycleSnapshot().ExecutionMode == db.ExecutionManual {
+			return false
+		}
 		if sleepCtx(ctx, deadlinePollInterval) {
 			return false
 		}
@@ -248,6 +256,11 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	}
 	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
 	fctx := e.clockCtx(ctx, t, true)
+	fctx, releasePlanner, allowed := t.beginPlannerRound(fctx)
+	if !allowed {
+		return false
+	}
+	defer releasePlanner()
 	if !e.beginTaskOperation(t.ID) {
 		return false
 	}
@@ -265,5 +278,5 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	} else if met {
 		log.Printf("[deadline] task %s 终局判定目标达成: %s", t.ID, reason)
 	}
-	return met
+	return met && fctx.Err() == nil
 }

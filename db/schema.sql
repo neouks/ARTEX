@@ -1611,3 +1611,88 @@ CREATE INDEX IF NOT EXISTS idx_finding_deletion_feedback_task ON finding_deletio
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'managed' CHECK (execution_mode IN ('managed','manual'));
 
 ALTER TABLE tools ADD COLUMN IF NOT EXISTS executable TEXT NOT NULL DEFAULT '';
+
+-- Main-agent dispatch receipts. Final delivery and node settlement share the
+-- same transaction; SSE is only a notification, never the durable source.
+CREATE TABLE IF NOT EXISTS worker_feedback (
+    id BIGSERIAL PRIMARY KEY,
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    intent_id BIGINT NOT NULL,
+    main_seg INTEGER NOT NULL CHECK (main_seg >= 0),
+    after_activity BIGINT NOT NULL DEFAULT 0,
+    terminal BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS worker_feedback_active
+    ON worker_feedback(exploration_id,intent_id,main_seg) WHERE NOT terminal;
+CREATE INDEX IF NOT EXISTS worker_feedback_intent ON worker_feedback(exploration_id,intent_id,id);
+CREATE TABLE IF NOT EXISTS worker_feedback_delivery (
+    activity_id BIGINT PRIMARY KEY REFERENCES activity(id) ON DELETE CASCADE,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    published BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS worker_feedback_unpublished ON worker_feedback_delivery(activity_id) WHERE NOT published;
+CREATE INDEX IF NOT EXISTS worker_feedback_task_delivery ON worker_feedback_delivery(task_id,activity_id);
+CREATE INDEX IF NOT EXISTS activity_worker_feedback_context ON activity(exploration_id,main_seg,id)
+    WHERE worker='mainagent' AND metadata ? 'worker_feedback';
+
+CREATE TABLE IF NOT EXISTS worker_feedback_run (
+    intent_id BIGINT PRIMARY KEY REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+    after_activity BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE OR REPLACE FUNCTION notify_worker_feedback() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE f RECORD; result_id BIGINT; result_text TEXT; body TEXT; aid BIGINT; target_state TEXT; is_terminal BOOLEAN;
+BEGIN
+    IF OLD.kind <> 'intent' OR NOT EXISTS (SELECT 1 FROM tasks WHERE exploration_id=OLD.exploration_id AND deleted_at IS NULL) THEN RETURN NULL; END IF;
+    IF TG_OP = 'DELETE' THEN target_state := 'deleted'; ELSE target_state := NEW.state; END IF;
+    IF TG_OP = 'UPDATE' AND OLD.state IS NOT DISTINCT FROM NEW.state THEN RETURN NULL; END IF;
+    -- An explicit rerun follows the original subscriber(s), but only when it is
+    -- actually claimed. Failed admission/reopen rollback creates no new receipt.
+    IF target_state = 'running' THEN
+        INSERT INTO worker_feedback_run(intent_id,after_activity)
+        VALUES(OLD.id,COALESCE((SELECT max(id) FROM activity WHERE exploration_id=OLD.exploration_id AND node_id=OLD.id),0))
+        ON CONFLICT(intent_id) DO UPDATE SET after_activity=EXCLUDED.after_activity;
+        UPDATE worker_feedback SET after_activity=(SELECT after_activity FROM worker_feedback_run WHERE intent_id=OLD.id)
+        WHERE exploration_id=OLD.exploration_id AND intent_id=OLD.id AND NOT terminal;
+        INSERT INTO worker_feedback(exploration_id,task_id,intent_id,main_seg,after_activity)
+        SELECT DISTINCT ON (prev.main_seg) prev.exploration_id,prev.task_id,prev.intent_id,prev.main_seg,
+            COALESCE((SELECT max(id) FROM activity WHERE exploration_id=OLD.exploration_id AND node_id=OLD.id),0)
+        FROM worker_feedback prev WHERE prev.exploration_id=OLD.exploration_id AND prev.intent_id=OLD.id
+        ORDER BY prev.main_seg,prev.id DESC
+        ON CONFLICT (exploration_id,intent_id,main_seg) WHERE NOT terminal DO NOTHING;
+        RETURN NULL;
+    END IF;
+    is_terminal := target_state IN ('done','blocked','exhausted','stopped','deleted');
+    IF NOT is_terminal AND target_state NOT IN ('paused','open') THEN RETURN NULL; END IF;
+    FOR f IN SELECT * FROM worker_feedback WHERE exploration_id=OLD.exploration_id AND intent_id=OLD.id AND NOT terminal FOR UPDATE LOOP
+        result_id := NULL; result_text := NULL;
+        IF is_terminal THEN
+            SELECT id,COALESCE(NULLIF(detail,''),summary) INTO result_id,result_text FROM activity
+            WHERE exploration_id=OLD.exploration_id AND node_id=OLD.id AND id>f.after_activity AND kind='result'
+            ORDER BY id DESC LIMIT 1;
+        END IF;
+        body := format('### Worker %s · 意图 #%s', CASE WHEN is_terminal THEN '结果' ELSE '状态' END,OLD.id)
+            || E'\n\n状态：' || CASE target_state WHEN 'done' THEN '已完成' WHEN 'blocked' THEN '执行失败'
+            WHEN 'exhausted' THEN '预算或时间耗尽' WHEN 'stopped' THEN '已终止' WHEN 'deleted' THEN '已删除'
+            WHEN 'paused' THEN '已暂停，恢复后继续跟踪' ELSE '等待执行或审批，恢复后继续跟踪' END
+            || CASE WHEN is_terminal THEN E'\n\n' || COALESCE(NULLIF(result_text,''),'本次未产生最终总结，请查看 Worker 会话中的已有记录。') ELSE '' END;
+        IF result_id IS NULL THEN
+            SELECT id INTO result_id FROM activity WHERE exploration_id=OLD.exploration_id AND node_id=OLD.id ORDER BY id DESC LIMIT 1;
+        END IF;
+        IF target_state <> 'deleted' AND result_id IS NOT NULL THEN
+            body := body || format(E'\n\n[查看 Worker 原始会话](/function/tasks/detail?id=%s&session=intent:%s&activity=%s)',f.task_id,OLD.id,result_id);
+        END IF;
+        INSERT INTO activity(exploration_id,worker,kind,summary,detail,main_seg,is_error,metadata)
+        VALUES(f.exploration_id,'mainagent','text',left(body,400),body,f.main_seg,
+            target_state IN ('blocked','exhausted','stopped','deleted'),
+            jsonb_build_object('worker_feedback',jsonb_build_object('id',f.id,'intent_id',OLD.id,'state',target_state,'source_activity_id',result_id))) RETURNING id INTO aid;
+        INSERT INTO worker_feedback_delivery(activity_id,task_id) VALUES(aid,f.task_id);
+        IF is_terminal THEN UPDATE worker_feedback SET terminal=true WHERE id=f.id; END IF;
+    END LOOP;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS worker_feedback_state ON exploration_nodes;
+CREATE TRIGGER worker_feedback_state AFTER UPDATE OF state OR DELETE ON exploration_nodes
+FOR EACH ROW EXECUTE FUNCTION notify_worker_feedback();

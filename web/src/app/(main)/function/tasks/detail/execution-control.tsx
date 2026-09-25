@@ -32,8 +32,8 @@ export function ExecutionControl({ task, onUpdated }: { task: Task; onUpdated: (
       onUpdated();
       toast.success(
         mode === "manual"
-          ? "已切换手工：未领取意图等待下发，运行中的 Worker 继续"
-          : "已切换托管：待执行意图恢复自动调度",
+          ? "已切换手工：Planner 自动规划已停止，意图等待选择下发"
+          : "已切换托管：Planner 恢复自动规划与意图调度",
       );
     } catch (e) {
       toast.error((e as Error).message);
@@ -69,7 +69,7 @@ export function ExecutionControl({ task, onUpdated }: { task: Task; onUpdated: (
           aria-busy={busy}
           aria-label="自动托管"
           aria-describedby={`${modeId}-description`}
-          title={managed ? "托管：按规划自动调度意图" : "手工：Planner 继续规划，由用户选择下发"}
+          title={managed ? "托管：按规划自动调度意图" : "手工：停止 Planner 自动规划，由用户或主 Agent 下发"}
           className="relative grid h-8 w-28 grid-cols-2 items-center rounded-[5px] border bg-muted text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <span aria-hidden="true">手工</span>
@@ -82,7 +82,7 @@ export function ExecutionControl({ task, onUpdated }: { task: Task; onUpdated: (
           </SwitchPrimitive.Thumb>
         </SwitchPrimitive.Root>
         <span id={`${modeId}-description`} className="sr-only">
-          开启为托管，关闭为手工。手工模式下由用户选择下发，运行中的 Worker 继续执行。
+          开启为托管，关闭为手工。手工模式停止 Planner 自动规划，由用户或主 Agent 下发意图；运行中的 Worker 继续执行。
         </span>
       </div>
       {!["done", "failed", "timeout"].includes(task.status) && (

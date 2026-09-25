@@ -797,6 +797,9 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	}
 	if _, loaded := e.started.LoadOrStore(t.ID, true); loaded {
 		e.deleteMu.RUnlock()
+		if state := t.lifecycleSnapshot(); state.ExecutionMode == db.ExecutionManual && !state.Paused && !state.Queued && !e.IsPaused(t.ID) && !isTerminalStatus(state.Status) {
+			e.stampFirstRun(t) // A paused manual task may begin only on this resume.
+		}
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
@@ -807,6 +810,9 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	for i := 0; i < workers; i++ {
 		name := fmt.Sprintf("work#%d", i+1)
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
+	}
+	if state := t.lifecycleSnapshot(); state.ExecutionMode == db.ExecutionManual && !state.Paused && !state.Queued && !e.IsPaused(t.ID) && !isTerminalStatus(state.Status) {
+		e.stampFirstRun(t) // No Planner/Worker call is needed to start manual-mode timeout.
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
@@ -850,6 +856,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
+		if t.lifecycleSnapshot().ExecutionMode == db.ExecutionManual {
+			t.drainTriggers() // Persisted graph changes are read afresh when managed resumes.
+			return
+		}
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
 		edgeSignal := src == "edge"
@@ -864,6 +874,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		}
 		if edgeSignal {
 			src = "edge"
+		}
+		if t.lifecycleSnapshot().ExecutionMode == db.ExecutionManual {
+			t.drainTriggers()
+			return
 		}
 		planner, _ := e.snapshotFor(t)
 		if planner == nil {
@@ -930,6 +944,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
+		ectx, releasePlanner, allowed := t.beginPlannerRound(ectx)
+		if !allowed {
+			return
+		}
+		defer releasePlanner()
+		if ectx.Err() != nil {
+			return
+		}
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
@@ -950,6 +972,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.plannerActive.Delete(t.ID)
 		t.wakeWorkers()
 		e.EndLLMCall(t.ID)
+		if ectx.Err() != nil {
+			return // Cancelled rounds cannot finish the task or update its planning revision.
+		}
 		if err == nil && observedRevisionErr == nil {
 			e.plannerRevision.Store(t.ID, observedRevision)
 		}
