@@ -14,28 +14,6 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// balancedCap decides how many done-intents and facts to keep when the combined
-// unfolded settled/cold region exceeds cap (§6.3). The smaller side is kept whole;
-// the larger side takes the remaining budget; neither is starved below cap/2.
-// Returns the keep counts and whether truncation applied. Newest-first slices, so
-// callers keep the head.
-func balancedCap(done, facts, cap int) (keepDone, keepFacts int, truncated bool) {
-	if done+facts <= cap {
-		return done, facts, false
-	}
-	half := cap / 2
-	keepDone, keepFacts = done, facts
-	switch {
-	case done > half && facts > half:
-		keepDone, keepFacts = half, cap-half
-	case done > half:
-		keepDone = cap - facts // facts fit in ≤half; intents take the rest
-	default:
-		keepFacts = cap - done // intents fit in ≤half; facts take the rest
-	}
-	return keepDone, keepFacts, true
-}
-
 // compactIntents distills intents to {id, summary, state, asset_ids, parents,
 // yields} so the planner sees both the direction and its LINEAGE — parents (the
 // upstream nodes it derived from: facts/intents/findings) and yields (the facts/
@@ -556,26 +534,19 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			factFrom[e.To] = e.From
 		}
 	}
-	// cold-digest §6: members folded into an active digest are shown via cold_digests
-	// (below), not the flat recent_* lists. `covered` maps member id → its digest id.
-	// §6 render-time revival check: a covered member that has become hot again (a new
-	// intent derived from it) must reappear this round — so `hidden` folds a member out
-	// only when it is covered AND still cold. covered_members (built from hidden) lets a
-	// parents/yields id pointing into a live fold stay resolvable (§6.5 dangling lineage).
+	// Fold only authorized, still-cold members. Revived members remain eligible
+	// for the recent windows, which are capped independently of the hot set.
 	covered := t.authorizedCoveredMembers(t.ts, t.taskID)
-	// Hot set at render time serves two §6 needs: (1) a covered member that revived
-	// (now hot) must reappear this round; (2) the 60-cap must never truncate hot
-	// (active-context) nodes — only the cold-but-unfolded region is cappable (§6.3).
-	// Computed every round (cheap for real graph sizes); nil map degrades safely.
 	var hotAtRender map[int64]bool
 	if cg, _, err := loadColdGraph(t.ts); err == nil {
 		hotAtRender = cg.hotSet()
 	}
 	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
-	fr, frontierErr := t.ts.Frontier(100)
+	const openIntentsCap = 30
+	frontier, frontierErr := t.ts.ToolOpenIntentPage(context.Background(), openIntentsCap)
 	markError(frontierErr, "frontier_open", "open_intents")
-	fr, frontierAuthErr := t.authorizedNodesForStore(fr, t.ts, t.taskID)
-	markError(frontierAuthErr, "frontier_open", "open_intents")
+	fr := frontier.Nodes
+	out["frontier_open"] = frontier.Total
 	all, intentsErr := t.ts.ToolNodesByKind(db.KindIntent, 300)
 	markError(intentsErr, "running_intents", "recent_done_intents", "done_intents_total", "done_intents_in_window")
 	all, intentsAuthErr := t.authorizedNodesForStore(all, t.ts, t.taskID)
@@ -591,13 +562,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
 			}
-			recentDone = append(recentDone, n) // §6: no 15-cap; folded ones are gone, cap applied below
+			recentDone = append(recentDone, n) // newest first; cap applied below
 		}
 	}
-	// recent_done_intents is finalized further below (after facts are known) so the
-	// 60-cap can balance the two lists and protect hot nodes (§6.3).
+	// Recent terminal intents are capped below after authorization and folding.
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
-	// 平行命名——后者只是它的最新窗口（≤15）截断视图。两键并排即自描述："看到的是 N/总数"，
+	// 平行命名——后者只是它的最新窗口（≤12）截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
 	if t.as == nil || t.taskID <= 0 {
 		if total, err := t.ts.CountFinishedIntents(); err == nil {
@@ -608,16 +578,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	} else {
 		out["done_intents_in_window"] = doneTotal
 	}
-	out["frontier_open"] = len(fr)
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
-	vulnPage, vulnErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFinding, 20)
+	vulnPage, vulnErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFinding, 10)
 	factPage, factErr := t.ts.ToolLocalNodePage(context.Background(), db.KindFact, 1000)
-	markError(vulnErr, "findings", "finding_list")
+	markError(vulnErr, "findings_total", "finding_list")
 	markError(factErr, "facts", "recent_facts")
-	vulnNodes := vulnPage.Nodes[:min(20, len(vulnPage.Nodes))]
+	vulnNodes := vulnPage.Nodes[:min(10, len(vulnPage.Nodes))]
 	factNodes := factPage.Nodes[:min(1000, len(factPage.Nodes))]
 	visible := visibleNodeIDs(goals, hints, fr, all, vulnNodes, factNodes)
 	parentsOf = restrictNodeRelations(parentsOf, visible)
@@ -625,38 +594,11 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factFrom = restrictNodeOrigins(factFrom, visible)
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
-	out["findings"] = vulnPage.Total
+	out["findings_total"] = vulnPage.Total
 	out["facts"] = factPage.Total
 	if vulnPage.Total > len(vulnNodes) {
 		out["finding_list_truncated"] = true
 		out["finding_list_read_hint"] = "更多摘要请用 list_findings"
-	}
-	// 概览仅预取有限漏洞摘要及关联资产；完整列表按需 list_findings 分页，
-	// 证据正文通过 node_detail 读取，不因概览窗口未包含某项就断言其不存在。
-	var findingMeta map[int64]db.FindingMeta // node_id -> 锚定资产等；仅任务上下文可查
-	assetByID := map[int64]*db.Asset{}
-	if t.as != nil && t.taskID > 0 {
-		var metaErr error
-		findingMeta, metaErr = t.as.FindingMetaByNodeID(t.taskID)
-		markError(metaErr, "finding_asset_metadata")
-		idSet := map[int64]struct{}{}
-		for _, node := range vulnNodes {
-			meta := findingMeta[node.ID]
-			for _, aid := range meta.AssetIDs {
-				idSet[aid] = struct{}{}
-			}
-		}
-		if len(idSet) > 0 {
-			ids := make([]int64, 0, len(idSet))
-			for aid := range idSet {
-				ids = append(ids, aid)
-			}
-			if assets, err := t.as.GetByIDs(ids); err == nil {
-				for _, a := range assets {
-					assetByID[a.ID] = a
-				}
-			}
-		}
 	}
 	findingList := make([]map[string]any, 0, len(vulnNodes))
 	for _, n := range vulnNodes {
@@ -666,28 +608,17 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		if from := factFrom[n.ID]; from > 0 {
 			m["from_intent"] = from // 本漏洞由哪个意图产生
 		}
-		if meta, ok := findingMeta[n.ID]; ok && len(meta.AssetIDs) > 0 {
-			assets := make([]string, 0, len(meta.AssetIDs))
-			for _, aid := range meta.AssetIDs {
-				if a := assetByID[aid]; a != nil {
-					if v := assetValue(a); v != "" {
-						assets = append(assets, v)
-						continue
-					}
-				}
-				assets = append(assets, fmt.Sprintf("#%d", aid)) // 资产已删/查不到 → 退回 id 标记，别丢信息
-			}
-			m["assets"] = assets // 受影响资产的可读内容
-		}
 		findingList = append(findingList, m)
 	}
 	out["finding_list"] = findingList
-	// Build facts, split hot (active context — a fact under a live intent) from cold
-	// (not-yet-folded). Hidden (folded & still cold) ones are surfaced via cold_digests.
-	var recentFactsHot, recentFactsCold []map[string]any
+	const recentFactsCap = 20
+	recentFacts := make([]map[string]any, 0, recentFactsCap)
 	for _, n := range factNodes {
+		if len(recentFacts) >= recentFactsCap {
+			break
+		}
 		if hidden(n.ID) {
-			continue // in a cold_digest and still cold — surfaced via cold_digests (§6.2)
+			continue
 		}
 		m := compactNode(n)
 		if from := factFrom[n.ID]; from > 0 {
@@ -701,53 +632,20 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				m["confidence"] = c
 			}
 		}
-		if hotAtRender[n.ID] {
-			recentFactsHot = append(recentFactsHot, m)
-		} else {
-			recentFactsCold = append(recentFactsCold, m)
-		}
+		recentFacts = append(recentFacts, m)
 	}
-	// Split the settled intents the same way: hot = ancestor of a live intent (active
-	// context); cold = not-yet-folded settled.
-	var doneHot, doneCold []*db.Node
-	for _, n := range recentDone {
-		if hotAtRender[n.ID] {
-			doneHot = append(doneHot, n)
-		} else {
-			doneCold = append(doneCold, n)
-		}
-	}
-	// §6.3 兜底截断：hot（活跃探索上下文——live 前沿的祖先链、live 意图下的新事实）【永不】
-	// 被截；60-cap 只约束【冷但未折】的残余（压缩滞后时才增长）。live(open/running) 另有字段、
-	// 同样不受影响。冷区两侧均衡保留：较少一侧全留、较多一侧填余额，各自保底 cap/2，绝不饿到 0。
-	const unfoldedCap = 60
-	keepColdDone, keepColdFacts, truncated := balancedCap(len(doneCold), len(recentFactsCold), unfoldedCap)
-	if truncated {
-		out["unfolded_truncated"] = true // 正常不触发；触发说明压缩滞后
-	}
-	out["recent_done_intents"] = append(
-		compactIntents(doneHot, parentsOf, yieldsOf),
-		compactIntents(doneCold[:keepColdDone], parentsOf, yieldsOf)...)
-	out["recent_facts"] = append(recentFactsHot, recentFactsCold[:keepColdFacts]...) // {id, summary, from_intent, confidence?}；详情用 node_detail(id)
-	// cold-digest §6.1/§6.2: the folded cold region + the per-asset directory that
-	// collapses independent directions, plus the dangling-lineage resolver map.
-	cds, cidx, coldErr := t.coldDigestOverview()
-	markError(coldErr, "cold_digests", "cold_index", "covered_members")
+	out["recent_facts"] = recentFacts
+	const recentDoneCap = 12
+	recentDone = recentDone[:min(recentDoneCap, len(recentDone))]
+	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
+	const coldDigestsCap = 15
+	cds, more, coldErr := t.coldDigestsRecent(t.ts, t.taskID, coldDigestsCap)
+	markError(coldErr, "cold_digests", "cold_digests_more")
 	if len(cds) > 0 {
-		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
-		out["cold_index"] = cidx  // [{asset, asset_id, digest_ids}] —— 按资产收敛方向 (§6.2)
+		out["cold_digests"] = cds
 	}
-	if len(covered) > 0 {
-		cm := make(map[string]int64, len(covered))
-		for member, dig := range covered {
-			if hotAtRender[member] {
-				continue // revived → shown live this round, not a dangling folded id
-			}
-			cm[strconv.FormatInt(member, 10)] = dig
-		}
-		if len(cm) > 0 {
-			out["covered_members"] = cm // 悬空血缘 id → 它属于哪个 digest；用 expand_digest 展开 (§6.5)
-		}
+	if len(more) > 0 {
+		out["cold_digests_more"] = more
 	}
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
@@ -764,8 +662,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["related_tasks"] = related
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
 	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
-	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 scope/hosts(范围边界与目标主机的
-	// 感知信息，company 关联经由 scope 在此浮现)，丢弃 denominator/tested/pct/by_type/note
+	// 资产覆盖度关闭时只保留主机计数；范围和资产详情按需查询。
+	// 丢弃 denominator/tested/pct/by_type/note
 	// 等覆盖度度量，避免污染上下文、也不诱导已隐藏的 add_task_scope/list_untested_assets。
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
@@ -783,66 +681,6 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 						m["pct"] = cov.Pct
 					}
 				}
-			}
-			// scope：当前测试范围的根资产（task_scope 原始行），让 agent 知道这个任务到底
-			// 圈定了哪些目标（不是全部测试资产，而是范围边界本身）。覆盖度开关无关，始终提供。
-			if rows, err := t.as.ListTaskScopeWithSources(t.taskID); err == nil && len(rows) > 0 {
-				rows = t.authorizedScope(rows)
-				scope := make([]map[string]any, 0, len(rows))
-				for _, r := range rows {
-					e := map[string]any{"kind": r.Kind, "source": r.Source, "task_id": r.TaskID}
-					if r.TaskID != t.taskID {
-						inheritedMap(e, r.TaskID)
-					}
-					switch {
-					case r.Domain != "":
-						e["value"] = r.Domain
-					case r.Net != "":
-						e["value"] = r.Net
-					case r.Value != "":
-						e["value"] = r.Value
-					case r.CompanyID != nil:
-						e["company_id"] = *r.CompanyID
-						if t.cs != nil {
-							if company, err := t.cs.GetCompany(*r.CompanyID); err == nil && company != nil {
-								e["company_name"] = company.Name
-							}
-							if rules, err := t.cs.GetScope(*r.CompanyID); err == nil {
-								keywords := make([]string, 0)
-								companyScope := make([]map[string]any, 0, len(rules))
-								for _, rule := range rules {
-									value := rule.Raw
-									if value == "" {
-										switch rule.Kind {
-										case "domain":
-											value = rule.Domain
-										case "ip", "cidr":
-											value = rule.Net
-										default:
-											value = rule.Value
-										}
-									}
-									entry := map[string]any{"kind": rule.Kind, "value": value}
-									if rule.Reason != "" {
-										entry["reason"] = rule.Reason
-									}
-									companyScope = append(companyScope, entry)
-									if rule.Kind == "keyword" && rule.Raw != "" {
-										keywords = append(keywords, rule.Raw)
-									}
-								}
-								if len(companyScope) > 0 {
-									e["company_scope"] = companyScope
-								}
-								if len(keywords) > 0 {
-									e["company_keywords"] = keywords
-								}
-							}
-						}
-					}
-					scope = append(scope, e)
-				}
-				m["scope"] = scope
 			}
 			if count, err := t.as.CountHostsByTaskWithSources(t.taskID); err == nil {
 				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
@@ -1005,14 +843,15 @@ func inheritedMap(m map[string]any, sourceTaskID int64) map[string]any {
 }
 
 const (
-	relatedOverviewTotalTextRunes     = 16_000
-	relatedOverviewMaxTextPerSource   = 4_000
-	relatedOverviewMaxGoalsPerSource  = 8
-	relatedOverviewMaxHintsPerSource  = 6
-	relatedOverviewMaxFactsPerSource  = 12
-	relatedOverviewMaxFindingsPerTask = 6
-	relatedOverviewMaxIntentsPerTask  = 8
-	relatedOverviewMaxScopePerSource  = 12
+	relatedOverviewTotalTextRunes      = 16_000
+	relatedOverviewMaxDigestsPerSource = 6
+	relatedOverviewMaxTextPerSource    = 4_000
+	relatedOverviewMaxGoalsPerSource   = 8
+	relatedOverviewMaxHintsPerSource   = 6
+	relatedOverviewMaxFactsPerSource   = 12
+	relatedOverviewMaxFindingsPerTask  = 6
+	relatedOverviewMaxIntentsPerTask   = 8
+	relatedOverviewMaxScopePerSource   = 12
 )
 
 // overviewTextBudget bounds inherited prompt text while preserving a fair slice
@@ -1245,12 +1084,20 @@ func (t *ToolSet) relatedTaskOverviews() ([]map[string]any, error) {
 		}
 		// §2 cross-task: the source task's folded cold region, read-only. Members are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		if cds := t.activeDigestBodies(ts, source.Task.TaskID); len(cds) > 0 {
-			for _, cd := range cds {
-				cd["inherited"] = true
-				cd["source_task_id"] = source.Task.TaskID
+		cds, more, digestErr := t.coldDigestsRecent(ts, source.Task.TaskID, relatedOverviewMaxDigestsPerSource)
+		if digestErr != nil {
+			item["cold_digests_error"] = digestErr.Error()
+		} else {
+			for _, d := range cds {
+				inheritedMap(d, source.Task.TaskID)
+				d["body"] = budget.take(d["body"], 1200)
 			}
-			item["cold_digests"] = cds
+			if len(cds) > 0 {
+				item["cold_digests"] = cds
+			}
+			if len(more) > 0 {
+				item["cold_digests_more"] = more
+			}
 		}
 		if statsErr == nil && t.as == nil {
 			item["node_stats"] = stats
@@ -2844,7 +2691,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.listFindingDeletionFeedback(), t.listTaskAssets(), t.checkTargetAccess(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
-		t.expandDigest(), t.expandIndex(),
+		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。

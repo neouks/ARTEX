@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type ToolNodePage struct {
@@ -254,6 +255,8 @@ func (s *ExplorationStore) LatestWorkerOutput(ctx context.Context, nodeID int64,
 	return &a, nil
 }
 
+const toolIntentHistoryPredicate = `($2<>'intent' OR (n.state IN ('running','done','blocked','exhausted','stopped') AND (n.exploration_id=$1 OR n.state<>'running')))`
+
 const toolNodeVisibilitySQL = `WITH RECURSIVE current_task AS (
  SELECT id FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL
  ), contexts AS (
@@ -265,7 +268,7 @@ const toolNodeVisibilitySQL = `WITH RECURSIVE current_task AS (
  FROM exploration_nodes n JOIN contexts c ON c.exp=n.exploration_id
  WHERE n.kind=$2 AND ($3='' OR strpos(lower(COALESCE(n.payload->>'summary','')),lower($3))>0)
  AND ($4='' OR n.payload->>'severity'=$4)
- AND ($2<>'intent' OR (n.state IN ('running','done','blocked','exhausted','stopped') AND (n.exploration_id=$1 OR n.state<>'running')))
+ AND ` + toolIntentHistoryPredicate + `
  AND ($2<>'digest' OR (n.state='active' AND EXISTS(SELECT 1 FROM exploration_edges e WHERE e.exploration_id=n.exploration_id AND e.src_id=n.id AND e.rel='covers')))
  ), lineage(root,id,exp) AS (
  SELECT id,id,exploration_id FROM roots WHERE owner<>0 OR $5::bigint<>0 UNION
@@ -291,3 +294,28 @@ const toolNodeVisibilitySQL = `WITH RECURSIVE current_task AS (
  AND NOT EXISTS(SELECT 1 FROM lineage l LEFT JOIN exploration_nodes n ON n.id=l.id AND n.exploration_id=l.exp WHERE l.root=r.id AND n.id IS NULL)
  AND NOT EXISTS(SELECT 1 FROM anchors a JOIN permissions p ON p.owner=r.owner AND p.asset_id=a.asset_id WHERE a.root=r.id AND NOT p.allowed)
  )`
+
+// ToolOpenIntentPage counts and limits within the same authorized snapshot.
+// Priority ordering matches Frontier, without exposing hidden pending intents.
+func (s *ExplorationStore) ToolOpenIntentPage(ctx context.Context, limit int) (ToolNodePage, error) {
+	// History reads deliberately exclude open intents. Replace only that fixed
+	// predicate; task, lineage, asset, and role checks remain identical.
+	visibility := strings.Replace(toolNodeVisibilitySQL, toolIntentHistoryPredicate, "(n.exploration_id=$1 AND n.state='open')", 1)
+	if !s.workerRead {
+		visibility = strings.Replace(visibility, "AND n.id IS NULL)", "AND (n.id IS NULL OR (n.kind='digest' AND NOT EXISTS(SELECT 1 FROM exploration_edges de WHERE de.exploration_id=n.exploration_id AND de.src_id=n.id AND de.rel='covers'))))", 1)
+	}
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, workerReadSQL(visibility, s.workerRead)+`, selected AS (
+ SELECT n.* FROM visible v JOIN exploration_nodes n ON n.id=v.id WHERE n.state='open' AND $6::bigint=0
+ ), page AS (SELECT * FROM selected ORDER BY priority DESC,id ASC LIMIT $7)
+ SELECT jsonb_build_object('total',(SELECT count(*) FROM selected),'nodes',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+ 'id',id,'kind',kind,'state',state,'priority',priority,'created_at',created_at,
+ 'payload',jsonb_strip_nulls(jsonb_build_object('summary',left(payload->>'summary',360),'asset_ids',payload->'asset_ids')))
+ ORDER BY priority DESC,id ASC) FROM page),'[]'::jsonb))`, s.expID, KindIntent, "", "", int64(0), int64(0), limit, false).Scan(&raw)
+	var out ToolNodePage
+	if err != nil {
+		return out, err
+	}
+	err = json.Unmarshal(raw, &out)
+	return out, err
+}

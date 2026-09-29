@@ -19,12 +19,12 @@ func TestPlannerToolContractMatchesPrefetchedPrompt(t *testing.T) {
 	if !names["list_assets"] {
 		t.Fatal("planner prompt advertises list_assets but PlannerTools omitted it")
 	}
-	for _, required := range []string{"graph_overview", "list_goals", "goal_met", "expand_digest", "expand_index"} {
+	for _, required := range []string{"graph_overview", "list_goals", "goal_met", "expand_digest"} {
 		if !names[required] {
 			t.Fatalf("official planner tool missing: %s", required)
 		}
 	}
-	for _, redundant := range []string{"asset_neighbors"} {
+	for _, redundant := range []string{"asset_neighbors", "expand_index"} {
 		if names[redundant] {
 			t.Fatalf("planner should not expose redundant or nonexistent tool %q", redundant)
 		}

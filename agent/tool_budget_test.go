@@ -119,7 +119,7 @@ func TestToolDefinitionAndHistorySizes(t *testing.T) {
 		Name() string
 		Description() string
 		InputSchema() map[string]any
-	}{ts.listAssets(), ts.listFacts(), ts.listFindings(), ts.nodeDetail(), ts.getWorkerOutput(), ts.getWorkerTrace(), ts.expandDigest(), ts.expandIndex(), ts.listWorkerTraces(), ts.searchAllWorkerTraces()} {
+	}{ts.listAssets(), ts.listFacts(), ts.listFindings(), ts.nodeDetail(), ts.getWorkerOutput(), ts.getWorkerTrace(), ts.expandDigest(), ts.listWorkerTraces(), ts.searchAllWorkerTraces()} {
 		data, err := json.Marshal(map[string]any{"name": tool.Name(), "description": tool.Description(), "parameters": tool.InputSchema()})
 		if err != nil {
 			t.Fatal(err)

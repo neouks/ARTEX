@@ -1,12 +1,6 @@
 package agent
 
-// cold-digest §6: graph_overview folding + the restore tools.
-//
-//	coldDigestOverview — builds the folded cold region for graph_overview:
-//	  cold_digests (flat {id, body, member_count}) and cold_index (§6.2, the
-//	  per-asset directory that collapses independent directions).
-//	expand_digest(id)     — level-1 restore: a digest's member compact list.
-//	expand_index(asset_id) — level-0 restore: the digests under one asset.
+// Cold digests are summarized in graph_overview; expand_digest reads details.
 
 import (
 	"context"
@@ -86,10 +80,10 @@ func (t *ToolSet) authorizedCoveredMembers(store *db.ExplorationStore, ownerTask
 	return covered
 }
 
-// coldDigestOverview returns the folded cold region for graph_overview: the flat
-// digest bodies and the asset-grouped index (§6.1/§6.2).
-func (t *ToolSet) coldDigestOverview() (digests, index []map[string]any, resultErr error) {
-	ads, err := t.ts.ActiveDigests()
+// coldDigestsRecent keeps the newest authorized digests and returns older IDs.
+// Memberships and authorization are batched; no per-digest database reads.
+func (t *ToolSet) coldDigestsRecent(store *db.ExplorationStore, ownerTaskID int64, limit int) ([]map[string]any, []int64, error) {
+	ads, err := store.ActiveDigests()
 	if err != nil || len(ads) == 0 {
 		return nil, nil, err
 	}
@@ -97,142 +91,49 @@ func (t *ToolSet) coldDigestOverview() (digests, index []map[string]any, resultE
 	for _, d := range ads {
 		ids = append(ids, d.ID)
 	}
-	allowed, allMembersByDigest, batchErr := t.digestAuthorizationBatch(t.ts, t.taskID, ids)
-	if batchErr != nil {
-		return nil, nil, batchErr
-	}
-	memByDigest := map[int64][]int64{}
-	var allMembers []int64
-	for _, d := range ads {
-		if !allowed[d.ID] {
-			continue
-		}
-		ms := allMembersByDigest[d.ID]
-		memByDigest[d.ID] = ms
-		allMembers = append(allMembers, ms...)
-	}
-	assetsByNode, assetsErr := t.ts.NodeAssets(allMembers)
-	if assetsErr != nil {
-		return nil, nil, assetsErr
-	}
-
-	digests = make([]map[string]any, 0, len(ads))
-	for _, d := range ads {
-		if _, allowed := memByDigest[d.ID]; !allowed {
-			continue
-		}
-		var p struct {
-			Body string `json:"body"`
-		}
-		if err := json.Unmarshal(d.Payload, &p); err != nil {
-			return nil, nil, err
-		}
-		digests = append(digests, map[string]any{
-			"id":              d.ID,
-			"body":            firstLine(p.Body, 1200),
-			"body_is_summary": true,
-			"member_count":    len(memByDigest[d.ID]),
-		})
-	}
-
-	// index (§6.2): asset → digests. Each digest lands in EXACTLY ONE bucket — its
-	// representative asset = the asset anchored on the most of its members (mode;
-	// tie-break lowest id). This is what makes the index converge: bucketing a digest
-	// into every asset its members touch would duplicate it across dozens of buckets
-	// and blow up the top-level count instead of shrinking it (asset_ids are fine-
-	// grained — a real task has ~144 of them). A digest whose members anchor no asset
-	// falls into the 0 bucket ("(未锚定资产)").
-	byAsset := map[int64]map[int64]bool{} // asset id → set of digest ids
-	assetSet := map[int64]bool{}
-	for dID, ms := range memByDigest {
-		counts := map[int64]int{}
-		for _, m := range ms {
-			for _, a := range assetsByNode[m] {
-				counts[a]++
-			}
-		}
-		rep, best := int64(0), 0
-		for a, c := range counts {
-			if c > best || (c == best && (rep == 0 || a < rep)) {
-				rep, best = a, c
-			}
-		}
-		if byAsset[rep] == nil {
-			byAsset[rep] = map[int64]bool{}
-		}
-		byAsset[rep][dID] = true
-		if rep != 0 {
-			assetSet[rep] = true
-		}
-	}
-	labels := map[int64]string{}
-	if t.as != nil && len(assetSet) > 0 {
-		ids := make([]int64, 0, len(assetSet))
-		for a := range assetSet {
-			ids = append(ids, a)
-		}
-		if assets, err := t.as.GetByIDs(ids); err == nil {
-			for _, a := range assets {
-				if v := assetValue(a); v != "" {
-					labels[a.ID] = v
-				}
-			}
-		}
-	}
-	index = make([]map[string]any, 0, len(byAsset))
-	for a, dset := range byAsset {
-		dids := make([]int64, 0, len(dset))
-		for d := range dset {
-			dids = append(dids, d)
-		}
-		sort.Slice(dids, func(i, j int) bool { return dids[i] < dids[j] })
-		entry := map[string]any{"digest_ids": dids}
-		if a == 0 {
-			entry["asset"] = "(未锚定资产)"
-		} else {
-			entry["asset_id"] = a
-			if l := labels[a]; l != "" {
-				entry["asset"] = l
-			} else {
-				entry["asset"] = fmt.Sprintf("#%d", a)
-			}
-		}
-		index = append(index, entry)
-	}
-	sort.Slice(index, func(i, j int) bool {
-		return fmt.Sprint(index[i]["asset"]) < fmt.Sprint(index[j]["asset"])
-	})
-	return digests, index, nil
-}
-
-// activeDigestBodies returns [{id, body, member_count}] for a store's active
-// digests — the folded cold region as flat bodies (§6.1). Shared by the current
-// task overview and the read-only related-task overview (§2 cross-task reuse).
-func (t *ToolSet) activeDigestBodies(store *db.ExplorationStore, ownerTaskID int64) []map[string]any {
-	ads, err := store.ActiveDigests()
-	if err != nil || len(ads) == 0 {
-		return nil
-	}
-	ids := make([]int64, 0, len(ads))
-	for _, d := range ads {
-		ids = append(ids, d.ID)
-	}
 	allowed, members, err := t.digestAuthorizationBatch(store, ownerTaskID, ids)
 	if err != nil {
-		return nil
+		return nil, nil, err
 	}
-	out := make([]map[string]any, 0, len(ads))
+	type entry struct {
+		node      *db.Node
+		freshness int64
+	}
+	entries := make([]entry, 0, len(ads))
 	for _, d := range ads {
 		if !allowed[d.ID] {
+			continue
+		}
+		var freshness int64
+		for _, id := range members[d.ID] {
+			if id > freshness {
+				freshness = id
+			}
+		}
+		entries = append(entries, entry{d, freshness})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].freshness == entries[j].freshness {
+			return entries[i].node.ID > entries[j].node.ID
+		}
+		return entries[i].freshness > entries[j].freshness
+	})
+	shown := make([]map[string]any, 0, min(limit, len(entries)))
+	var more []int64
+	for i, e := range entries {
+		if i >= limit {
+			more = append(more, e.node.ID)
 			continue
 		}
 		var p struct {
 			Body string `json:"body"`
 		}
-		_ = json.Unmarshal(d.Payload, &p)
-		out = append(out, map[string]any{"id": d.ID, "body": firstLine(p.Body, 1200), "body_is_summary": true, "member_count": len(members[d.ID])})
+		if err := json.Unmarshal(e.node.Payload, &p); err != nil {
+			return nil, nil, err
+		}
+		shown = append(shown, map[string]any{"id": e.node.ID, "body": firstLine(p.Body, 1200), "body_is_summary": true, "member_count": len(members[e.node.ID])})
 	}
-	return out
+	return shown, more, nil
 }
 
 // hiddenMembersFor returns a predicate telling whether a member is hidden (folded
@@ -289,7 +190,7 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":    map[string]any{"type": "integer", "description": "digest 节点 id（来自概览 cold_digests / cold_index / covered_members）"},
+				"id":    map[string]any{"type": "integer", "description": "digest 节点 id（来自概览 cold_digests / cold_digests_more）"},
 				"limit": intp("成员默认20，最大100"), "before": intp("成员 next_before 续页"), "offset": intp("正文字符偏移"), "max_chars": intp("正文默认8000，最大24000"),
 			},
 			"required": []any{"id"},
@@ -401,52 +302,6 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 				} else {
 					return actool.Errorf("摘要元数据超出响应预算"), nil
 				}
-			}
-			return jsonResult(out)
-		})
-}
-
-// expandIndex returns the active digests under one asset (§6.2 level-0), each
-// with its body + member count — so the planner can drill an asset directory down
-// to its directions without reading every digest globally.
-func (t *ToolSet) expandIndex() actool.CoreTool {
-	return t.writeExpTool("expand_index", "按资产展开冷摘要索引（0为未锚定桶）。默认20，最大100；before续页，正文详情使用 expand_digest。",
-		obj(map[string]any{"asset_id": idp("资产 ID，默认0"), "before": intp("next_before 续页"), "limit": intp("默认20，最大100")}),
-		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {
-			if t.ts == nil {
-				return actool.Errorf("缺少任务探索上下文"), nil
-			}
-			var in struct {
-				AssetID int64 `json:"asset_id"`
-				Before  int64 `json:"before"`
-				Limit   int   `json:"limit"`
-			}
-			if err := decodeToolInput(raw, &in); err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			if in.Limit == 0 {
-				in.Limit = 20
-			}
-			if in.AssetID < 0 || in.Before < 0 || in.Limit < 1 || in.Limit > 100 {
-				return actool.Errorf("无效索引分页参数"), nil
-			}
-			page, err := t.ts.ToolDigestIndexPage(ctx, in.AssetID, in.Before, in.Limit)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			more := len(page.Digests) > in.Limit
-			if more {
-				page.Digests = page.Digests[:in.Limit]
-			}
-			rows := []map[string]any{}
-			for _, d := range page.Digests {
-				rows = append(rows, map[string]any{"id": d.ID, "kind": db.KindDigest, "state": "active", "body": d.Body, "member_count": d.MemberCount, "body_is_summary": true})
-			}
-			rows, cut := budgetRows(rows)
-			more = more || cut
-			out := map[string]any{"asset_id": in.AssetID, "digests": rows, "total": page.Total, "has_more": more}
-			if more && len(rows) > 0 {
-				out["next_before"] = rows[len(rows)-1]["id"]
 			}
 			return jsonResult(out)
 		})

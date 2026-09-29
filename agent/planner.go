@@ -293,7 +293,7 @@ func renderGraphOverview(data map[string]any) string {
 	const plannerOverviewMaxRunes = 24_000
 	return "\n\n【本轮态势（graph_overview 的轻量预取；需要细节再按需调 node_detail/list_facts 等）】：\n" +
 		renderLightTaggedOrdered("graph_overview", data, []string{
-			"task", "asset_approval_counts", "asset_approval_error", "frontier_open", "findings", "facts", "running_intents", "goals", "hints",
+			"task", "asset_approval_counts", "asset_approval_error", "frontier_open", "findings_total", "facts", "running_intents", "goals", "hints",
 			"open_intents", "recent_done_intents", "recent_facts", "coverage", "related_tasks",
 		}, plannerOverviewMaxRunes)
 }
@@ -319,7 +319,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **要更深细节才按需调**：list_facts / list_findings（授权可见的分页摘要，默认 20；q 仅搜摘要，before 翻页，带 total/has_more；未查完不能断言不存在，具体续读规则见工具说明）、node_detail(id)（证据/详情按需分段读取）、list_assets（DSL 搜索或 id/ids 直取）。不要默认拉全量。
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
-   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
+   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
    - 图里已有 worker 产出的 fact（facts>0 / recent_facts 非空）→【禁止】再自己探测，一切判断基于已有 fact，本轮产物只能是"派新意图"或"结束"；想深挖某线索 → 派意图让 worker 去查，不是自己 curl。

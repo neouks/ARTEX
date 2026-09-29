@@ -137,3 +137,87 @@ func TestLatestWorkerOutputBeyondThousandActivities(t *testing.T) {
 		t.Fatal("query failure disguised as no output")
 	}
 }
+
+func TestOpenIntentPageAuthorizedCountAndPriority(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task, err := d.CreateTaskWithOptions("frontier authorization", "goal", TaskCreateOptions{AssetApprovalTemplate: "explicit_targets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	es := d.Exploration(task.ExplorationID)
+	approved, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: "frontier-approved.test", TaskID: task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: "frontier-pending.test", TaskID: task.ID, AgentDiscovered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Writes are SQL fixtures: exercise visibility of historical intents which
+	// predate approval changes, independently of current execution write guards.
+	var hidden int64
+	err = d.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,state,priority,payload) VALUES($1,'intent','open',100,jsonb_build_object('asset_ids',jsonb_build_array($2::bigint))) RETURNING id`, task.ExplorationID, pending).Scan(&hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inheritedDenied int64
+	if err = d.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,state,priority,payload) VALUES($1,'intent','open',200,'{}') RETURNING id`, task.ExplorationID).Scan(&inheritedDenied); err != nil {
+		t.Fatal(err)
+	}
+	if err = es.Link(hidden, RelDerivedFrom, inheritedDenied); err != nil {
+		t.Fatal(err)
+	}
+	var visible []int64
+	for i := 0; i < 35; i++ {
+		var id int64
+		err = d.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,state,priority,payload) VALUES($1,'intent','open',$2,jsonb_build_object('asset_ids',jsonb_build_array($3::bigint),'summary','visible')) RETURNING id`, task.ExplorationID, i%3, approved).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		visible = append(visible, id)
+	}
+	page, err := es.ToolOpenIntentPage(t.Context(), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 35 || len(page.Nodes) != 30 {
+		t.Fatalf("page count=%d rows=%d", page.Total, len(page.Nodes))
+	}
+	for i, n := range page.Nodes {
+		if n.ID == hidden || n.ID == inheritedDenied {
+			t.Fatal("pending intent leaked")
+		}
+		if i > 0 {
+			prev := page.Nodes[i-1]
+			if prev.Priority < n.Priority || (prev.Priority == n.Priority && prev.ID > n.ID) {
+				t.Fatal("wrong priority ordering")
+			}
+		}
+	}
+	execution, err := es.WithWorkerRead().ToolOpenIntentPage(t.Context(), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Total != 37 || execution.Nodes[0].ID != inheritedDenied {
+		t.Fatalf("execution did not preserve pending policy: %+v", execution)
+	}
+	if err = d.Assets().BlockTaskAssets(task.ID, []int64{pending}, "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	execution, err = es.WithWorkerRead().ToolOpenIntentPage(t.Context(), 30)
+	if err != nil || execution.Total != 35 {
+		t.Fatalf("blocked execution=%+v err=%v", execution, err)
+	}
+	if err = d.Assets().RevokeTaskAssets(task.ID, []int64{approved}, "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	page, err = es.ToolOpenIntentPage(t.Context(), 30)
+	if err != nil || page.Total != 0 || len(page.Nodes) != 0 {
+		t.Fatalf("revoke=%+v err=%v", page, err)
+	}
+}
