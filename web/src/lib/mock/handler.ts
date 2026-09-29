@@ -266,6 +266,14 @@ function mockTaskArchiveBlocker(taskID: string): string | undefined {
 
 function publicMockTask(task: Task): Task {
   const item = structuredClone(task);
+  item.findings = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const finding of mockFindings) {
+    if (finding.task_id !== task.id) continue;
+    const severity = finding.severity;
+    if (severity === "critical" || severity === "high" || severity === "medium" || severity === "low") {
+      item.findings[severity]++;
+    }
+  }
   const blocker = mockTaskArchiveBlocker(task.id);
   if (blocker) item.archive_blocked_by_task_id = blocker;
   else delete item.archive_blocked_by_task_id;
@@ -1757,6 +1765,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       paused: false,
       active: true,
       in_flight: 0,
+      findings: { critical: 0, high: 0, medium: 0, low: 0 },
       stalled: false,
       goals_total: 0,
       goals_met: 0,

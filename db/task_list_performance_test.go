@@ -115,3 +115,44 @@ VALUES ($1,'goal','{}','met'), ($1,'goal','{}','open')`, task.ExplorationID); er
 		t.Fatalf("unexpected goal metrics: %+v", metrics.Goals)
 	}
 }
+
+func TestTaskListSeverityCountsAndDeletion(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task, err := d.CreateTask("severity metrics", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	other, err := d.CreateTask("other severity metrics", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(other.ID)
+	if _, err = d.Exec(`INSERT INTO findings(task_id,summary,severity) VALUES ($1,'a','critical'),($1,'b','high'),($1,'c','high'),($1,'d','medium'),($1,'e','low'),($1,'unknown',''),($2,'other','critical')`, task.ID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	all, err := d.TaskListMetricsAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[task.ExplorationID].Findings; got != (FindingSeverityCounts{Critical: 1, High: 2, Medium: 1, Low: 1}) {
+		t.Fatalf("counts=%+v", got)
+	}
+	if got := all[other.ExplorationID].Findings; got != (FindingSeverityCounts{Critical: 1}) {
+		t.Fatalf("other counts=%+v", got)
+	}
+	if _, err = d.Exec(`DELETE FROM findings WHERE task_id=$1 AND severity='high'`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	all, err = d.TaskListMetricsAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[task.ExplorationID].Findings.High; got != 0 {
+		t.Fatalf("stale deleted findings count=%d", got)
+	}
+}

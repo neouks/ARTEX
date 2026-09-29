@@ -987,6 +987,9 @@ export default function TasksPage() {
                       onSort={sortTasksBy}
                     />
                     <TableHead className="text-center">目标进度</TableHead>
+                    <TableHead className="text-center" title="严重 / 高 / 中 / 低">
+                      漏洞 <span className="text-muted-foreground font-normal">严/高/中/低</span>
+                    </TableHead>
                     <TableHead className="text-center">运行中 Worker</TableHead>
                     <SortableTaskHead
                       field="created"
@@ -1461,7 +1464,7 @@ const TaskRow = React.memo(function TaskRow({
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
       </TableCell>
-      <TableCell className="text-muted-foreground max-w-xs">
+      <TableCell className="text-muted-foreground max-w-40">
         <Link
           href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
           className="block truncate rounded-sm hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1479,6 +1482,27 @@ const TaskRow = React.memo(function TaskRow({
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
+      </TableCell>
+      <TableCell className="text-center text-xs tabular-nums">
+        {(() => {
+          const f = task.findings;
+          const total = f ? f.critical + f.high + f.medium + f.low : 0;
+          if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
+          const seg = (n: number, cls: string) => (
+            <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>
+          );
+          return (
+            <span className="font-medium whitespace-nowrap" title="严重 / 高 / 中 / 低">
+              {seg(f.critical, "text-destructive")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.high, "text-destructive")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.medium, "text-chart-4")}
+              <span className="text-muted-foreground">/</span>
+              {seg(f.low, "text-muted-foreground")}
+            </span>
+          );
+        })()}
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
         {task.in_flight && task.in_flight > 0 ? (
