@@ -145,6 +145,9 @@ func (l *loop) execOne(toolCtx context.Context, settling bool, use llm.ContentBl
 	if err != nil {
 		res = tool.Errorf("Error: " + err.Error())
 	}
+	// Bound every executed tool, including hosts and deferred targets. The
+	// idempotent cap preserves outputs already captured inside their adapter.
+	res = capOutput(tc, res)
 
 	if l.in.Hooks != nil && use.Name != tool.ExecuteExtraToolName {
 		raw, _ := json.Marshal(res.Flatten())

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultMaxOutput = 30000
@@ -42,12 +44,57 @@ func Capture(tc *ToolContext, s string) string {
 				}
 			}
 			lines := strings.Count(s, "\n") + 1
-			return s[:max] + fmt.Sprintf(
+			return prefixBytes(s, max) + fmt.Sprintf(
 				"\n\n... <persisted-output>[Output too large: full %d bytes / %d lines.Full output saved to  %s </persisted-output>",
 				len(s), lines, ref)
 		}
 	}
 	return truncate(s, max)
+}
+
+var persistedOutputNotice = regexp.MustCompile(`^\n\n\.\.\. <persisted-output>\[Output too large: full [0-9]{1,20} bytes / [0-9]{1,20} lines\.Full output saved to  [^\r\n]+ </persisted-output>$`)
+var truncatedOutputNotice = regexp.MustCompile(`\n\n\.\.\. \[[0-9]{1,20} characters truncated\] \.\.\.\n\n`)
+
+// Recognize a complete Capture receipt AND its bounded preview, not a marker
+// mentioned anywhere in arbitrary output. This also works across a deferred
+// executor's independently constructed ToolContexts without double-spilling.
+func alreadyCaptured(tc *ToolContext, s string) bool {
+	max := maxOut(tc)
+	if i := strings.LastIndex(s, "\n\n... <persisted-output>"); i >= 0 && i <= max && len(s)-i <= 4300 {
+		if persistedOutputNotice.MatchString(s[i:]) {
+			return true
+		}
+	}
+	// Only scan small, already bounded previews; raw oversized output cannot
+	// bypass Capture merely by containing a plausible notice in its tail.
+	if len(s) <= max+80 {
+		for _, span := range truncatedOutputNotice.FindAllStringIndex(s, -1) {
+			if len(s)-(span[1]-span[0]) <= max {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// CaptureOnce is the v0.4.3 global cap's idempotent entry point. A receipt may
+// exceed the preview budget by its fixed notice and bounded file path.
+func CaptureOnce(tc *ToolContext, s string) string {
+	if alreadyCaptured(tc, s) {
+		return s
+	}
+	return Capture(tc, s)
+}
+
+// The existing limit is bytes; keep it without splitting a UTF-8 code point.
+func prefixBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
 }
 
 func spillOutput(dir, s string) (string, error) {
@@ -76,5 +123,10 @@ func truncate(s string, max int) string {
 		return s
 	}
 	half := max / 2
-	return s[:half] + fmt.Sprintf("\n\n... [%d characters truncated] ...\n\n", len(s)-max) + s[len(s)-half:]
+	start := len(s) - half
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	head, tail := prefixBytes(s, half), s[start:]
+	return head + fmt.Sprintf("\n\n... [%d characters truncated] ...\n\n", len(s)-len(head)-len(tail)) + tail
 }
