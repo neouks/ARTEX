@@ -194,7 +194,7 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 	case "script":
 		res, _ = s.runScriptTool(ctx, "test", req.Exec, params, tc)
 	case "http":
-		res, _ = s.runHTTPTool(ctx, req.Exec, params)
+		res, _ = s.runHTTPTool(ctx, req.Exec, params, tc)
 	case "shell":
 		writeErr(w, 400, "shell 类型工具是 bash 环境声明，无可执行内容")
 		return
@@ -308,7 +308,7 @@ func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
 		case "script":
 			return s.runScriptTool(ctx, key, execRaw, params, tc)
 		case "http":
-			return s.runHTTPTool(ctx, execRaw, params)
+			return s.runHTTPTool(ctx, execRaw, params, tc)
 		default:
 			return actool.Errorf("未知自定义工具类型: " + kind), nil
 		}
@@ -420,7 +420,7 @@ func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.Raw
 	if err != nil {
 		return actool.Errorf(err.Error()), nil
 	}
-	return actool.Text(clipOutput(body, tc)), nil
+	return actool.Text(actool.Capture(tc, body)), nil
 }
 
 // execPython writes the code to a temp .py under workDir/.tools, runs it via interp
@@ -467,7 +467,7 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 
 // ---------- http:原生请求 + 代理 ----------
 
-func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any) (actool.Result, error) {
+func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec httpExec
 	_ = json.Unmarshal(execRaw, &spec)
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
@@ -514,7 +514,7 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	out := map[string]any{"status": resp.StatusCode, "body": string(respBody)}
 	b, _ := json.Marshal(out)
-	return actool.Text(clipOutput(string(b), nil)), nil
+	return actool.Text(actool.Capture(tc, string(b))), nil
 }
 
 // customToolAssetPolicy evaluates the fully rendered execution spec. The outer
@@ -696,16 +696,4 @@ func scalarStr(v any) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// clipOutput caps output to the session's MaxOutputChars (or a default).
-func clipOutput(s string, tc *actool.ToolContext) string {
-	max := 6000
-	if tc != nil && tc.MaxOutputChars > 0 {
-		max = tc.MaxOutputChars
-	}
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("\n... [截断，共 %d 字节] ...", len(s))
 }

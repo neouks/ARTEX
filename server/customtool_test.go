@@ -162,7 +162,7 @@ func TestRunHTTPTool(t *testing.T) {
 		"body":    `{"flag":"{flag}"}`,
 	})
 	res, err := (&Server{}).runHTTPTool(context.Background(), execRaw,
-		map[string]any{"flag": "CTF{x}", "token": "sekret"})
+		map[string]any{"flag": "CTF{x}", "token": "sekret"}, nil)
 	if err != nil {
 		t.Fatalf("runHTTPTool: %v", err)
 	}
@@ -195,17 +195,5 @@ func TestDetectPython(t *testing.T) {
 	}
 	if p := detectPython(); p == "" {
 		t.Fatal("detectPython returned empty despite python3 on PATH")
-	}
-}
-
-func TestClipOutput(t *testing.T) {
-	long := strings.Repeat("x", 7000)
-	got := clipOutput(long, nil)
-	if len(got) >= 7000 || !strings.Contains(got, "截断") {
-		t.Fatalf("clipOutput should truncate long output, got len %d", len(got))
-	}
-	short := "ok"
-	if clipOutput(short, nil) != short {
-		t.Fatal("clipOutput should pass short output through")
 	}
 }
