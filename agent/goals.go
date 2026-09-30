@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -10,6 +11,7 @@ import (
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // goalsDefaultTmpl is the built-in EDITABLE body (段 [A]) of the goals-decomposer
@@ -89,6 +91,9 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		return nil
 	}
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), AgentKey: "goals", Trigger: "task_create"})
+	if ts != nil {
+		ctx = transcript.WithSessionID(ctx, fmt.Sprintf("exp%d-goals", ts.ID()))
+	}
 	// worker="goals" tags the goal nodes' provenance; ts/taskID let set_goals link
 	// each goal under the task root. This is the catalog's real set_goals tool, so a
 	// web-edited description/schema on it applies here too.

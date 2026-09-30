@@ -74,6 +74,13 @@ func RunInfoFrom(ctx context.Context) RunInfo {
 	return info
 }
 
+// WithIndependentRunInfo starts distinct attribution while retaining unrelated
+// context values. Unlike WithRunInfo it cannot inherit an intent or retry from
+// the caller that launched a detached run.
+func WithIndependentRunInfo(ctx context.Context, info RunInfo) context.Context {
+	return context.WithValue(ctx, runInfoContextKey{}, info)
+}
+
 // WithTaskID attaches the owning task registry id to an LLM call. Session ids
 // are based on exploration ids, which are not interchangeable with task ids.
 func WithTaskID(ctx context.Context, taskID string) context.Context {

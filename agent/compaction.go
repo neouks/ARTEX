@@ -26,7 +26,9 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // Compactor performs background cold-node compaction for many explorations.
@@ -105,7 +107,12 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	}
 	go func() {
 		defer c.finish(ts.ID())
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.maxDur)
+		runCtx, err := compactorRunContext(ctx, ts)
+		if err != nil {
+			log.Printf("[compaction] attribution exp=%d: %v", ts.ID(), err)
+			return
+		}
+		bg, cancel := context.WithTimeout(context.WithoutCancel(runCtx), c.maxDur)
 		defer cancel()
 		if needMajor {
 			c.major(bg, ts)
@@ -114,6 +121,24 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 		}
 	}()
 	_ = round
+}
+
+// Graph compaction is a separate run, not a planner retry or worker intent.
+// Keep other context values, but replace inherited attribution as one unit.
+func compactorRunContext(ctx context.Context, ts *db.ExplorationStore) (context.Context, error) {
+	taskID, err := ts.TaskID()
+	if err != nil || taskID <= 0 {
+		if err == nil {
+			err = fmt.Errorf("exploration has no owning task")
+		}
+		return nil, err
+	}
+	sessionID := fmt.Sprintf("exp%d-compactor", ts.ID())
+	ctx = llmrec.WithIndependentRunInfo(ctx, RunInfo{
+		TaskID: taskID, ExplorationID: ts.ID(), SessionID: sessionID,
+		AgentKey: "compactor", Trigger: "graph_compaction", Phase: "compaction",
+	})
+	return transcript.WithSessionID(ctx, sessionID), nil
 }
 
 // maintain bumps round_no, recomputes hot/cold over the whole graph, and applies
