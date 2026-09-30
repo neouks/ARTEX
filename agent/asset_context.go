@@ -126,6 +126,13 @@ func structuredNodeIDs(row map[string]any) []int64 {
 		return nil
 	}
 	var ids []int64
+	if values, ok := row["node_ids"].([]any); ok {
+		for _, value := range values {
+			if id, ok := value.(float64); ok && id > 0 && id == float64(int64(id)) {
+				ids = append(ids, int64(id))
+			}
+		}
+	}
 	if id, ok := row["intent_id"].(float64); ok && id > 0 && id == float64(int64(id)) {
 		ids = append(ids, int64(id))
 	}
@@ -235,16 +242,14 @@ func (p assetContextProvider) filterPlain(ctx context.Context, req llm.Completio
 	for mi, message := range req.Messages {
 		for bi, block := range message.Content {
 			if block.Type == llm.BlockToolUse {
-				toolNames[block.ID] = block.Name
+				toolNames[block.ID] = assetContextCall(block).Name
 			}
 			if block.Type != llm.BlockToolResult {
 				continue
 			}
 			// Only ARTEX structured tools: arbitrary shell/HTTP JSON may use the
 			// same field names for unrelated application data.
-			switch toolNames[block.ToolUseID] {
-			case "insert_assets", "list_assets", "list_untested_assets", "graph_overview", "node_detail", "expand_digest", "expand_index", "list_findings", "list_facts", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces":
-			default:
+			if !assetStructuredTool(toolNames[block.ToolUseID]) {
 				continue
 			}
 			for ci, content := range block.Content {

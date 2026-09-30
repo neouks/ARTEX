@@ -382,8 +382,9 @@ func readTool(name, desc string, schema map[string]any, run func(context.Context
 		ReadOnly:    func(json.RawMessage) bool { return true },
 		Concurrent:  func(json.RawMessage) bool { return true },
 		Permissions: func(context.Context, json.RawMessage, acperm.Context) acperm.Decision { return acperm.Allowed() },
-		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
-			return run(ctx, in)
+		Run: func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
+			res, err := run(ctx, in)
+			return captureStructuredResult(name, res, tc), err
 		},
 	})
 }
@@ -398,7 +399,8 @@ func writeTool(name, desc string, schema map[string]any, run func(context.Contex
 			if tc != nil {
 				ctx = context.WithValue(ctx, toolUseContextKey{}, tc.ToolUseID)
 			}
-			return run(ctx, in)
+			res, err := run(ctx, in)
+			return captureStructuredResult(name, res, tc), err
 		},
 	})
 }

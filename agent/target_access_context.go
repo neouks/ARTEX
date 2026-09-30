@@ -43,6 +43,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 	for _, m := range req.Messages {
 		for _, b := range m.Content {
 			if b.Type == llm.BlockToolUse {
+				b = assetContextCall(b)
 				calls[b.ID] = b
 				var q struct {
 					ID  int64   `json:"id"`
@@ -88,9 +89,7 @@ func (p assetContextProvider) refreshTargetAccess(ctx context.Context, req llm.C
 			if b.Type != llm.BlockToolResult {
 				continue
 			}
-			switch calls[b.ToolUseID].Name {
-			case "insert_assets", "list_assets", "list_untested_assets", "graph_overview", "node_detail", "expand_digest", "expand_index", "list_findings", "list_facts", "get_worker_output", "get_worker_trace", "list_worker_traces", "search_all_worker_traces":
-			default:
+			if !assetStructuredTool(calls[b.ToolUseID].Name) {
 				continue
 			}
 			for _, c := range b.Content {
