@@ -50,14 +50,14 @@ type oaReq struct {
 	// MaxTokens and MaxCompletionTokens are mutually exclusive: buildBody fills
 	// exactly one of them per Config.MaxTokensField, and omitempty drops the
 	// other. Sending both would make OpenAI reject the request.
-	MaxTokens           int      `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64 `json:"temperature,omitempty"`
-	Stop            []string      `json:"stop,omitempty"`
-	Thinking        *oaThinking   `json:"thinking,omitempty"`
-	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
-	Stream          bool          `json:"stream"`
-	StreamOptions   *oaStreamOpts `json:"stream_options,omitempty"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	Stop                []string      `json:"stop,omitempty"`
+	Thinking            *oaThinking   `json:"thinking,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
+	Stream              bool          `json:"stream"`
+	StreamOptions       *oaStreamOpts `json:"stream_options,omitempty"`
 }
 
 type oaStreamOpts struct {
@@ -146,9 +146,14 @@ func flattenText(blocks []ContentBlock) string {
 }
 
 func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, error) {
+	thinkingType := p.cfg.ThinkingType
+	if req.Thinking != "" {
+		thinkingType = req.Thinking
+	}
+	thinking := thinkingType != "" || p.cfg.ReasoningEffort != ""
 	body := oaReq{
 		Model:       p.cfg.Model,
-		Messages:    pairOpenAIMessages(toOpenAIMessages(joinSystem(req.System), req.Messages)),
+		Messages:    sanitizeOpenAIMessages(toOpenAIMessages(joinSystem(req.System), req.Messages), thinking),
 		Temperature: req.Temperature,
 		Stop:        req.Stop,
 		Stream:      stream,
@@ -167,10 +172,6 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 		body.StreamOptions = &oaStreamOpts{IncludeUsage: true}
 	}
 	// A non-empty per-request override (req.Thinking) wins over Config.ThinkingType.
-	thinkingType := p.cfg.ThinkingType
-	if req.Thinking != "" {
-		thinkingType = req.Thinking
-	}
 	if thinkingType != "" {
 		body.Thinking = &oaThinking{Type: thinkingType}
 	}

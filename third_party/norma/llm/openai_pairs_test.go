@@ -111,6 +111,11 @@ func TestOpenAIPairRepairAtTransport(t *testing.T) {
 					http.Error(w, "invalid pairing", 400)
 					return
 				}
+				for _, m := range req.Messages {
+					if len(m.ToolCalls) > 0 && m.ReasoningContent == "" {
+						t.Error("missing thinking backstop")
+					}
+				}
 				if req.Stream != stream {
 					t.Error("wrong transport")
 				}
@@ -122,7 +127,7 @@ func TestOpenAIPairRepairAtTransport(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			p, err := NewProvider(Config{Format: FormatOpenAI, BaseURL: srv.URL, Model: "test", APIKey: "test"})
+			p, err := NewProvider(Config{Format: FormatOpenAI, BaseURL: srv.URL, Model: "test", APIKey: "test", ThinkingType: "enabled"})
 			if err != nil {
 				t.Fatal(err)
 			}

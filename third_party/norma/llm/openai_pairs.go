@@ -2,6 +2,28 @@ package llm
 
 import "log"
 
+const reasoningElidedPlaceholder = "(reasoning elided by context compaction)"
+
+// Keep the local batch-boundary repair, then apply the v0.4.2 thinking backstop
+// to the request projection only. Never replace real reasoning or mutate history.
+func sanitizeOpenAIMessages(messages []oaMessage, thinking bool) []oaMessage {
+	out := pairOpenAIMessages(messages)
+	if !thinking {
+		return out
+	}
+	filled := 0
+	for i := range out {
+		if out[i].Role == "assistant" && len(out[i].ToolCalls) > 0 && out[i].ReasoningContent == "" {
+			out[i].ReasoningContent = reasoningElidedPlaceholder
+			filled++
+		}
+	}
+	if filled > 0 {
+		log.Printf("[openai] repaired request missing reasoning: tool_batches=%d", filled)
+	}
+	return out
+}
+
 // pairOpenAIMessages validates the serialized protocol, after all context
 // projections. Never mutate shared history or move results across message turns.
 func pairOpenAIMessages(messages []oaMessage) []oaMessage {
