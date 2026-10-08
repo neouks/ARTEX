@@ -44,3 +44,22 @@ func TestDeleteEndpointPathPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteEndpointSeedIsIdempotent(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	const name = "[内置] 删除类接口路径"
+	if err := d.seedDefaultInterceptRulesV3(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.seedDefaultInterceptRulesV3(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := d.QueryRow(`SELECT count(*) FROM intercept_rules WHERE name=$1`, name).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("count=%d err=%v", n, err)
+	}
+}

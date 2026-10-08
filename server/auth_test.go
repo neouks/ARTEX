@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -80,5 +81,52 @@ func TestValidatePassword(t *testing.T) {
 				t.Fatalf("validatePassword(%q)=%q, wantErr=%v", tc.pw, got, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestAuthInitConcurrentCannotOverwrite(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	old, exists, err := m.pg.GetSetting(authPassKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if exists {
+			m.pg.SetSetting(authPassKey, old)
+		} else {
+			m.pg.Exec(`DELETE FROM settings WHERE key=$1`, authPassKey)
+		}
+	}()
+	if _, err := m.pg.Exec(`DELETE FROM settings WHERE key=$1`, authPassKey); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{m: m, jwtKey: []byte("sync-only-test-key-not-production")}
+	var wg sync.WaitGroup
+	codes := make(chan int, 8)
+	for i := 0; i < cap(codes); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			s.authInit(w, httptest.NewRequest("POST", "/api/auth/init", strings.NewReader(`{"password":"sync-test-password"}`)))
+			codes <- w.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	success := 0
+	for code := range codes {
+		if code == 200 {
+			success++
+		} else if code != 403 {
+			t.Fatalf("unexpected status %d", code)
+		}
+	}
+	if success != 1 {
+		t.Fatalf("successful initializations=%d", success)
 	}
 }

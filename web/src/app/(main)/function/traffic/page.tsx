@@ -277,6 +277,7 @@ export default function TrafficPage() {
         setDeleteMode(null);
         setSelected(null);
         setDetail(null);
+        setSelectedFlows(new Set());
         if (mode !== "filter") {
           setSelectedHosts([]);
           setPickerOpen(false);

@@ -44,6 +44,9 @@ import { mockFindingExport } from "./finding-export";
 import { MockFindingTraffic } from "./finding-traffic";
 import { mockToolCalls } from "./tool-calls";
 
+import { MockTraffic } from "./traffic";
+
+const mockTraffic = new MockTraffic(D.traffic, D.trafficDetail);
 const findingTraffic = new MockFindingTraffic();
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
@@ -3228,10 +3231,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
 
   // ── traffic / audit / settings ──
   if (path === "/audit") return D.audit;
-  if (path === "/traffic" && m === "DELETE") return { deleted: 0 };
-  if (path === "/traffic/hosts" && m === "DELETE") return { deleted: (b.hosts as unknown[])?.length ?? 0 };
-  if (path === "/traffic/hosts") return { hosts: D.trafficHosts };
-  if (path === "/traffic") return D.traffic;
+  if (path === "/traffic" && m === "DELETE") {
+    const host = q.get("host")?.trim();
+    if (!host) throw new Error("host required");
+    return mockTraffic.remove(host);
+  }
+  if (path === "/traffic/all" && m === "DELETE") return mockTraffic.remove();
+  if (path === "/traffic/hosts" && m === "DELETE") return mockTraffic.remove(undefined, (b.hosts as string[]) ?? []);
+  if (path === "/traffic/hosts") return mockTraffic.hosts();
+  if (path === "/traffic") return mockTraffic.page(q);
   if (path === "/traffic/exchange") return D.trafficDetail;
   if (path === "/settings" && m === "GET") return D.settings;
   if (path === "/settings" && m === "PUT") {

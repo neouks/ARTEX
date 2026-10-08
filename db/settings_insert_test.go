@@ -44,3 +44,34 @@ func TestInsertSettingIfAbsentDoesNotOverwrite(t *testing.T) {
 		t.Fatalf("值被覆盖成 %q，应保持 %q", got, "first")
 	}
 }
+
+func TestInsertSettingIfAbsentConcurrent(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	key := fmt.Sprintf("test.insert_race.%d", time.Now().UnixNano())
+	defer d.Exec(`DELETE FROM settings WHERE key=$1`, key)
+	type result struct {
+		inserted bool
+		err      error
+	}
+	results := make(chan result, 12)
+	for i := 0; i < cap(results); i++ {
+		go func() { ok, err := d.InsertSettingIfAbsent(key, "winner"); results <- result{ok, err} }()
+	}
+	winners := 0
+	for i := 0; i < cap(results); i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if r.inserted {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winners=%d", winners)
+	}
+}
